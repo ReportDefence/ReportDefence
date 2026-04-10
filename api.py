@@ -895,61 +895,53 @@ def health():
 
 
 # =============================================================================
-# GOOGLE AUTH
+# GOOGLE AUTH — via Supabase
 # =============================================================================
 
-class GoogleAuthBody(BaseModel):
-    id_token: str
+class SupabaseAuthBody(BaseModel):
+    access_token: str
+    email: str
+    full_name: str = ""
+
+@app.post("/auth/supabase")
+def supabase_login(body: SupabaseAuthBody):
+    if not body.email:
+        raise HTTPException(status_code=400, detail="Email required")
+
+    db   = _load_db()
+    user = next((u for u in db["users"].values() if u["email"] == body.email), None)
+
+    if not user:
+        user_id = str(uuid.uuid4())
+        db["users"][user_id] = {
+            "id":         user_id,
+            "full_name":  body.full_name or body.email,
+            "email":      body.email,
+            "password":   "",
+            "role":       "client",
+            "created_at": datetime.utcnow().isoformat(),
+            "client_ids": [],
+            "auth_provider": "google",
+        }
+        _save_db(db)
+        user = db["users"][user_id]
+
+    token = create_token(user["id"], user["role"])
+    return {
+        "access_token": token,
+        "token": token,
+        "user": {
+            "id":        user["id"],
+            "full_name": user["full_name"],
+            "email":     user["email"],
+            "role":      user["role"],
+        }
+    }
+
 
 @app.post("/auth/google")
-def google_login(body: GoogleAuthBody):
-    try:
-        idinfo = google_id_token.verify_oauth2_token(
-            body.id_token,
-            google_requests.Request(),
-            clock_skew_in_seconds=10
-        )
-        email     = idinfo.get("email")
-        full_name = idinfo.get("name", email)
-        google_sub = idinfo.get("sub")
-
-        if not email:
-            raise HTTPException(status_code=400, detail="Invalid Google token")
-
-        db   = _load_db()
-        user = next((u for u in db["users"].values() if u["email"] == email), None)
-
-        if not user:
-            user_id = str(uuid.uuid4())
-            db["users"][user_id] = {
-                "id":         user_id,
-                "full_name":  full_name,
-                "email":      email,
-                "password":   "",
-                "role":       "client",
-                "created_at": datetime.utcnow().isoformat(),
-                "client_ids": [],
-                "google_sub": google_sub,
-            }
-            _save_db(db)
-            user = db["users"][user_id]
-
-        token = create_token(user["id"], user["role"])
-        return {
-            "access_token": token,
-            "token": token,
-            "user": {
-                "id":        user["id"],
-                "full_name": user["full_name"],
-                "email":     user["email"],
-                "role":      user["role"],
-            }
-        }
-
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid Google token: {str(e)}")
-
-
+def google_login(body: SupabaseAuthBody):
+    return supabase_login(body)
 # =============================================================================
 # HELPERS
 # =============================================================================
