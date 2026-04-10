@@ -168,7 +168,13 @@ app = FastAPI(title="Report Defence API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten in production
+    allow_origins=[
+        "https://reportdefence.com",
+        "https://www.reportdefence.com",
+        "https://4d383886-de3b-4f5a-906b-e80750cf3c2c.lovableproject.com",
+        "https://credit-shield-ui.lovable.app",
+        "https://id-preview--4d383886-de3b-4f5a-906b-e80750cf3c2c.lovable.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
