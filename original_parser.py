@@ -8,6 +8,7 @@ from typing import Any
 BUREAUS = ["transunion", "experian", "equifax"]
 
 
+
 # =========================
 # PDF EXTRACTION
 # =========================
