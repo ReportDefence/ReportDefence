@@ -1,7 +1,7 @@
 """
 REPORT DEFENCE — FastAPI backend (Supabase edition)
 ====================================================
-
+Replace the old JSON-file version with this file.
 
 Required env vars in Railway:
   SUPABASE_URL          — e.g. https://ivtigtxdesfjbuzxqohe.supabase.co
@@ -228,6 +228,15 @@ def enrich_client(c: dict) -> dict:
     latest = max(jobs, key=lambda j: j["created_at"], default=None) if jobs else None
     total_attacks = sum(j.get("attack_count", 0) for j in jobs)
     has_letters = any(j.get("letters_generated") for j in jobs)
+    latest_job_summary = {
+        "job_id": latest["job_id"],
+        "report_date": latest.get("report_date", ""),
+        "source": latest.get("source", ""),
+        "created_at": latest["created_at"],
+        "scores": latest.get("scores", {}),
+        "attack_count": latest.get("attack_count", 0),
+        "letters_generated": latest.get("letters_generated", False),
+    } if latest else None
     return {
         "id": c["id"],
         "full_name": c["full_name"],
@@ -236,6 +245,7 @@ def enrich_client(c: dict) -> dict:
         "total_jobs": len(jobs),
         "last_report": latest.get("report_date", "") if latest else "",
         "last_scores": latest.get("scores", {}) if latest else None,
+        "latest_job": latest_job_summary,
         "attack_count": total_attacks,
         "has_letters": has_letters,
         "status": "analyzed" if jobs else "active",
@@ -243,7 +253,11 @@ def enrich_client(c: dict) -> dict:
 
 @app.get("/clients")
 async def list_clients(user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("*").eq("operator_id", user["id"]).order("created_at", desc=True).execute()
+    # Operators see all clients, clients see only their own
+    if user.get("role") == "operator":
+        res = sb.table("api_clients").select("*").order("created_at", desc=True).execute()
+    else:
+        res = sb.table("api_clients").select("*").eq("operator_id", user["id"]).order("created_at", desc=True).execute()
     return [enrich_client(c) for c in (res.data or [])]
 
 @app.post("/clients", status_code=201)
