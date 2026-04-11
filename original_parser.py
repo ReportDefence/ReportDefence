@@ -303,6 +303,11 @@ def parse_raw_account_blocks(lines: list[str]) -> list[dict[str, Any]]:
                 "status_raw": "",
                 "account_type_raw": "",
                 "account_type_detail_raw": "",
+                "bureau_code_raw": "",
+                "monthly_payment_raw": "",
+                "no_of_months_raw": "",
+                "high_credit_raw": "",
+                "credit_limit_raw": "",
                 "payment_raw": "",
                 "balance_raw": "",
                 "past_due_raw": "",
@@ -331,6 +336,21 @@ def parse_raw_account_blocks(lines: list[str]) -> list[dict[str, Any]]:
 
                 elif current.startswith("Account Type:"):
                     block["account_type_raw"] = extract_value(current, "Account Type:")
+
+                elif current.startswith("Bureau Code:"):
+                    block["bureau_code_raw"] = extract_value(current, "Bureau Code:")
+
+                elif current.startswith("Monthly Payment:"):
+                    block["monthly_payment_raw"] = extract_value(current, "Monthly Payment:")
+
+                elif current.startswith("No. of Months (terms):"):
+                    block["no_of_months_raw"] = extract_value(current, "No. of Months (terms):")
+
+                elif current.startswith("High Credit:"):
+                    block["high_credit_raw"] = extract_value(current, "High Credit:")
+
+                elif current.startswith("Credit Limit:"):
+                    block["credit_limit_raw"] = extract_value(current, "Credit Limit:")
 
                 elif current.startswith("Payment Status:"):
                     block["payment_raw"] = extract_value(current, "Payment Status:")
@@ -439,6 +459,14 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
     balances  = split_multi_values(raw_acc["balance_raw"])
     past_dues = split_multi_values(raw_acc["past_due_raw"])
 
+    # New fields — split per bureau
+    bureau_codes    = split_multi_values(raw_acc.get("bureau_code_raw", ""))
+    monthly_pays    = split_multi_values(raw_acc.get("monthly_payment_raw", ""))
+    no_of_months    = split_multi_values(raw_acc.get("no_of_months_raw", ""))
+    high_credits    = split_multi_values(raw_acc.get("high_credit_raw", ""))
+    credit_limits   = split_multi_values(raw_acc.get("credit_limit_raw", ""))
+    acct_type_raw   = raw_acc.get("account_type_raw", "")
+
     # Dates are shared across bureaus (the PDF collapses them per row)
     # We take the first value for each date field as the canonical one,
     # and store all values for cross-bureau comparison if needed.
@@ -485,6 +513,12 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
             "balance":        balances[idx]  if idx < len(balances)  else "",
             "past_due":       past_dues[idx] if idx < len(past_dues) else "",
             "comments":       comments,
+            "account_type":        acct_type_raw,
+            "bureau_code":         bureau_codes[idx]  if idx < len(bureau_codes)  else "",
+            "monthly_payment":     monthly_pays[idx]  if idx < len(monthly_pays)  else "",
+            "no_of_months":        no_of_months[idx]  if idx < len(no_of_months)  else "",
+            "high_credit":         high_credits[idx]  if idx < len(high_credits)  else "",
+            "credit_limit":        credit_limits[idx] if idx < len(credit_limits) else "",
             "date_opened":       date_opened_vals[idx]      if idx < len(date_opened_vals)      else (date_opened_vals[0]      if date_opened_vals      else ""),
             "date_last_active":  date_last_active_vals[idx] if idx < len(date_last_active_vals) else (date_last_active_vals[0] if date_last_active_vals else ""),
             "date_of_last_payment": dolp_vals[idx]          if idx < len(dolp_vals)             else (dolp_vals[0]             if dolp_vals             else ""),
