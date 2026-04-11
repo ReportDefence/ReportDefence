@@ -387,10 +387,14 @@ def parse_raw_account_blocks(lines: list[str]) -> list[dict[str, Any]]:
                     year_tokens  = []
                     ph_by_bureau = {}
                     k = j + 1
-                    while k < len(lines) and k < j + 8:
+                    while k < len(lines) and k < j + 15:
                         cl = lines[k].strip()
                         if "Account #:" in cl or cl.startswith("http") or cl == "":
                             break
+                        # Skip the Legend line and creditor name lines
+                        if "legend" in cl.lower() or (cl and not cl[0].isdigit() and not any(cl.startswith(b) for b in ("TransUnion","Experian","Equifax","Month","Year"))):
+                            k += 1
+                            continue
                         cl_lower = cl.lower()
                         if cl_lower.startswith("month"):
                             raw_m = cl[len("month"):].strip()
@@ -406,7 +410,7 @@ def parse_raw_account_blocks(lines: list[str]) -> list[dict[str, Any]]:
                             for bureau_prefix in ("TransUnion", "Experian", "Equifax"):
                                 if cl.startswith(bureau_prefix):
                                     rest = cl[len(bureau_prefix):].split()
-                                    valid_vals = {"OK","CO","30","60","90","120","ND","--"}
+                                    valid_vals = {"OK","CO","30","60","90","120","150","180","ND","--"}
                                     if rest and rest[0] in valid_vals:
                                         ph_by_bureau[bureau_prefix] = rest
                                     break
