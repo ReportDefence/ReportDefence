@@ -790,7 +790,10 @@ def _round_for(attack_type: str) -> str:
     return "round_2" if attack_type in {"same_account_number_same_balance", "collector_original_creditor_pattern", "collector_original_creditor_self_declared", "multi_furnisher_same_balance", "cross_bureau_balance_conflict", "cross_bureau_payment_status_conflict", "cross_bureau_furnisher_identity_shift", "cross_bureau_account_status_conflict"} else "round_1"
 
 def _extract_scores(result: dict) -> dict:
-    return {"transunion": 0, "experian": 0, "equifax": 0}
+    s = result.get("scores", {})
+    return {"transunion": s.get("transunion", 0), "experian": s.get("experian", 0), "equifax": s.get("equifax", 0)}
+
+
 
 def _safe_slug(s: str) -> str:
     import re as _re
