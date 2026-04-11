@@ -1,7 +1,6 @@
 """
 REPORT DEFENCE — FastAPI backend (Supabase edition)
 ====================================================
-Replace the old JSON-file version with this file.
 
 Required env vars in Railway:
   SUPABASE_URL          — e.g. https://ivtigtxdesfjbuzxqohe.supabase.co
@@ -516,9 +515,14 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
     if body.bureau and body.category and body.selected_accounts:
         bureau = body.bureau.lower()
         cat_map = {
-            "Collections & Chargeoffs": "collections_chargeoffs",
-            "Late Payments": "late_payments",
+            # New group names (current standard)
+            "Collections":      "collections",
+            "Charge Offs":      "charge_offs",
+            "Late Payments":    "late_payments",
             "Other Derogatory": "other_derogatory",
+            # Legacy display names — kept for backward compatibility
+            "Collections & Chargeoffs": "collections",
+            "Collections & Charge Offs": "collections",
         }
         category = cat_map.get(body.category, body.category.lower().replace(" ", "_"))
         selected_nums = {a.get("account_number", "") for a in body.selected_accounts}
