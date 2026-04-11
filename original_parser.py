@@ -8,7 +8,6 @@ from typing import Any
 BUREAUS = ["transunion", "experian", "equifax"]
 
 
-
 # =========================
 # PDF EXTRACTION
 # =========================
@@ -466,7 +465,7 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
     no_of_months    = split_multi_values(raw_acc.get("no_of_months_raw", ""))
     high_credits    = split_multi_values(raw_acc.get("high_credit_raw", ""))
     credit_limits   = split_multi_values(raw_acc.get("credit_limit_raw", ""))
-    acct_type_raw   = raw_acc.get("account_type_raw", "")
+    acct_types      = split_multi_values(raw_acc.get("account_type_raw", ""))
 
     # Dates are shared across bureaus (the PDF collapses them per row)
     # We take the first value for each date field as the canonical one,
@@ -514,7 +513,7 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
             "balance":        balances[idx]  if idx < len(balances)  else "",
             "past_due":       past_dues[idx] if idx < len(past_dues) else "",
             "comments":       comments,
-            "account_type":        acct_type_raw,
+            "account_type":        acct_types[idx]    if idx < len(acct_types)    else "",
             "bureau_code":         bureau_codes[idx]  if idx < len(bureau_codes)  else "",
             "monthly_payment":     monthly_pays[idx]  if idx < len(monthly_pays)  else "",
             "no_of_months":        no_of_months[idx]  if idx < len(no_of_months)  else "",
