@@ -348,16 +348,57 @@ async def upload_report(
     for bureau, accts in neg.items():
         negatives_out[bureau] = [
             {
-                "name":               a.get("name", ""),
-                "account_number":     a.get("account_number", ""),
-                "negative_type":      a.get("negative_type", ""),
-                "attack_type":        a.get("attack_type", ""),
-                "dofd_estimated":     a.get("dofd_estimated"),
-                "fcra_expiration":    a.get("fcra_expiration"),
-                "late_payment_codes": a.get("late_payment_codes", []),
-                "balance":            a.get("balance", ""),
-                "status":             a.get("status", ""),
-                "payment_status":     a.get("payment_status", ""),
+                "name":                   a.get("name", ""),
+                "account_number":         a.get("account_number", ""),
+                "negative_type":          a.get("negative_type", ""),
+                "attack_type":            a.get("attack_type", ""),
+                "dofd_estimated":         a.get("dofd_estimated"),
+                "fcra_expiration":        a.get("fcra_expiration"),
+                "days_until_expiration":  a.get("days_until_expiration"),
+                "is_obsolete":            a.get("is_obsolete", False),
+                "re_aging_flag":          a.get("re_aging_flag", False),
+                "dofd_confidence":        a.get("dofd_confidence", "unknown"),
+                "late_payment_codes":     a.get("late_payment_codes", []),
+                "payment_history":        a.get("payment_history", []),
+                "balance":                a.get("balance", ""),
+                "past_due":               a.get("past_due", ""),
+                "status":                 a.get("status", ""),
+                "payment_status":         a.get("payment_status", ""),
+                "date_opened":            a.get("date_opened", ""),
+                "date_last_active":       a.get("date_last_active", ""),
+                "date_of_last_payment":   a.get("date_of_last_payment", ""),
+                "last_reported":          a.get("last_reported", ""),
+                "account_type_detail":    a.get("account_type_detail", ""),
+                "comments":               a.get("comments", ""),
+                "has_30_in_history":      a.get("has_30_in_history", False),
+                "has_60_in_history":      a.get("has_60_in_history", False),
+                "has_90_in_history":      a.get("has_90_in_history", False),
+            }
+            for a in accts
+        ]
+
+    # Full inventory (all accounts, not just negatives) for Bureau Inventory tab
+    inventory_out = {}
+    for bureau, accts in result.get("inventory_by_bureau", {}).items():
+        inventory_out[bureau] = [
+            {
+                "name":                 a.get("name", ""),
+                "account_number":       a.get("account_number", ""),
+                "status":               a.get("status", ""),
+                "payment_status":       a.get("payment_status", ""),
+                "balance":              a.get("balance", ""),
+                "past_due":             a.get("past_due", ""),
+                "date_opened":          a.get("date_opened", ""),
+                "date_last_active":     a.get("date_last_active", ""),
+                "date_of_last_payment": a.get("date_of_last_payment", ""),
+                "last_reported":        a.get("last_reported", ""),
+                "account_type_detail":  a.get("account_type_detail", ""),
+                "comments":             a.get("comments", ""),
+                "late_payment_codes":   a.get("late_payment_codes", []),
+                "payment_history":      a.get("payment_history", []),
+                "has_30_in_history":    a.get("has_30_in_history", False),
+                "has_60_in_history":    a.get("has_60_in_history", False),
+                "has_90_in_history":    a.get("has_90_in_history", False),
             }
             for a in accts
         ]
@@ -369,11 +410,14 @@ async def upload_report(
         "source":               source,
         "scores":               scores,
         "negatives_by_bureau":  negatives_out,
+        "inventory_by_bureau":  inventory_out,
+        "personal_info":        result.get("personal_info", {}),
         "personal_info_issues": result.get("personal_info_issues", []),
         "attacks":              attacks,
         "attack_count":         len(attacks),
         "letter_groups":        letter_groups,
         "inquiry_attacks":      result.get("inquiry_attacks", []),
+        "inquiries":            result.get("inquiries", []),
     }
 
     db["jobs"][job_id] = {
@@ -390,9 +434,13 @@ async def upload_report(
         "letters_generated":    False,
         "letter_files":         [],
         "negatives_by_bureau":  negatives_out,
+        "inventory_by_bureau":  inventory_out,
+        "personal_info":        result.get("personal_info", {}),
         "personal_info_issues": result.get("personal_info_issues", []),
         "letter_input_engine":  _serialize_letter_input(letters_in),
         "attacks":              attacks,
+        "inquiries":            result.get("inquiries", []),
+        "inquiry_attacks":      result.get("inquiry_attacks", []),
     }
 
     if "job_ids" not in client:
