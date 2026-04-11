@@ -1,7 +1,7 @@
 """
 REPORT DEFENCE — FastAPI backend (Supabase edition)
 ====================================================
-Replace the old JSON-file version with this file.
+
 
 Required env vars in Railway:
   SUPABASE_URL          — e.g. https://ivtigtxdesfjbuzxqohe.supabase.co
@@ -62,18 +62,18 @@ async def get_current_user(request: Request):
         payload = decode_token(auth[7:])
     except Exception:
         raise HTTPException(401, "Invalid token")
-    res = sb.table("api_users").select("*").eq("id", payload["sub"]).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_users").select("*").eq("id", payload["sub"]).execute()
+    if not res.data or len(res.data) == 0:
         raise HTTPException(401, "User not found")
-    return res.data
+    return res.data[0]
 
 # ─── Startup: ensure admin exists ─────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if ADMIN_PASS:
-        existing = sb.table("api_users").select("id").eq("email", ADMIN_EMAIL).maybe_single().execute()
-        if not existing.data:
+        existing = sb.table("api_users").select("id").eq("email", ADMIN_EMAIL).execute()
+        if not existing.data or len(existing.data) == 0:
             sb.table("api_users").insert({
                 "email": ADMIN_EMAIL,
                 "full_name": "Arturo",
@@ -130,8 +130,8 @@ def user_response(u: dict):
 
 @app.post("/auth/register")
 async def register(body: RegisterBody):
-    existing = sb.table("api_users").select("id").eq("email", body.email).maybe_single().execute()
-    if existing.data:
+    existing = sb.table("api_users").select("id").eq("email", body.email).execute()
+    if existing.data and len(existing.data) > 0:
         raise HTTPException(409, "Email already registered")
     role = "operator" if body.operator_code == OPERATOR_CODE else body.role
     res = sb.table("api_users").insert({
@@ -146,17 +146,17 @@ async def register(body: RegisterBody):
 
 @app.post("/auth/login")
 async def login(body: LoginBody):
-    res = sb.table("api_users").select("*").eq("email", body.email).maybe_single().execute()
-    if not res.data or not verify_password(body.password, res.data["hashed_password"]):
+    res = sb.table("api_users").select("*").eq("email", body.email).execute()
+    if not res.data or len(res.data) == 0 or not verify_password(body.password, res.data[0]["hashed_password"]):
         raise HTTPException(401, "Invalid credentials")
-    u = res.data
+    u = res.data[0]
     return {"access_token": create_token(u["id"], u["role"]), "user": user_response(u)}
 
 @app.post("/auth/supabase")
 async def auth_supabase(body: SupabaseAuthBody):
-    existing = sb.table("api_users").select("*").eq("email", body.email).maybe_single().execute()
-    if existing.data:
-        u = existing.data
+    existing = sb.table("api_users").select("*").eq("email", body.email).execute()
+    if existing.data and len(existing.data) > 0:
+        u = existing.data[0]
     else:
         res = sb.table("api_users").insert({
             "email": body.email,
@@ -250,10 +250,10 @@ async def create_client(body: ClientCreate, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}")
 async def get_client(client_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("*").eq("id", client_id).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_clients").select("*").eq("id", client_id).execute()
+    if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Client not found")
-    c = res.data
+    c = res.data[0]
     job_ids = c.get("job_ids") or []
     jobs = []
     if job_ids:
@@ -294,10 +294,10 @@ async def delete_client(client_id: str, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}/history")
 async def client_history(client_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("job_ids").eq("id", client_id).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
+    if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Client not found")
-    job_ids = res.data.get("job_ids") or []
+    job_ids = res.data[0].get("job_ids") or []
     if not job_ids:
         return []
     jr = sb.table("api_jobs").select("*").in_("job_id", job_ids).order("created_at", desc=True).execute()
@@ -315,10 +315,10 @@ async def client_history(client_id: str, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}/letters")
 async def client_letters(client_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("job_ids").eq("id", client_id).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
+    if not res.data or len(res.data) == 0:
         return []
-    job_ids = res.data.get("job_ids") or []
+    job_ids = res.data[0].get("job_ids") or []
     if not job_ids:
         return []
     jr = sb.table("api_jobs").select("job_id, letter_files, letters_generated").in_("job_id", job_ids).execute()
@@ -334,10 +334,10 @@ async def client_letters(client_id: str, user=Depends(get_current_user)):
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_jobs").select("*").eq("job_id", job_id).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
+    if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Job not found")
-    return res.data
+    return res.data[0]
 
 @app.post("/upload-report")
 async def upload_report(
@@ -445,9 +445,9 @@ async def upload_report(
     sb.table("api_jobs").insert(job_data).execute()
 
     # Update client's job_ids array
-    client_res = sb.table("api_clients").select("job_ids").eq("id", client_id).maybe_single().execute()
-    if client_res.data:
-        current_ids = client_res.data.get("job_ids") or []
+    client_res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
+    if client_res.data and len(client_res.data) > 0:
+        current_ids = client_res.data[0].get("job_ids") or []
         current_ids.append(job_id)
         sb.table("api_clients").update({"job_ids": current_ids}).eq("id", client_id).execute()
 
@@ -481,10 +481,10 @@ class GenerateLettersBody(BaseModel):
 
 @app.post("/generate-letters")
 async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_user)):
-    res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).execute()
+    if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Job not found")
-    job = res.data
+    job = res.data[0]
 
     from original_parser import build_dispute_letter_engine
 
@@ -545,17 +545,17 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
 
 @app.get("/portal/overview")
 async def portal_overview(user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("*").eq("user_id", user["id"]).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_clients").select("*").eq("user_id", user["id"]).execute()
+    if not res.data or len(res.data) == 0:
         raise HTTPException(404, "No client record linked")
-    return enrich_client(res.data)
+    return enrich_client(res.data[0])
 
 @app.get("/portal/letters")
 async def portal_letters(user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("job_ids").eq("user_id", user["id"]).maybe_single().execute()
-    if not res.data:
+    res = sb.table("api_clients").select("job_ids").eq("user_id", user["id"]).execute()
+    if not res.data or len(res.data) == 0:
         return []
-    job_ids = res.data.get("job_ids") or []
+    job_ids = res.data[0].get("job_ids") or []
     if not job_ids:
         return []
     jr = sb.table("api_jobs").select("job_id, letter_files").in_("job_id", job_ids).execute()
