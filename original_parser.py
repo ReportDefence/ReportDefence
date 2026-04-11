@@ -2654,30 +2654,20 @@ def get_attack_priority(severity_score: int) -> str:
 
 
 def get_recommended_round(severity_score: int, attack_type: str) -> str:
-    if attack_type in {
-        "same_account_number_same_balance",
-        "collector_original_creditor_pattern",
-        "collector_original_creditor_self_declared",
-        "multi_furnisher_same_balance",
-        "cross_bureau_balance_conflict",
-        "cross_bureau_payment_status_conflict",
-        "cross_bureau_furnisher_identity_shift",
-        "cross_bureau_account_status_conflict",
-    }:
-        return "round_2"
-    if attack_type in {
-        "duplicate_account_number",
-        "late_collection_conflict",
-        "absent_bureau_reporting_inconsistency",
-        "same_account_number_different_furnisher",
-        "obsolete_account_7yr_limit",
-        "potential_re_aging",
-        "dofd_unknown_verification_required",
-        "requires_basic_verification",
-        "late_payment_history_dispute",
-        "cross_bureau_payment_history_date_conflict",
-    }:
-        return "round_1"
+    # ─────────────────────────────────────────────────────────────────────────
+    # RULE: Every negative account starts at Round 1, always.
+    #
+    # Round escalation (Round 2 → Round 3 → CFPB) is determined by the
+    # bureau's response to a prior dispute — not by the attack type.
+    # The attack type tells us HOW to argue, not WHEN to send.
+    #
+    # Round 1  → first dispute, no prior bureau response on record
+    # Round 2  → bureau responded "verified" or did not respond in 30 days
+    # Round 3  → bureau verified again without real documentation
+    # CFPB     → reinsertion, ignored disputes, bad-faith pattern
+    #
+    # Escalation is handled by compare_rounds() when a prior result exists.
+    # ─────────────────────────────────────────────────────────────────────────
     return "round_1"
 
 
@@ -3308,16 +3298,17 @@ def build_letter_input_engine(
     - Also includes any negative account that has NO attack detected yet,
       flagging it as 'requires_basic_verification' (round 1 — do not assume
       anything, just demand the bureau verify the data under 15 USC 1681i).
-    - Groups by negative type: collections_chargeoffs | late_payments | other_derogatory.
+    - Groups by negative type: collections | charge_offs | late_payments | other_derogatory.
     - Deduplicates per (furnisher_name, account_number), keeping highest-ranked attack.
     """
     result: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
     for bureau, strategies in strategy_engine.items():
         grouped: dict[str, list[dict[str, Any]]] = {
-            "collections_chargeoffs": [],
-            "late_payments": [],
-            "other_derogatory": [],
+            "collections":      [],   # collection + paid_collection (misma carta)
+            "charge_offs":      [],   # charge_off + charge_off_deficiency
+            "late_payments":    [],   # late_payment
+            "other_derogatory": [],   # repossession, bankruptcy, child_support, etc.
         }
 
         dedupe_map: dict[tuple[str, str], dict[str, Any]] = {}
@@ -3407,8 +3398,10 @@ def build_letter_input_engine(
             entry.pop("attack_rank", None)
             negative_type = entry.get("negative_type", "")
 
-            if negative_type in {"collection", "charge_off"}:
-                grouped["collections_chargeoffs"].append(entry)
+            if negative_type in {"collection", "paid_collection"}:
+                grouped["collections"].append(entry)
+            elif negative_type in {"charge_off", "charge_off_deficiency"}:
+                grouped["charge_offs"].append(entry)
             elif negative_type == "late_payment":
                 grouped["late_payments"].append(entry)
             else:
@@ -4582,7 +4575,7 @@ def build_dispute_letter_engine(
     Return structure:
         {
             "transunion": {
-                "collections_chargeoffs": {"round_1": "...", "round_2": "..."},
+                "collections": {"round_1": "..."}, "charge_offs": {"round_1": "..."},
                 "late_payments":          {"round_1": "...", "round_2": "..."},
                 "other_derogatory":       {"round_1": "...", "round_2": "..."},
             },
@@ -4590,7 +4583,8 @@ def build_dispute_letter_engine(
         }
 
     Groups:
-        collections_chargeoffs — FDCPA + FCRA, chain-of-title, DOFD attacks
+        collections — active + paid collections
+        charge_offs   — charge-off accounts
         late_payments          — payment history accuracy, §1681e(b)
         other_derogatory       — repossession (UCC Art.9), child support (§1681s-1),
                                  bankruptcy (§1681c), charge-off deficiency, paid collection
@@ -4606,13 +4600,13 @@ def build_dispute_letter_engine(
     def _tpl_idx(bureau: str, group: str, round_key: str, n_templates: int) -> int:
         # Sequential assignment within each bureau: 3 groups × 2 rounds = 6 slots.
         # With 6 R1 templates and 3 R2 templates this guarantees zero intra-bureau dups.
-        group_pos   = {"collections_chargeoffs": 0, "late_payments": 1, "other_derogatory": 2}
+        group_pos   = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}
         round_pos   = 0 if round_key == "round_1" else 1
         g           = group_pos.get(group, 0)
         slot        = g * 2 + round_pos          # 0-5 for R1, 0-2 for R2
         return slot % n_templates
 
-    group_order = ["collections_chargeoffs", "late_payments", "other_derogatory"]
+    group_order = ["collections", "charge_offs", "late_payments", "other_derogatory"]
 
     for bureau, groups in letter_input_engine.items():
         bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
@@ -4628,8 +4622,10 @@ def build_dispute_letter_engine(
                 continue
 
             # Split by round
-            round_1_items = [i for i in items_in_group if i.get("recommended_round","round_1") == "round_1"]
-            round_2_items = [i for i in items_in_group if i.get("recommended_round","round_1") == "round_2"]
+            # All items go to round_1. Round 2 is only generated after a bureau
+            # response has been recorded. Escalation is handled by compare_rounds().
+            round_1_items = items_in_group
+            round_2_items: list = []
 
             group_letters: dict[str, str] = {}
 
@@ -4666,7 +4662,7 @@ def build_dispute_letter_engine(
 
                 # Personal information section (Round 1 only, first group only)
                 pi_section = ""
-                if not is_r2 and group_key == "collections_chargeoffs" and personal_info and personal_info_issues:
+                if not is_r2 and group_key == "collections" and personal_info and personal_info_issues:
                     pi_section = build_personal_info_section(
                         personal_info, personal_info_issues, bureau
                     )
@@ -4720,9 +4716,10 @@ def build_dispute_letter_engine(
 def _group_context(group_key: str) -> str:
     """Plain-language context string for group — used in opening templates."""
     return {
-        "collections_chargeoffs": "collection and charged-off accounts",
-        "late_payments":          "late payment accounts",
-        "other_derogatory":       "derogatory accounts",
+        "collections":      "collection accounts",
+        "charge_offs":      "charged-off accounts",
+        "late_payments":    "late payment accounts",
+        "other_derogatory": "derogatory accounts",
     }.get(group_key, "accounts")
 # =========================
 # STUDENT LOAN COMPLEX ENGINE
@@ -5134,7 +5131,6 @@ def detect_medical_debt_attacks(
       4. medical_debt_state_law      — in a state with medical debt reporting ban
       5. medical_debt_accuracy       — general accuracy attack on any medical debt
     """
-    from original_parser import parse_date_field
     import datetime as _dt
 
     attacks: list[dict[str, Any]] = []
