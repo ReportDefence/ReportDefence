@@ -750,7 +750,17 @@ def portal_letters(user: dict = Depends(get_current_user)):
                 all_letters.append({**lf, "job_id": jid, "report_date": job["report_date"]})
     return all_letters
 
+# =============================================================================
+# JOB DETAIL
+# =============================================================================
 
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, user: dict = Depends(get_current_user)):
+    db  = _load_db()
+    job = db["jobs"].get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 # =============================================================================
 # HEALTH CHECK
 # =============================================================================
