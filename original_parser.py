@@ -3495,7 +3495,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 1 — Personal discovery, documentation-focused
     (
         "To Whom It May Concern,\n\n"
-        "My name is {consumer_name}. I sat down recently to go through my credit "
+        "I sat down recently to go through my credit "
         "report carefully, and I found {count} that {they_verb} not being reported "
         "the way I believe {they_verb} supposed to be. I am writing to formally "
         "dispute {these_items} and to ask that you conduct a proper reinvestigation. "
@@ -3517,7 +3517,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 2 — Rights-first, firm tone
     (
         "To Whom It May Concern,\n\n"
-        "I am {consumer_name}, and I am writing to formally exercise my rights "
+        "I am writing to formally exercise my rights "
         "under the Fair Credit Reporting Act. I have reviewed my credit report "
         "and identified {count} that I believe {they_verb} either inaccurate or "
         "cannot be verified. Under 15 U.S.C. \u00a71681i, I have the right to "
@@ -3537,7 +3537,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 3 — Conversational, verification-first
     (
         "To Whom It May Concern,\n\n"
-        "My name is {consumer_name} and I recently went through my credit report "
+        "I recently went through my credit report "
         "line by line. I found {count} that raised concerns for me — I do not "
         "believe {they_verb} being reported correctly, and I am formally asking "
         "that you look into {these_items}."
@@ -3556,7 +3556,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 4 — Direct, account-focused
     (
         "To Whom It May Concern,\n\n"
-        "I am {consumer_name}, and I am disputing {count} on my credit report "
+        "I am disputing {count} on my credit report "
         "that I believe {they_verb} either inaccurate or not verifiable. "
         "I am formally requesting that you reinvestigate {these_items} "
         "under 15 U.S.C. \u00a71681i."
@@ -3575,7 +3575,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 5 — Accuracy obligation emphasis
     (
         "To Whom It May Concern,\n\n"
-        "This letter is from {consumer_name}. I am writing to formally dispute "
+        "I am writing to formally dispute "
         "{these_items} that appear on my credit report. The Fair Credit Reporting "
         "Act makes it clear that every piece of information in my credit file "
         "must be accurate, complete, and verifiable (15 U.S.C. \u00a71681e(b)). "
@@ -3593,7 +3593,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 6 — Deletion demand, strong consumer voice
     (
         "To Whom It May Concern,\n\n"
-        "My name is {consumer_name}. I have reviewed my credit report and I "
+        "I have reviewed my credit report and I "
         "found {these_items} that {they_verb} being reported inaccurately. "
         "I am writing to dispute {these_items} under the Fair Credit Reporting "
         "Act and to ask that you investigate and remove anything that cannot "
@@ -3612,7 +3612,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 7 — Thoughtful, thorough, personal
     (
         "To Whom It May Concern,\n\n"
-        "I am {consumer_name}, and I am reaching out because I found problems "
+        "I am reaching out because I found problems "
         "in my credit report that I believe need to be corrected. After reviewing "
         "my file, I identified {count} that I do not believe {they_verb} accurate "
         "or properly verifiable. I am formally requesting a reinvestigation of "
@@ -3632,7 +3632,7 @@ _OPENING_TEMPLATES_R1 = [
     # Template 8 — Matter-of-fact, FCRA-grounded
     (
         "To Whom It May Concern,\n\n"
-        "My name is {consumer_name}. I am sending this letter to dispute "
+        "I am sending this letter to dispute "
         "{count} on my credit report under the Fair Credit Reporting Act. "
         "I have gone through my report and identified {these_items} that "
         "I believe contain inaccurate or unverifiable information."
@@ -3655,7 +3655,7 @@ _OPENING_TEMPLATES_R2 = [
     # R2 Template 1 — Escalation after inadequate response
     (
         "To Whom It May Concern,\n\n"
-        "My name is {consumer_name}. I am writing a second time about {count} "
+        "I am writing a second time about {count} "
         "on my credit report. I submitted a dispute previously and received a "
         "response, but I am not satisfied with the outcome. The accounts listed "
         "below remain on my file and I do not believe a proper reinvestigation "
@@ -3676,7 +3676,7 @@ _OPENING_TEMPLATES_R2 = [
     # R2 Template 2 — Following up, documentation-demanding
     (
         "To Whom It May Concern,\n\n"
-        "I am {consumer_name}, and I am following up on a dispute I submitted "
+        "I am following up on a dispute I submitted "
         "previously regarding {count} on my credit file. I received your response, "
         "but the accounts I disputed are still showing on my report and I do not "
         "believe the investigation met the standard required by law. I am asking "
@@ -3697,7 +3697,7 @@ _OPENING_TEMPLATES_R2 = [
     # R2 Template 3 — Firm, FCRA-grounded escalation
     (
         "To Whom It May Concern,\n\n"
-        "This is {consumer_name} writing back about accounts I disputed on my "
+        "I am writing back about accounts I disputed on my "
         "credit report. The issues were not resolved to my satisfaction and "
         "I am asking you to conduct a proper investigation of {count}."
         "\n\n"
