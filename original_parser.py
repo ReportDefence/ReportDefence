@@ -6000,6 +6000,40 @@ def build_inquiry_letters(
     return letters
 
 
+def extract_scores(lines: list[str]) -> dict[str, int]:
+    """
+    Extract credit scores from IdentityIQ PDF.
+    Looks for the Credit Score section which has:
+        Credit Score:   646   628   645
+    Returns {"transunion": 646, "experian": 628, "equifax": 645}
+    """
+    import re as _re
+    scores = {"transunion": 0, "experian": 0, "equifax": 0}
+
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("credit score:"):
+            # Extract digits from this line
+            vals = _re.findall(r'\b(\d{3})\b', line)
+            if len(vals) >= 3:
+                scores["transunion"] = int(vals[0])
+                scores["experian"]   = int(vals[1])
+                scores["equifax"]    = int(vals[2])
+                break
+            # Sometimes split across next lines — scan next 3 lines
+            combined = line
+            for j in range(1, 4):
+                if i + j < len(lines):
+                    combined += " " + lines[i + j]
+            vals = _re.findall(r'\b(\d{3})\b', combined)
+            if len(vals) >= 3:
+                scores["transunion"] = int(vals[0])
+                scores["experian"]   = int(vals[1])
+                scores["equifax"]    = int(vals[2])
+            break
+
+    return scores
+
+
 def build_report(pdf_path: str) -> dict[str, Any]:
     raw_text = extract_text_from_pdf(pdf_path)
     clean_text = normalize_text(raw_text)
@@ -6011,6 +6045,9 @@ def build_report(pdf_path: str) -> dict[str, Any]:
 
     # Personal information — extracted early, before account pipeline
     personal_info, personal_info_issues = parse_and_detect_personal_info(lines)
+
+    # Credit scores
+    scores = extract_scores(lines)
 
     inventory = build_inventory_by_bureau(raw_accounts)
     inventory = normalize_inventory_final(inventory)
@@ -6057,6 +6094,7 @@ def build_report(pdf_path: str) -> dict[str, Any]:
         "raw_accounts": len(raw_accounts),
         "expanded_accounts_found": expanded_accounts_found,
         "report_date": report_date_str,
+        "scores": scores,
         "personal_info": personal_info,
         "personal_info_issues": personal_info_issues,
         "inquiries": inquiries,
