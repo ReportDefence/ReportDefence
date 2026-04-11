@@ -133,7 +133,13 @@ async def register(body: RegisterBody):
     existing = sb.table("api_users").select("id").eq("email", body.email).execute()
     if existing.data and len(existing.data) > 0:
         raise HTTPException(409, "Email already registered")
-    role = "operator" if body.operator_code == OPERATOR_CODE else body.role
+    # Only admin email or explicit operator_code + operator role can be operator
+    if body.email == ADMIN_EMAIL:
+        role = "operator"
+    elif body.operator_code == OPERATOR_CODE and body.role == "operator":
+        role = "operator"
+    else:
+        role = "client"
     res = sb.table("api_users").insert({
         "email": body.email,
         "full_name": body.full_name,
