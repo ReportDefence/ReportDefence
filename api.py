@@ -511,6 +511,21 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
     consumer_name = body.consumer_name
     report_date = job.get("report_date", "")
 
+    # ── Migrate legacy jobs that stored "collections_chargeoffs" as a single key ──
+    # Jobs uploaded before the split (collections / charge_offs) have the old key.
+    # We split them in-memory so the engine always receives the correct structure.
+    for _bureau, _groups in letter_input.items():
+        if "collections_chargeoffs" in _groups:
+            old_items = _groups.pop("collections_chargeoffs")
+            _groups.setdefault("collections", [])
+            _groups.setdefault("charge_offs", [])
+            for _item in old_items:
+                neg = _item.get("negative_type", "")
+                if neg in ("charge_off", "charge_off_deficiency"):
+                    _groups["charge_offs"].append(_item)
+                else:
+                    _groups["collections"].append(_item)
+
     # Filter by bureau/category/selected_accounts if provided
     if body.bureau and body.category and body.selected_accounts:
         bureau = body.bureau.lower()
