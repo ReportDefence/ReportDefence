@@ -3457,7 +3457,7 @@ import random as _random
 _OPENING_TEMPLATES_R1 = [
     # Version A — starts with the personal situation
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I recently went through my credit report and found {count} that I do not "
         "believe {they_verb} being reported correctly. I am writing to formally dispute "
         "{these_items} and to ask that you reinvestigate them. The Fair Credit "
@@ -3477,7 +3477,7 @@ _OPENING_TEMPLATES_R1 = [
     ),
     # Version B — starts with the legal right, then gets personal
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I am writing to dispute {count} on my credit report. Under the Fair Credit "
         "Reporting Act — specifically 15 U.S.C. \u00a71681i — I have the right to "
         "ask you to reinvestigate information I believe is inaccurate or cannot be "
@@ -3495,7 +3495,7 @@ _OPENING_TEMPLATES_R1 = [
     ),
     # Version C — conversational, verification-first
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I looked over my credit report and I have questions about {count}. "
         "I do not believe {they_verb} being reported correctly, and I am asking "
         "that you look into {these_items}."
@@ -3513,7 +3513,7 @@ _OPENING_TEMPLATES_R1 = [
     ),
     # Version D — brief opening, weight on the account list
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I am disputing {count} on my credit report that I believe "
         "{they_verb} not accurate or cannot be verified. I am asking that you "
         "reinvestigate {these_items} under 15 U.S.C. \u00a71681i."
@@ -3529,7 +3529,7 @@ _OPENING_TEMPLATES_R1 = [
     ),
     # Version E — focuses on accuracy obligation, good for other_derogatory group
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I am writing to formally dispute {these_items} on my credit report. "
         "The Fair Credit Reporting Act requires that every piece of information "
         "on my credit file be accurate, complete, and verifiable "
@@ -3547,7 +3547,7 @@ _OPENING_TEMPLATES_R1 = [
     ),
     # Version F — focuses on deletion demand, strong closer
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I recently reviewed my credit report and found {these_items} that "
         "{they_verb} being reported inaccurately. I am disputing {these_items} "
         "under the Fair Credit Reporting Act and asking that you investigate "
@@ -3567,7 +3567,7 @@ _OPENING_TEMPLATES_R1 = [
 _OPENING_TEMPLATES_R2 = [
     # Version A
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I disputed {count} on my credit report previously and I am not satisfied "
         "with the outcome. I am writing again to push for a real investigation — "
         "not just a form response that the information was verified."
@@ -3585,7 +3585,7 @@ _OPENING_TEMPLATES_R2 = [
     ),
     # Version B
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I am following up on a dispute I submitted earlier about {count} "
         "on my credit file. I did not feel the prior investigation was thorough "
         "enough, so I am asking that you take another look — this time with "
@@ -3603,7 +3603,7 @@ _OPENING_TEMPLATES_R2 = [
     ),
     # Version C
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I previously disputed some accounts on my credit report and I am "
         "writing back because the issues were not resolved to my satisfaction. "
         "I am asking you to take a closer look at {count}."
@@ -4687,7 +4687,7 @@ def build_dispute_letter_engine(
                     used_reasons.add(reason)
                     account_lines.append(
                         f"{idx}. {fname} \u2014 Account #: {facct}\n"
-                        f"Reason: {reason} DELETE OFF MY CREDIT REPORT."
+                        f"Reason: {reason}\n"
                     )
 
                 accounts_block = "\n\n".join(account_lines)
@@ -5930,7 +5930,7 @@ def build_inquiry_dispute_letter(
     )
 
     opening = (
-        f"Hi,\n\n"
+        f"To Whom It May Concern,\n\n"
         f"I am writing to dispute unauthorized or improperly obtained "
         f"credit inquiries on my {bureau_name} credit report. Under "
         f"15 U.S.C. \u00a71681b, a credit inquiry is only permissible "
@@ -6885,7 +6885,7 @@ def parse_and_detect_personal_info(lines: list[str]) -> tuple:
 
 _VERIFIED_RESPONSE_OPENINGS = [
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I am writing in response to your reinvestigation results dated "
         "{response_date}, in which you indicated that the account(s) listed "
         "below were verified. I am not satisfied with this result because I "
@@ -6895,7 +6895,7 @@ _VERIFIED_RESPONSE_OPENINGS = [
         "item, including who you contacted and what documentation you reviewed."
     ),
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "I received your response stating that the accounts below were verified "
         "following my dispute. I am writing back because a response that simply "
         "states an account was verified does not satisfy the law. Under "
@@ -6905,7 +6905,7 @@ _VERIFIED_RESPONSE_OPENINGS = [
         "conclude the information is accurate. I am requesting all of that now."
     ),
     (
-        "Hi,\n\n"
+        "To Whom It May Concern,\n\n"
         "Thank you for your reinvestigation response. However, I am disputing "
         "your conclusion that the accounts below were verified. A verification "
         "under the Fair Credit Reporting Act requires more than confirming with "
@@ -7165,7 +7165,7 @@ def build_updated_response_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"Hi,\n\n"
+        f"To Whom It May Concern,\n\n"
         f"I received your reinvestigation results dated {resp_label}, which "
         f"indicate that the account(s) below were 'updated.' I am writing "
         f"because an update is not the same as a resolution. Simply changing "
@@ -7244,7 +7244,7 @@ def build_deletion_confirmed_letter(
     if not reinserted:
         # Confirmation letter — no reinsertion yet
         opening = (
-            f"Hi,\n\n"
+            f"To Whom It May Concern,\n\n"
             f"Thank you for your reinvestigation response dated {resp_label}, "
             f"which indicates that the account(s) below have been deleted from "
             f"my credit file. I am acknowledging this deletion and requesting "
@@ -7273,7 +7273,7 @@ def build_deletion_confirmed_letter(
     else:
         # Reinsertion violation letter
         opening = (
-            f"Hi,\n\n"
+            f"To Whom It May Concern,\n\n"
             f"I am writing regarding a serious violation of the Fair Credit "
             f"Reporting Act. The account(s) listed below were previously deleted "
             f"from my credit file following my dispute. They have now reappeared "
@@ -7339,7 +7339,7 @@ def build_frivolous_response_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"Hi,\n\n"
+        f"To Whom It May Concern,\n\n"
         f"I received your response dated {resp_label} indicating that my "
         f"dispute was deemed frivolous or irrelevant. I am writing to "
         f"challenge this determination and to resubmit my dispute with "
@@ -7426,7 +7426,7 @@ def build_unable_to_process_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"Hi,\n\n"
+        f"To Whom It May Concern,\n\n"
         f"I received your response dated {resp_label} indicating that you "
         f"were unable to process my dispute. I am resubmitting this dispute "
         f"with additional identifying information to assist in locating my file.\n\n"
@@ -7499,7 +7499,7 @@ def build_no_response_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"Hi,\n\n"
+        f"To Whom It May Concern,\n\n"
         f"I submitted a formal credit report dispute on or around {dispute_label}. "
         f"As of today, more than 30 days have passed and I have not received "
         f"a response to my dispute.\n\n"
