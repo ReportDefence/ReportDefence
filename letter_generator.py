@@ -332,8 +332,9 @@ def build_identityiq_letters(
     result      = build_report(pdf_path)
     report_date = result["report_date"]
 
-    # Fix round assignment for first-time clients
-    letter_input = promote_first_dispute(result["letter_input_engine"])
+    # round_1 is now guaranteed by the parser for all negative accounts.
+    # promote_first_dispute() is no longer needed.
+    letter_input = result["letter_input_engine"]
 
     dispute_letters = build_dispute_letter_engine(
         letter_input,
@@ -462,7 +463,7 @@ def generate_cesar_letters() -> list[str]:
 
     # ── Map DisputeItems → letter_input_engine format ─────────────────────
     letter_input: dict[str, dict[str, list[dict]]] = defaultdict(
-        lambda: {"collections_chargeoffs": [], "late_payments": [], "other_derogatory": []}
+        lambda: {"collections": [], "charge_offs": [], "late_payments": [], "other_derogatory": []}
     )
     seen: set[tuple] = set()
 
@@ -533,8 +534,10 @@ def generate_cesar_letters() -> list[str]:
             "past_due":                   _extract_field(it.facts, r"past\s*due[^:$]*:\s*\$?([\d,]+\.?\d*)"),
         }
 
-        if neg_type in ("collection", "charge_off"):
-            letter_input[bureau_key]["collections_chargeoffs"].append(entry)
+        if neg_type in ("collection", "paid_collection"):
+            letter_input[bureau_key]["collections"].append(entry)
+        elif neg_type in ("charge_off", "charge_off_deficiency"):
+            letter_input[bureau_key]["charge_offs"].append(entry)
         elif neg_type == "late_payment":
             letter_input[bureau_key]["late_payments"].append(entry)
         else:
