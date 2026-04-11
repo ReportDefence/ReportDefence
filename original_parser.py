@@ -3312,6 +3312,8 @@ def build_letter_input_engine(
         }
 
         dedupe_map: dict[tuple[str, str], dict[str, Any]] = {}
+        # secondary_flags_map: accumulates all non-primary attacks per account
+        secondary_flags_map: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
         # --- Pass 1: accounts that have an identified attack ---
         for strategy_item in strategies:
@@ -3333,7 +3335,7 @@ def build_letter_input_engine(
                     "recommended_methods":   methods,
                     "reason":                build_account_reason_from_strategy(strategy_item, account),
                     "attack_rank":           attack_rank,
-                    # DOFD context — always carried through for letter generation
+                    # DOFD context
                     "dofd_estimated":            account.get("dofd_estimated"),
                     "dofd_confidence":           account.get("dofd_confidence", "unknown"),
                     "fcra_expiration":           account.get("fcra_expiration"),
@@ -3343,16 +3345,47 @@ def build_letter_input_engine(
                     "re_aging_gap_days":         account.get("re_aging_gap_days"),
                     "dofd_verification_required": account.get("dofd_verification_required", False),
                     "dla_suspected_refresh":     account.get("dla_suspected_refresh", False),
-                    # Date fields for reference
+                    # Date fields
                     "date_of_last_payment":      account.get("date_of_last_payment", ""),
                     "date_last_active":          account.get("date_last_active", ""),
                     "date_opened":               account.get("date_opened", ""),
                     "last_reported":             account.get("last_reported", ""),
+                    # Raw account data for flag-enriched letter reasons
+                    "balance":               account.get("balance", ""),
+                    "past_due":              account.get("past_due", ""),
+                    "payment_status":        account.get("payment_status", ""),
+                    "status":                account.get("status", ""),
+                    "high_credit":           account.get("high_credit", ""),
+                    "credit_limit":          account.get("credit_limit", ""),
+                    "monthly_payment":       account.get("monthly_payment", ""),
+                    "late_payment_codes":    account.get("late_payment_codes", []),
                 }
                 key = (entry["furnisher_name"], entry["account_number"])
                 existing = dedupe_map.get(key)
                 if existing is None or entry["attack_rank"] > existing["attack_rank"]:
+                    # Demote the displaced entry to secondary flag
+                    if existing is not None:
+                        secondary_flags_map.setdefault(key, []).append({
+                            "attack_type": existing["attack_type"],
+                            "laws":        existing["laws"],
+                        })
                     dedupe_map[key] = entry
+                else:
+                    # This attack is secondary — save as flag
+                    secondary_flags_map.setdefault(key, []).append({
+                        "attack_type": attack_type,
+                        "laws":        laws,
+                    })
+
+        # Attach secondary_flags to each entry (deduplicated)
+        for key, entry in dedupe_map.items():
+            seen_types = {entry["attack_type"]}
+            flags = []
+            for flag in secondary_flags_map.get(key, []):
+                if flag["attack_type"] not in seen_types:
+                    flags.append(flag)
+                    seen_types.add(flag["attack_type"])
+            entry["secondary_flags"] = flags
 
         # --- Pass 2: negative accounts with NO attack (basic verification) ---
         if negatives_by_bureau is not None:
@@ -3721,6 +3754,71 @@ _VARIATION_CLOSERS_BASIC = [
     "If that documentation does not exist, this account should not be on my report.",
     "Any part they cannot back up with real records needs to be deleted.",
 ]
+
+
+def _build_secondary_flags_paragraph(secondary_flags: list[dict]) -> str:
+    """
+    Converts secondary_flags into a supplementary paragraph for the dispute letter.
+    Each flag is an additional FCRA violation found on the same account.
+    Written in first-person consumer voice — no mention of automated analysis.
+    """
+    if not secondary_flags:
+        return ""
+
+    # Human-readable descriptions per attack_type
+    FLAG_DESCRIPTIONS = {
+        "cross_bureau_balance_conflict":        "the balance being reported is not the same at every bureau",
+        "cross_bureau_payment_status_conflict": "the payment status is reported differently across bureaus",
+        "cross_bureau_account_status_conflict": "the account status varies depending on which bureau you look at",
+        "cross_bureau_high_credit_conflict":    "the high credit amount — which should be a fixed figure — differs by bureau",
+        "cross_bureau_credit_limit_conflict":   "the credit limit is not reported consistently across bureaus",
+        "cross_bureau_date_opened_conflict":    "the date this account was opened is different at different bureaus",
+        "cross_bureau_account_type_conflict":   "the account type classification is not the same at every bureau",
+        "cross_bureau_payment_history_date_conflict": "the month of the late payment in the payment history varies by bureau",
+        "absent_bureau_reporting_inconsistency": "this account appears as a negative item here but is not reported the same way at all three bureaus",
+        "late_payment_history_dispute":         "there are late payment marks in the payment history that I am also disputing",
+        "collection_late_payment_conflict":     "the account is simultaneously classified as a collection and as having a late payment status, which are contradictory",
+        "late_collection_conflict":             "the account carries both late payment and collection indicators at the same time, which cannot both be accurate",
+        "potential_re_aging":                   "the date being used appears to reset the reporting clock past what the law allows",
+        "dofd_unknown_verification_required":   "the date of first delinquency is not clearly disclosed, making it impossible to verify the account is within its legal reporting window",
+        "duplicate_account_number":             "this account number appears more than once on my report",
+        "same_account_number_same_balance":     "the same account number and balance appear in multiple tradelines",
+        "multi_furnisher_same_balance":         "multiple companies are reporting the same balance for what appears to be one debt",
+        "closed_with_balance":                  "the account shows a closed status but is still reporting a balance",
+        "paid_status_with_past_due":            "the account shows as paid but also carries a past-due amount, which are contradictory",
+        "open_status_chargeoff_conflict":       "the account is listed as open but also shows a charge-off or collection status",
+        "balance_exceeds_high_credit":          "the current balance exceeds the original loan amount, which is not possible on an installment account",
+        "balance_exceeds_credit_limit":         "the balance significantly exceeds the reported credit limit",
+        "past_due_exceeds_balance":             "the past-due amount shown is higher than the total balance, which is mathematically impossible",
+        "monthly_payment_on_collection":        "a monthly payment amount is being reported on a collection account, which should not have an active payment schedule",
+        "current_payment_derogatory_status":    "the payment status shows as current but the account classification is derogatory, which directly contradict each other",
+        "opened_after_last_active":             "the account open date is later than the date of last activity, which is chronologically impossible",
+    }
+
+    described = []
+    for flag in secondary_flags:
+        at = flag.get("attack_type", "")
+        desc = FLAG_DESCRIPTIONS.get(at)
+        if desc:
+            described.append(desc)
+
+    if not described:
+        return ""
+
+    if len(described) == 1:
+        return (
+            f" Beyond the primary dispute above, I also noticed that {described[0]}. "
+            f"That is an additional accuracy issue on the same account that I am "
+            f"asking to be investigated and corrected as well."
+        )
+    else:
+        bullet_list = "; ".join(described[:-1]) + f"; and {described[-1]}"
+        return (
+            f" In addition to the dispute above, I found several other accuracy "
+            f"problems with this account that I want addressed at the same time: "
+            f"{bullet_list}. Each of these is a separate issue that requires "
+            f"verification and correction under 15 U.S.C. §1681e(b)."
+        )
 
 
 def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
@@ -4726,7 +4824,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"and must come off my report."
             )
 
-    return reason + " DELETE OFF MY CREDIT REPORT."
+    # Append secondary flags paragraph if any additional issues were detected
+    secondary_flags = item.get("secondary_flags", [])
+    flags_para = _build_secondary_flags_paragraph(secondary_flags)
+    return reason + flags_para + " DELETE OFF MY CREDIT REPORT."
 
 
 def build_dispute_letter_engine(
