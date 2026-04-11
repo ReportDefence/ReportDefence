@@ -3372,9 +3372,13 @@ def build_letter_input_engine(
                         "recommended_round":     "round_1",
                         "recommended_methods":   ["bureau_dispute", "direct_furnisher_dispute"],
                         "reason": (
-                            f"{furnisher} is reporting a negative item (account {acct_num}) "
-                            "that has not been independently verified. Under 15 USC 1681i(a), "
-                            "the bureau must conduct a reasonable reinvestigation of this item."
+                            f"I went through my credit report and found this account from "
+                            f"{furnisher} listed as a negative item. I do not recognize this "
+                            f"as something I can confirm is accurate. I am asking that you "
+                            f"require {furnisher} to provide the original agreement, a complete "
+                            f"payment history, and documentation of the exact balance and status "
+                            f"being reported. If they cannot verify every detail, it needs to "
+                            f"come off my report."
                         ),
                         "attack_rank":               40,
                         "dofd_estimated":            acc.get("dofd_estimated"),
@@ -3455,169 +3459,225 @@ import random as _random
 # Same legal content, different sentence order and wording.
 # The system picks one per letter so no two letters are identical.
 _OPENING_TEMPLATES_R1 = [
-    # Version A — starts with the personal situation
+    # Template 1 — Personal discovery, documentation-focused
     (
         "To Whom It May Concern,\n\n"
-        "I recently went through my credit report and found {count} that I do not "
-        "believe {they_verb} being reported correctly. I am writing to formally dispute "
-        "{these_items} and to ask that you reinvestigate them. The Fair Credit "
-        "Reporting Act gives me the right to dispute inaccurate or unverifiable "
-        "information, and it requires you to complete that investigation within "
-        "30 days (15 U.S.C. \u00a71681i). It also requires that any information "
-        "you report be as accurate as possible (15 U.S.C. \u00a71681e(b))."
+        "My name is {consumer_name}. I sat down recently to go through my credit "
+        "report carefully, and I found {count} that {they_verb} not being reported "
+        "the way I believe {they_verb} supposed to be. I am writing to formally "
+        "dispute {these_items} and to ask that you conduct a proper reinvestigation. "
+        "The Fair Credit Reporting Act gives me that right and requires you to "
+        "complete it within 30 days (15 U.S.C. \u00a71681i). The law also requires "
+        "that every item on my report be as accurate as possible (15 U.S.C. \u00a71681e(b))."
         "\n\n"
-        "For each account I am disputing, I am asking that you contact the company "
-        "reporting it and require them to provide actual proof — the original "
-        "agreement, a full payment history, a breakdown of the balance, the exact "
-        "date I first fell behind, and where the account was transferred or sold, "
-        "documentation of that transfer. If you cannot get that proof and verify "
-        "the account fully, it needs to come off my report. I am also asking that "
-        "you send me the results of your investigation in writing, including which "
-        "companies you contacted and what they provided (15 U.S.C. \u00a71681i(a))."
+        "For every account I am disputing below, I need you to go back to the "
+        "company reporting it and require actual documentation — not just a "
+        "confirmation that the information is correct. I want the original "
+        "agreement, a complete payment history, an explanation of the balance, "
+        "the exact date I first fell behind, and if the account was transferred "
+        "or sold, proof of that assignment. If they cannot produce all of that, "
+        "the account cannot be verified and needs to come off my report. "
+        "Please also send me your written investigation results, including "
+        "the names of every company you contacted and what they provided "
+        "(15 U.S.C. \u00a71681i(a))."
     ),
-    # Version B — starts with the legal right, then gets personal
+    # Template 2 — Rights-first, firm tone
     (
         "To Whom It May Concern,\n\n"
-        "I am writing to dispute {count} on my credit report. Under the Fair Credit "
-        "Reporting Act — specifically 15 U.S.C. \u00a71681i — I have the right to "
-        "ask you to reinvestigate information I believe is inaccurate or cannot be "
-        "verified. I am exercising that right now regarding {these_items} listed below."
+        "I am {consumer_name}, and I am writing to formally exercise my rights "
+        "under the Fair Credit Reporting Act. I have reviewed my credit report "
+        "and identified {count} that I believe {they_verb} either inaccurate or "
+        "cannot be verified. Under 15 U.S.C. \u00a71681i, I have the right to "
+        "request a reinvestigation of any item I dispute, and I am doing so now "
+        "for {these_items} listed in this letter."
         "\n\n"
-        "I am asking that for each account, you require the company reporting it to "
-        "show real documentation: the original signed agreement, complete billing and "
-        "payment records, an itemized breakdown of what is owed, the date I first "
-        "missed a payment, and — if the account was sold to a collector — proof of "
-        "that transfer. If any account cannot be fully backed up with documentation, "
-        "it must be deleted under 15 U.S.C. \u00a71681i(a)(5). The law also requires "
-        "that you follow reasonable procedures to make sure what you report is "
-        "accurate (15 U.S.C. \u00a71681e(b)). Please send me your results in writing "
-        "when the investigation is complete."
+        "I am not asking for a simple reconfirmation from the furnisher. I am "
+        "asking that you require each reporting company to produce real records: "
+        "the original signed agreement, complete billing and payment history, "
+        "an itemized breakdown of any balance, the date I actually first missed "
+        "a payment, and — if the account was sold — the full chain of assignment. "
+        "Under 15 U.S.C. \u00a71681i(a)(5), any item that cannot be verified "
+        "with documentation must be deleted. Under 15 U.S.C. \u00a71681e(b), "
+        "you are required to maintain maximum possible accuracy. Please send me "
+        "your written results when the investigation is complete."
     ),
-    # Version C — conversational, verification-first
+    # Template 3 — Conversational, verification-first
     (
         "To Whom It May Concern,\n\n"
-        "I looked over my credit report and I have questions about {count}. "
-        "I do not believe {they_verb} being reported correctly, and I am asking "
+        "My name is {consumer_name} and I recently went through my credit report "
+        "line by line. I found {count} that raised concerns for me — I do not "
+        "believe {they_verb} being reported correctly, and I am formally asking "
         "that you look into {these_items}."
         "\n\n"
-        "The Fair Credit Reporting Act (15 U.S.C. \u00a71681i and \u00a71681e(b)) "
-        "gives me the right to request this and requires you to complete it within "
-        "30 days. What I am asking for specifically is that you go back to each "
-        "company reporting these accounts and ask them for documentation — not just "
-        "a yes or no answer that the information is correct. I want to see that they "
-        "can provide the original agreement, a full history of payments, an "
-        "explanation of the balance, the date I first went delinquent, and proof "
-        "of ownership if the account changed hands. Anything they cannot verify "
-        "with actual records needs to be removed. Please also let me know in writing "
+        "The Fair Credit Reporting Act — specifically 15 U.S.C. \u00a71681i "
+        "and \u00a71681e(b) — gives me the right to ask for this, and requires "
+        "you to complete the reinvestigation within 30 days. What I need is not "
+        "a rubber stamp. I need you to go back to each company and ask for "
+        "documentation: the original agreement between me and that creditor, "
+        "a full payment record, an explanation of the balance, the date I first "
+        "went delinquent, and — if the account changed hands — proof of the "
+        "transfer. If they cannot verify any of that with actual records, it "
+        "needs to be removed from my report. Please let me know in writing "
         "what you found and who you contacted."
     ),
-    # Version D — brief opening, weight on the account list
+    # Template 4 — Direct, account-focused
     (
         "To Whom It May Concern,\n\n"
-        "I am disputing {count} on my credit report that I believe "
-        "{they_verb} not accurate or cannot be verified. I am asking that you "
-        "reinvestigate {these_items} under 15 U.S.C. \u00a71681i."
+        "I am {consumer_name}, and I am disputing {count} on my credit report "
+        "that I believe {they_verb} either inaccurate or not verifiable. "
+        "I am formally requesting that you reinvestigate {these_items} "
+        "under 15 U.S.C. \u00a71681i."
         "\n\n"
-        "For each account below, I need you to require the reporting company to "
-        "provide full documentation — original agreement, complete payment records, "
-        "itemized balance, the exact date I first fell behind, and assignment "
-        "records if the debt changed hands. If they cannot produce that, the "
-        "account is not verifiable and must be deleted under 15 U.S.C. \u00a71681i(a)(5). "
-        "You are also required to follow reasonable accuracy procedures under "
-        "15 U.S.C. \u00a71681e(b). Please provide written results including the "
-        "name and contact information of anyone you reached out to."
+        "For each account listed below, I need you to require the reporting "
+        "company to produce full documentation — the original agreement, "
+        "a complete payment record, an itemized explanation of the balance, "
+        "the exact date I first fell behind, and assignment records if the "
+        "debt changed hands. If they cannot produce that documentation, "
+        "the account is not verifiable and must be deleted under "
+        "15 U.S.C. \u00a71681i(a)(5). I am also asking that you follow "
+        "the accuracy procedures required by 15 U.S.C. \u00a71681e(b) "
+        "and provide me with written results including the contact "
+        "information for anyone you reached out to."
     ),
-    # Version E — focuses on accuracy obligation, good for other_derogatory group
+    # Template 5 — Accuracy obligation emphasis
     (
         "To Whom It May Concern,\n\n"
-        "I am writing to formally dispute {these_items} on my credit report. "
-        "The Fair Credit Reporting Act requires that every piece of information "
-        "on my credit file be accurate, complete, and verifiable "
-        "(15 U.S.C. \u00a71681e(b)). The accounts listed below do not meet "
-        "that standard."
+        "This letter is from {consumer_name}. I am writing to formally dispute "
+        "{these_items} that appear on my credit report. The Fair Credit Reporting "
+        "Act makes it clear that every piece of information in my credit file "
+        "must be accurate, complete, and verifiable (15 U.S.C. \u00a71681e(b)). "
+        "The accounts I am listing below do not meet that standard as currently reported."
         "\n\n"
         "I am asking that you reinvestigate {these_items} within 30 days as "
         "required by 15 U.S.C. \u00a71681i(a). For each account, please require "
-        "the furnisher to provide documentation that fully supports every field "
-        "being reported — including the original agreement, complete payment history, "
-        "exact balance breakdown, and the date I first fell behind. If any account "
-        "cannot be verified with actual documentation, it must be corrected or "
-        "deleted under 15 U.S.C. \u00a71681i(a)(5). Please send me written results "
-        "including who you contacted and what they provided."
+        "the furnisher to provide documentation supporting every field being "
+        "reported — including the original agreement, complete payment history, "
+        "an exact balance breakdown, and the date I first fell behind. If any "
+        "account cannot be verified with actual documentation, it must be "
+        "corrected or deleted under 15 U.S.C. \u00a71681i(a)(5). Please send "
+        "me written results including who you contacted and what they provided."
     ),
-    # Version F — focuses on deletion demand, strong closer
+    # Template 6 — Deletion demand, strong consumer voice
     (
         "To Whom It May Concern,\n\n"
-        "I recently reviewed my credit report and found {these_items} that "
-        "{they_verb} being reported inaccurately. I am disputing {these_items} "
-        "under the Fair Credit Reporting Act and asking that you investigate "
-        "and remove anything that cannot be fully verified."
+        "My name is {consumer_name}. I have reviewed my credit report and I "
+        "found {these_items} that {they_verb} being reported inaccurately. "
+        "I am writing to dispute {these_items} under the Fair Credit Reporting "
+        "Act and to ask that you investigate and remove anything that cannot "
+        "be fully verified with documentation."
         "\n\n"
         "Under 15 U.S.C. \u00a71681i(a), you must complete this reinvestigation "
         "within 30 days. Under 15 U.S.C. \u00a71681i(a)(5), any item that "
-        "cannot be verified must be deleted. Under 15 U.S.C. \u00a71681e(b), "
-        "you are required to maintain maximum possible accuracy on all "
-        "information in my file. I am asking that the companies reporting "
-        "these accounts provide complete documentation — original agreements, "
-        "full payment records, and any assignment records if the debt was sold "
-        "or transferred. Please send me your written investigation results."
+        "cannot be verified must be deleted — not disputed and left on, but "
+        "actually removed. Under 15 U.S.C. \u00a71681e(b), you are required "
+        "to maintain maximum possible accuracy in my file at all times. "
+        "I am asking that the companies reporting these accounts produce "
+        "complete documentation — original agreements, full payment records, "
+        "and any assignment records if the debt was sold or transferred. "
+        "Please send me your written investigation results."
+    ),
+    # Template 7 — Thoughtful, thorough, personal
+    (
+        "To Whom It May Concern,\n\n"
+        "I am {consumer_name}, and I am reaching out because I found problems "
+        "in my credit report that I believe need to be corrected. After reviewing "
+        "my file, I identified {count} that I do not believe {they_verb} accurate "
+        "or properly verifiable. I am formally requesting a reinvestigation of "
+        "{these_items} as permitted under 15 U.S.C. \u00a71681i."
+        "\n\n"
+        "I want to be specific about what I am asking for. For each account "
+        "below, I need you to require the company reporting it to provide the "
+        "original credit agreement with my signature, a transaction-by-transaction "
+        "payment history from the time the account was opened, an itemized "
+        "breakdown of the current balance, the exact date I first missed a "
+        "payment, and — if this is a collection — proof of the full chain of "
+        "assignment from the original creditor. If any of that cannot be "
+        "produced, the account is unverifiable and must come off my report "
+        "under 15 U.S.C. \u00a71681i(a)(5). Please also send me your "
+        "written results when you are done."
+    ),
+    # Template 8 — Matter-of-fact, FCRA-grounded
+    (
+        "To Whom It May Concern,\n\n"
+        "My name is {consumer_name}. I am sending this letter to dispute "
+        "{count} on my credit report under the Fair Credit Reporting Act. "
+        "I have gone through my report and identified {these_items} that "
+        "I believe contain inaccurate or unverifiable information."
+        "\n\n"
+        "The FCRA at 15 U.S.C. \u00a71681i requires you to reinvestigate "
+        "disputed items within 30 days and to contact the furnisher for "
+        "actual verification — not just a reconfirmation. Under "
+        "15 U.S.C. \u00a71681e(b), you must also follow reasonable procedures "
+        "to assure maximum accuracy. For each account listed below, "
+        "I am asking that the reporting company provide the original agreement, "
+        "a complete and chronological payment history, documentation of the "
+        "balance and how it was calculated, and the correct date of first "
+        "delinquency. Any account that cannot be verified with primary "
+        "documentation must be deleted under 15 U.S.C. \u00a71681i(a)(5). "
+        "Please provide me with your written results."
     ),
 ]
 
 _OPENING_TEMPLATES_R2 = [
-    # Version A
+    # R2 Template 1 — Escalation after inadequate response
     (
         "To Whom It May Concern,\n\n"
-        "I disputed {count} on my credit report previously and I am not satisfied "
-        "with the outcome. I am writing again to push for a real investigation — "
-        "not just a form response that the information was verified."
+        "My name is {consumer_name}. I am writing a second time about {count} "
+        "on my credit report. I submitted a dispute previously and received a "
+        "response, but I am not satisfied with the outcome. The accounts listed "
+        "below remain on my file and I do not believe a proper reinvestigation "
+        "was conducted. I am asking you to take a real look — not a form response "
+        "that says the information was verified without explaining how."
         "\n\n"
-        "Under 15 U.S.C. \u00a71681i(a), the law requires an actual reasonable "
-        "reinvestigation, which means going back to the reporting company and "
-        "reviewing documentation — not just sending an automated inquiry and "
-        "accepting whatever answer comes back. I am specifically requesting, under "
-        "15 U.S.C. \u00a71681i(a)(6)(B)(iii), that you tell me the procedure you "
-        "used, the name and contact information of every company you reached out to, "
-        "and what documentation you relied on. I am also noting that continuing to "
-        "report information that cannot be verified, after a properly submitted "
-        "dispute, can create liability under 15 U.S.C. \u00a71681n. "
-        "I am keeping all records."
+        "{bureau_response_summary}"
+        "Under 15 U.S.C. \u00a71681i(a), the law requires an actual, reasonable "
+        "reinvestigation — not just forwarding my dispute to the furnisher and "
+        "accepting their confirmation. I am specifically requesting under "
+        "15 U.S.C. \u00a71681i(a)(6)(B)(iii) that you tell me the exact procedure "
+        "you used, the name and contact information of every company you reached out "
+        "to, and what documentation you reviewed. I am also noting that continuing "
+        "to report information that cannot be properly verified, after a properly "
+        "submitted dispute, creates potential liability under 15 U.S.C. \u00a71681n. "
+        "I am keeping a record of all correspondence."
     ),
-    # Version B
+    # R2 Template 2 — Following up, documentation-demanding
     (
         "To Whom It May Concern,\n\n"
-        "I am following up on a dispute I submitted earlier about {count} "
-        "on my credit file. I did not feel the prior investigation was thorough "
-        "enough, so I am asking that you take another look — this time with "
-        "actual documentation from the reporting companies."
+        "I am {consumer_name}, and I am following up on a dispute I submitted "
+        "previously regarding {count} on my credit file. I received your response, "
+        "but the accounts I disputed are still showing on my report and I do not "
+        "believe the investigation met the standard required by law. I am asking "
+        "that you take another look — this time with actual documentation from "
+        "the reporting companies, not just a reconfirmation."
         "\n\n"
-        "I know under 15 U.S.C. \u00a71681i(a) that a reasonable reinvestigation "
-        "is required and that just confirming the data with the furnisher is not "
-        "enough. I want real records reviewed. Under 15 U.S.C. \u00a71681i(a)(6)(B)(iii) "
-        "I am asking that you provide me with a written description of your "
-        "investigation process and the contact information for every company you "
-        "reached out to. If any of these accounts cannot be verified with real "
-        "documentation, they need to be removed. I want you to know I am keeping "
-        "a record of all correspondence in case I need to pursue this further "
-        "under 15 U.S.C. \u00a71681n."
+        "{bureau_response_summary}"
+        "Under 15 U.S.C. \u00a71681i(a), a reasonable reinvestigation means "
+        "reviewing real records — not just sending an electronic inquiry and "
+        "accepting whatever the furnisher says back. I want actual documentation "
+        "reviewed. Under 15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am also asking "
+        "that you provide me with a written description of your investigation "
+        "process and the contact information for every company you reached out to. "
+        "If any account cannot be verified with real documentation, it must be "
+        "deleted. I am keeping a record of all correspondence in case I need to "
+        "pursue this under 15 U.S.C. \u00a71681n."
     ),
-    # Version C
+    # R2 Template 3 — Firm, FCRA-grounded escalation
     (
         "To Whom It May Concern,\n\n"
-        "I previously disputed some accounts on my credit report and I am "
-        "writing back because the issues were not resolved to my satisfaction. "
-        "I am asking you to take a closer look at {count}."
+        "This is {consumer_name} writing back about accounts I disputed on my "
+        "credit report. The issues were not resolved to my satisfaction and "
+        "I am asking you to conduct a proper investigation of {count}."
         "\n\n"
-        "What I need is a real investigation — not an automated check where "
-        "someone at the reporting company clicks confirm and nothing gets reviewed. "
-        "The Fair Credit Reporting Act (15 U.S.C. \u00a71681i(a)) requires a "
-        "reasonable reinvestigation, and I expect that standard to be met. "
-        "I am also requesting under 15 U.S.C. \u00a71681i(a)(6)(B)(iii) that "
-        "you send me a description of exactly how each account was investigated, "
-        "including who was contacted and what they provided. Any account that "
-        "cannot be fully verified must be deleted. I am aware of the remedies "
-        "available to me under 15 U.S.C. \u00a71681n if unverifiable information "
-        "continues to be reported."
+        "{bureau_response_summary}"
+        "What I need is a real investigation — not a process where someone "
+        "at the reporting company clicks a button to confirm and nothing actually "
+        "gets reviewed. The Fair Credit Reporting Act at 15 U.S.C. \u00a71681i(a) "
+        "requires a reasonable reinvestigation, and I expect that standard to be "
+        "met. I am requesting under 15 U.S.C. \u00a71681i(a)(6)(B)(iii) a written "
+        "description of exactly how each account was investigated, including who "
+        "was contacted and what they provided. Any account that cannot be fully "
+        "verified must be deleted. I am aware of my remedies under "
+        "15 U.S.C. \u00a71681n if unverifiable information continues to be reported."
     ),
 ]
 
@@ -3665,781 +3725,865 @@ _VARIATION_CLOSERS_BASIC = [
 
 def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     """
-    Specific reason paragraph for one account.
-    variation_idx drives subtle wording differences so identical attack types
-    don't produce identical text within the same letter.
+    Generates a unique, specific, humanized dispute reason for each account.
+    Uses all available fields from the item to craft individualized language.
+    No two accounts with different data will ever share identical text.
+    No automated/AI language — written as if the client themselves wrote it.
     """
-    furnisher   = item.get("furnisher_name", "")
-    attack_type = item.get("attack_type", "")
-    neg_type    = item.get("negative_type", "")
-    dofd        = item.get("dofd_estimated")
-    fcra_exp    = item.get("fcra_expiration")
-    confidence  = item.get("dofd_confidence", "unknown")
-    dla_refresh = item.get("dla_suspected_refresh", False)
-    balance     = item.get("balance", "")
-    acct        = item.get("account_number", "")
+    furnisher    = item.get("furnisher_name", "")
+    attack_type  = item.get("attack_type", "")
+    neg_type     = item.get("negative_type", "")
+    dofd         = item.get("dofd_estimated")
+    fcra_exp     = item.get("fcra_expiration")
+    dla_refresh  = item.get("dla_suspected_refresh", False)
+    balance      = item.get("balance", "")
+    past_due     = item.get("past_due", "")
+    acct         = item.get("account_number", "")
+    date_opened  = item.get("date_opened", "")
+    date_active  = item.get("date_last_active", "")
+    last_rpt     = item.get("last_reported", "")
+    pay_status   = item.get("payment_status", "")
+    status       = item.get("status", "")
+    monthly_pmt  = item.get("monthly_payment", "")
+    high_credit  = item.get("high_credit", "")
+    credit_limit = item.get("credit_limit", "")
+    late_codes   = item.get("late_payment_codes", [])
+    is_closed    = any(k in status.lower() for k in ("closed","paid","refinanced","settled"))
 
-    vi = variation_idx % len(_VARIATION_OPENERS)
-    vc = variation_idx % len(_VARIATION_CLOSERS_BASIC)
-    opener  = _VARIATION_OPENERS[vi]
-    v_close = _VARIATION_CLOSERS_BASIC[vc]
+    # Build contextual detail strings used across multiple attack types
+    bal_str   = f" of ${balance}"   if balance and balance not in ("0","0.0","$0.00","") else ""
+    acct_str  = f" (account ending {acct[-4:]})" if acct and len(acct) >= 4 else (f" (account {acct})" if acct else "")
+    open_str  = f" opened {date_opened}" if date_opened else ""
+    rpt_str   = f", last reported {last_rpt}" if last_rpt else ""
+    active_str = f", last active {date_active}" if date_active else ""
 
+    v3 = variation_idx % 3
+    v4 = variation_idx % 4
+    v2 = variation_idx % 2
+
+    # ── OBSOLETE — 7-year limit ────────────────────────────────────────────
     if attack_type == "obsolete_account_7yr_limit":
-        reason = (
-            f"This account has been on my report too long. Based on when I first "
-            f"fell behind — around {dofd} — the Fair Credit Reporting Act "
-            f"(15 U.S.C. \u00a71681c(a)(4)) only allows this type of account to "
-            f"stay on a credit report for seven years from 180 days after that date. "
-            f"By that math, this should have come off around {fcra_exp}. "
-            f"It needs to be deleted."
-        )
+        if v3 == 0:
+            reason = (
+                f"I went back and calculated the dates on this account. Based on "
+                f"when I first fell behind — around {dofd} — the Fair Credit "
+                f"Reporting Act (15 U.S.C. §1681c(a)(4)) only allows this type of "
+                f"account to stay on a report for seven years from 180 days after "
+                f"that first missed payment. That window closed around {fcra_exp}. "
+                f"This account should have been removed by then and has no legal "
+                f"basis to still be here."
+            )
+        elif v3 == 1:
+            reason = (
+                f"This account from {furnisher}{acct_str} has been on my credit "
+                f"report longer than the law allows. My first delinquency was around "
+                f"{dofd}, which means the seven-year FCRA clock expired around "
+                f"{fcra_exp} under 15 U.S.C. §1681c(a)(4). Keeping it on my report "
+                f"past that date is a violation — I am asking for it to be deleted immediately."
+            )
+        else:
+            reason = (
+                f"The math on this account does not add up in my favor — it adds up "
+                f"in the law's favor. First delinquency around {dofd} means the FCRA "
+                f"seven-year limit (15 U.S.C. §1681c(a)(4)) ran out around {fcra_exp}. "
+                f"{furnisher} cannot legally keep this on my report past that date. "
+                f"I am requesting deletion with no further reinvestigation required — "
+                f"the statute is clear."
+            )
 
+    # ── CHILD SUPPORT ──────────────────────────────────────────────────────
     elif neg_type == "child_support":
         reason = (
-            f"I am disputing the accuracy of this child/family support account. "
-            f"Under 15 U.S.C. \u00a71681s-1, a child support agency may only report "
-            f"overdue support obligations, and only the delinquent portion as "
-            f"certified by the state. The reported balance of {balance} and "
-            f"past due amount of {item.get('past_due', '')} must be verified with "
-            f"a current certification from the state child support agency "
-            f"confirming the exact delinquent amount. If the amount reported "
-            f"includes current support that is not yet overdue, or if the "
-            f"certification is outdated, this must be corrected or removed."
+            f"I am disputing this child or family support account from {furnisher}{acct_str}. "
+            f"Under 15 U.S.C. §1681s-1, only overdue support that has been certified "
+            f"by the state agency may be reported. The balance shown{bal_str} and the "
+            f"past-due amount of {past_due} need to be backed up by a current state "
+            f"certification confirming exactly what is delinquent. If any of that "
+            f"balance includes support that is not yet past due, or if the certification "
+            f"is outdated, this must be corrected or removed entirely."
         )
 
+    # ── STUDENT LOAN — generic ─────────────────────────────────────────────
     elif neg_type == "student_loan":
         reason = (
-            f"I am disputing the accuracy of this student loan account. "
-            f"Student loan servicers frequently change, and accounts are often "
-            f"reported by multiple servicers simultaneously for the same underlying "
-            f"loan — which is inaccurate. I am asking that {furnisher} provide: "
-            f"(1) proof that they are the current authorized servicer, "
-            f"(2) the complete payment history from loan origination, "
-            f"(3) the correct status reflecting any deferment, forbearance, "
-            f"or income-driven repayment plan, and (4) confirmation that this "
-            f"loan has not been reported by another servicer for the same period. "
-            f"If this cannot be verified, it must be removed."
+            f"I am disputing this student loan from {furnisher}{acct_str}. "
+            f"Student loan accounts have a documented history of servicer errors — "
+            f"loans reported by multiple servicers at once, balances that do not "
+            f"update after transfers, and late marks that appear during deferment "
+            f"periods when no payment was actually due. I need {furnisher} to confirm "
+            f"they are the current authorized servicer, provide the complete payment "
+            f"history from origination, and verify that no other servicer is "
+            f"reporting the same loan. If this cannot all be verified, it must be removed."
         )
 
+    # ── BANKRUPTCY ────────────────────────────────────────────────────────
     elif neg_type == "bankruptcy":
         reason = (
-            f"I am disputing the accuracy of how this account is being reported "
-            f"in connection with a bankruptcy proceeding. Under the Fair Credit "
-            f"Reporting Act, Chapter 7 bankruptcies may be reported for up to "
-            f"10 years and Chapter 13 for up to 7 years from the filing date "
-            f"(15 U.S.C. \u00a71681c(a)(1)). Accounts included in a bankruptcy "
-            f"must reflect their discharged status and may not continue to show "
-            f"an active balance or derogatory payment history after discharge. "
-            f"I am asking that {furnisher} confirm the correct bankruptcy chapter, "
-            f"filing date, discharge date, and that the account status accurately "
-            f"reflects the discharge."
+            f"I am disputing how {furnisher} is reporting this account{acct_str} "
+            f"in connection with a bankruptcy. Under 15 U.S.C. §1681c(a)(1), "
+            f"accounts included in a bankruptcy discharge must accurately reflect "
+            f"that discharged status — they cannot continue showing an active balance "
+            f"or derogatory payment history after the discharge date. "
+            f"I need {furnisher} to confirm the correct bankruptcy chapter, the filing "
+            f"date, the discharge date, and that every field reflects what actually "
+            f"happened legally. Anything that does not match the discharge record "
+            f"needs to be corrected or deleted."
         )
 
+    # ── REPOSSESSION ──────────────────────────────────────────────────────
     elif neg_type == "repossession":
+        bal_note = f" The remaining balance shown is{bal_str}." if balance and balance not in ("0","0.0","$0.00","") else ""
         reason = (
-            f"I am disputing the accuracy of this repossession account. "
-            f"When a creditor repossesses and sells a vehicle, they are required "
-            f"under the Uniform Commercial Code (UCC Article 9) to apply the "
-            f"net proceeds of the sale to the outstanding balance and notify "
-            f"the consumer of the sale. The deficiency balance — if any — "
-            f"may only reflect the remaining amount after the sale proceeds "
-            f"are properly credited. I am asking that {furnisher} provide: "
-            f"(1) documentation of the repossession, (2) proof that the vehicle "
-            f"was sold and the sale price, (3) an itemized accounting showing "
-            f"how the sale proceeds were applied, and (4) confirmation that any "
-            f"reported balance reflects only the legitimate deficiency. "
-            f"If this cannot be verified, the account must be removed."
+            f"I am disputing this repossession from {furnisher}{acct_str}{open_str}. "
+            f"Under UCC Article 9, when a vehicle is repossessed and sold, the net "
+            f"proceeds of that sale must be applied to the outstanding balance and the "
+            f"consumer must be notified. Any deficiency balance that gets reported can "
+            f"only reflect what remained after those proceeds were properly credited.{bal_note} "
+            f"I need {furnisher} to provide: (1) documentation of the repossession, "
+            f"(2) proof the vehicle was sold and the actual sale price, "
+            f"(3) an itemized accounting of how the proceeds were applied, and "
+            f"(4) confirmation the reported balance is only the legitimate deficiency. "
+            f"Without that, this account cannot be verified."
         )
 
+    # ── CHARGE-OFF DEFICIENCY ─────────────────────────────────────────────
     elif neg_type == "charge_off_deficiency":
         reason = (
-            f"I am disputing the balance reported for this charged-off account. "
-            f"When an account is charged off, the original creditor writes it off "
-            f"as a loss — however, the balance being reported must reflect the "
-            f"actual amount owed, not an inflated figure that includes fees or "
-            f"interest added after the charge-off date. I am asking that "
-            f"{furnisher} provide a complete itemized accounting of this balance "
-            f"showing the original charged-off amount, any interest or fees added "
-            f"after charge-off, and any payments made. The reported balance of "
-            f"{balance} must be verifiable with primary documentation. "
-            f"If it cannot be, this account must be corrected or removed."
+            f"I am disputing the balance on this charged-off account from "
+            f"{furnisher}{acct_str}. When an account is charged off, the creditor "
+            f"writes it off as a loss — but the balance they continue to report must "
+            f"reflect only what was actually owed at that point, not an inflated "
+            f"figure padded with fees or interest added after the charge-off date. "
+            f"The balance shown{bal_str} needs to be backed up with a complete "
+            f"itemized accounting: the original charged-off amount, any post-charge-off "
+            f"additions, and any payments made. If {furnisher} cannot produce that, "
+            f"this account must be corrected or removed."
         )
 
+    # ── PAID COLLECTION ───────────────────────────────────────────────────
     elif neg_type == "paid_collection":
         reason = (
-            f"This account shows a balance of zero and has been paid or settled, "
-            f"yet it continues to be reported with a derogatory status. "
-            f"A paid or settled collection account must accurately reflect its "
-            f"current status. Under 15 U.S.C. \u00a71681e(b), reporting a "
-            f"derogatory classification on an account that has been resolved "
-            f"is inaccurate. I am asking that {furnisher} update the status "
-            f"to accurately reflect that this account has been paid or settled, "
-            f"and confirm the correct Date of First Delinquency for the 7-year "
-            f"reporting clock. If the current reporting is inaccurate, it must "
-            f"be corrected immediately."
+            f"This account from {furnisher}{acct_str} has been paid or settled — "
+            f"the balance is zero — yet it continues to be reported with a derogatory "
+            f"classification. Under 15 U.S.C. §1681e(b), reporting a negative status "
+            f"on an account that has been resolved is not accurate. I am asking that "
+            f"{furnisher} update the status to correctly reflect that this account was "
+            f"paid or settled, and also confirm the correct Date of First Delinquency "
+            f"so the 7-year reporting clock can be verified. If the current reporting "
+            f"is not corrected, it needs to be deleted."
         )
 
+    # ── RE-AGING ──────────────────────────────────────────────────────────
     elif attack_type == "potential_re_aging":
-        v = variation_idx % 4
-        if v == 0:
+        if v4 == 0:
             reason = (
-                f"I noticed that the date this company shows as when the account "
-                f"started is much later than when I actually stopped paying — "
-                f"which was around {dofd}. The seven-year clock under the Fair "
-                f"Credit Reporting Act runs from when I first missed a payment, "
-                f"not from when a collector picked up the account. If they are "
-                f"using their own date, that pushes the expiration further than "
-                f"the law allows. This account should have expired around {fcra_exp}. "
-                f"I am asking that the original date of first delinquency be "
-                f"confirmed with the original creditor."
+                f"I looked at the dates on this account from {furnisher}{acct_str} "
+                f"and something does not add up. The date being used is well after "
+                f"when I actually stopped paying — which was around {dofd}. Under "
+                f"15 U.S.C. §1681c(c), the seven-year clock runs from my original "
+                f"date of first delinquency, not from the date a collector picked "
+                f"it up or when their records start. Using their own date would push "
+                f"the expiration out to somewhere past {fcra_exp}, which is longer "
+                f"than the law allows. I am asking that the original date of first "
+                f"delinquency be confirmed with documentation from the original creditor."
             )
-        elif v == 1:
+        elif v4 == 1:
             reason = (
-                f"Something does not add up with the dates on this account. "
-                f"My last payment to the original creditor was around {dofd}, "
-                f"but the date this company is showing is considerably later — "
-                f"which looks like their acquisition date, not my actual delinquency date. "
-                f"Under 15 U.S.C. \u00a71681c(c), the reporting period starts from "
-                f"my original date of first delinquency. Using a later date would "
-                f"extend the account past its legal expiration of around {fcra_exp}. "
-                f"I need the correct date verified."
+                f"The date associated with this account from {furnisher}{acct_str} "
+                f"does not match when I actually first fell behind. My last payment "
+                f"to the original creditor was around {dofd}. The date being shown "
+                f"looks like when {furnisher} acquired the account — not my actual "
+                f"delinquency date. Under 15 U.S.C. §1681c(c), only the original "
+                f"date of first delinquency controls the reporting period. I need "
+                f"the original date verified with records from the original creditor. "
+                f"Using their own date to extend this account past {fcra_exp} is "
+                f"called re-aging and it is a violation of federal law."
             )
-        elif v == 2:
+        elif v4 == 2:
             reason = (
-                f"The date being reported for this account does not match when I "
-                f"actually fell behind on the original obligation. My records indicate "
-                f"the delinquency started around {dofd}, which means the FCRA "
-                f"seven-year window would close around {fcra_exp}. I am requesting "
-                f"that this company document the original date of first delinquency "
-                f"with records from the original creditor — not their own opening date."
+                f"Something is off about the dates on this {furnisher} account{acct_str}. "
+                f"I first fell behind around {dofd}, which means this account's legal "
+                f"reporting window should have closed around {fcra_exp}. If {furnisher} "
+                f"is using a later date — like when they obtained the account — to "
+                f"extend how long this stays on my report, that is re-aging under "
+                f"15 U.S.C. §1681c(c). I am requesting documentation of the original "
+                f"date of first delinquency directly from the original creditor's records."
             )
         else:
             reason = (
-                f"This account appears to be using a date that extends the "
-                f"reporting period past what the law allows. The original "
-                f"delinquency was around {dofd}, which gives an FCRA expiration "
-                f"of approximately {fcra_exp}. If the company is reporting a more "
-                f"recent date as the start of delinquency, that is re-aging — "
-                f"a violation of 15 U.S.C. \u00a71681c(c). I am requesting "
-                f"documentation of the original date of first delinquency."
+                f"The reporting date on this account from {furnisher}{acct_str} "
+                f"appears to be later than my actual delinquency date of around {dofd}. "
+                f"That pushes the FCRA expiration past {fcra_exp} — longer than the "
+                f"law permits. Under 15 U.S.C. §1681c(c), only my original date of "
+                f"first delinquency counts. I am asking {furnisher} to produce that "
+                f"date with primary documentation. If they use their own acquisition "
+                f"date, that is a statutory violation I intend to pursue."
             )
 
+    # ── DOFD UNKNOWN ──────────────────────────────────────────────────────
     elif attack_type == "dofd_unknown_verification_required":
-        v = variation_idx % 4
         if dla_refresh:
-            if v < 2:
+            if v2 == 0:
                 reason = (
-                    f"The 'date last active' on this account matches almost exactly "
-                    f"when it was last reported to the bureau. That looks like the "
-                    f"company is refreshing that date to make the account appear more "
-                    f"current than it actually is. The seven-year reporting period "
-                    f"has to be measured from when I first missed a payment — not from "
-                    f"the last time they updated the record. I am asking that "
-                    f"{furnisher} show the original date of first delinquency with "
-                    f"backup documentation. If they cannot do that, this account "
-                    f"cannot be verified."
+                    f"I noticed something on this account from {furnisher}{acct_str}: "
+                    f"the 'date last active' matches almost exactly when it was last "
+                    f"reported to you{rpt_str}. That looks like {furnisher} is refreshing "
+                    f"that date to make the account appear more recent than it actually is. "
+                    f"The seven-year window under the FCRA must run from when I first "
+                    f"missed a payment — not from the last time they updated their own "
+                    f"record. I am asking {furnisher} to disclose the original date of "
+                    f"first delinquency with backup documentation from the original creditor. "
+                    f"If they cannot do that, this account cannot be reported."
                 )
             else:
                 reason = (
-                    f"The date being used on this account appears to reflect when "
-                    f"{furnisher} last updated the record, not when I actually fell "
-                    f"behind. That distinction matters — 15 U.S.C. \u00a71681c(c) "
-                    f"requires the reporting window to run from my original date of "
-                    f"first delinquency, not from a furnisher refresh date. I am "
-                    f"requesting the original delinquency date with primary "
-                    f"documentation from the original creditor."
+                    f"The date being used for this {furnisher} account{acct_str} appears "
+                    f"to reflect when they last touched the record{active_str}, not when "
+                    f"I actually first fell behind. That is a meaningful difference. "
+                    f"Under 15 U.S.C. §1681c(c), the reporting clock starts from my "
+                    f"original date of first delinquency — not from a furnisher's "
+                    f"internal update date. I need the original DOFD with primary "
+                    f"documentation, or this account must be removed."
                 )
         else:
-            if v < 2:
+            if v2 == 0:
                 reason = (
-                    f"I cannot determine from what is reported when I actually first "
-                    f"fell behind on this account. That date matters because it controls "
-                    f"how long this can legally stay on my report under 15 U.S.C. "
-                    f"\u00a71681c(c). I am asking that {furnisher} disclose the "
-                    f"original date of first delinquency with supporting records. "
-                    f"If they cannot provide it, the account cannot be verified."
+                    f"I cannot tell from what is being reported when I actually first "
+                    f"fell behind on this account from {furnisher}{acct_str}. That date "
+                    f"is critical — it controls how long this account is legally allowed "
+                    f"to stay on my report under 15 U.S.C. §1681c(c). Without it, I "
+                    f"cannot confirm this account is even within its seven-year window. "
+                    f"I am asking {furnisher} to provide the original date of first "
+                    f"delinquency with supporting records. If they cannot produce it, "
+                    f"the account cannot be verified and must be deleted."
                 )
             else:
                 reason = (
-                    f"The date of first delinquency for this account is not clearly "
-                    f"disclosed. Without it, I cannot confirm that this account is "
-                    f"within its legal seven-year reporting window under the FCRA. "
-                    f"I am asking that {furnisher} provide the original date from "
-                    f"the original creditor's records. If that date cannot be "
-                    f"established, this account cannot be reported."
+                    f"The date of first delinquency for this {furnisher} account{acct_str} "
+                    f"is not clearly shown{rpt_str}. Without that date, I have no way to "
+                    f"confirm this account falls within the FCRA's seven-year reporting "
+                    f"window under 15 U.S.C. §1681c(c). I am requesting that {furnisher} "
+                    f"produce the original DOFD from the original creditor's records. "
+                    f"If they cannot establish that date, this account is unverifiable "
+                    f"and must be deleted under 15 U.S.C. §1681i(a)(5)."
                 )
 
+    # ── COLLECTOR / ORIGINAL CREDITOR PATTERN ─────────────────────────────
     elif attack_type in {
         "collector_original_creditor_self_declared",
         "collector_original_creditor_pattern",
     }:
-        if variation_idx % 2 == 0:
+        if v2 == 0:
             reason = (
-                f"This is being reported by a collection company and I want to "
-                f"know whether they actually have the right to put this on my "
-                f"credit report. I am asking that {furnisher} provide the "
-                f"original signed agreement, a complete record showing how this "
-                f"account was transferred from the original creditor to them, "
-                f"and documentation proving their legal authority to report it. "
-                f"If they cannot show all of that, this account cannot be verified."
+                f"This account from {furnisher}{acct_str} is being reported by what "
+                f"appears to be a collection company. Before I accept this as accurate, "
+                f"I need to know they actually have the legal right to put this on my "
+                f"credit report. I am asking {furnisher} to provide: the original signed "
+                f"agreement between me and the original creditor, a complete chain of "
+                f"assignment showing how this account got from the original creditor to "
+                f"them, and documentation that they have the legal authority to report "
+                f"it under 15 U.S.C. §1681s-2(b). Without all of that, this account "
+                f"cannot be verified."
             )
         else:
             reason = (
-                f"I dispute whether {furnisher} has the authority to report "
-                f"this account on my credit file. For a collection account, "
-                f"that means producing the original contract, proof of the "
-                f"full chain of assignment from the original creditor, and "
-                f"documentation of their right to report. Without all of "
-                f"that in hand, this cannot be considered verified."
+                f"I dispute whether {furnisher} has any legal authority to report "
+                f"this account{acct_str} on my credit file. For a collection account, "
+                f"that means producing the original contract with my signature, proof "
+                f"of the full assignment chain from the original creditor, and "
+                f"documentation of their standing to report under federal law. "
+                f"I am also asking for the original date of first delinquency from "
+                f"the original creditor's records — not from {furnisher}'s own files. "
+                f"If any part of that cannot be produced, this account is unverifiable."
             )
 
+    # ── DUPLICATE ACCOUNT / SAME BALANCE ──────────────────────────────────
     elif attack_type in {
         "same_account_number_same_balance",
         "duplicate_account_number",
     }:
-        bal_note = f" with a balance of {balance}" if balance and balance not in {"$0.00","0","0.0"} else ""
-        v = variation_idx % 6
-        if v == 0:
+        if v4 == 0:
             reason = (
-                f"This account number{bal_note} is showing up more than once on "
-                f"my report under different company names. As far as I know this "
-                f"is one debt, not two separate ones. Listing it twice makes my "
-                f"report look worse than it actually is. I am asking that you "
-                f"determine whether these entries are the same obligation and "
-                f"remove whichever one cannot be verified as a separate distinct debt."
+                f"This account number{bal_str} from {furnisher}{acct_str} is showing "
+                f"up more than once on my credit report. As far as I know, this is one "
+                f"debt — not two separate obligations. Having it listed twice makes my "
+                f"report look worse than it actually is, and reporting the same debt "
+                f"multiple times is inaccurate under 15 U.S.C. §1681e(b). I am asking "
+                f"that you determine whether these entries are the same account and "
+                f"remove whichever one cannot be verified as a distinct separate debt."
             )
-        elif v == 1:
+        elif v4 == 1:
             reason = (
-                f"I see this same account{bal_note} appearing under more than one "
-                f"name on my report. That does not seem right — if it is the "
-                f"same debt it should only appear once, under whoever currently "
-                f"holds it. I am asking that duplicate entries be investigated "
-                f"and any that cannot be shown to be a separate obligation "
-                f"be deleted."
+                f"I see this same account from {furnisher}{acct_str}{bal_str} appearing "
+                f"more than once on my report. If it is the same debt, only the entity "
+                f"that currently holds it should be reporting it — and only once. "
+                f"I am asking that every reporting party provide independent proof of "
+                f"ownership and authority, and that any duplicate entry be deleted."
             )
-        elif v == 2:
+        elif v4 == 2:
             reason = (
-                f"The account number{bal_note} tied to this entry matches another "
-                f"entry already on my report. A single obligation cannot create "
-                f"two valid negative tradelines simultaneously. I am asking that "
-                f"you identify which reporting entity holds the legal right to "
-                f"report this account and remove the one that cannot prove it."
-            )
-        elif v == 3:
-            reason = (
-                f"This account{bal_note} is being reported by more than one "
-                f"company under the same account number. Only one entity can "
-                f"legally own and report the same debt at any given time. "
-                f"I am requesting that each reporting party provide proof of "
-                f"ownership and authority, and that any entry which cannot be "
-                f"independently verified be removed from my report."
-            )
-        elif v == 4:
-            reason = (
-                f"There are multiple entries on my credit report that appear to "
-                f"refer to the same debt{bal_note}. The presence of duplicate "
-                f"tradelines for a single obligation inflates the negative impact "
-                f"on my report. I am requesting that this account be verified "
-                f"as a distinct and separate obligation — if it cannot be, "
-                f"this entry must be deleted."
+                f"The account number tied to this entry from {furnisher}{acct_str} "
+                f"matches another entry already on my report{bal_str}. A single "
+                f"obligation cannot create two separate negative tradelines. "
+                f"I am requesting that you identify which entity has the legal right "
+                f"to report this and remove the one that cannot prove it."
             )
         else:
             reason = (
-                f"This appears to be the same account{bal_note} already reported "
-                f"elsewhere on my credit file under a different company name. "
-                f"Reporting the same debt twice is inaccurate under 15 U.S.C. "
-                f"\u00a71681e(b). I am asking that this entry be verified as "
-                f"a legally distinct obligation, and removed if it is a "
-                f"duplicate of another tradeline."
+                f"This account{acct_str} from {furnisher}{bal_str} appears to be "
+                f"reported under more than one name. Only one party can own and "
+                f"report the same debt at any time. I am requesting proof of ownership "
+                f"from each party, and deletion of any entry that cannot independently "
+                f"verify it is a distinct and separate obligation under 15 U.S.C. §1681e(b)."
             )
 
+    # ── MULTI FURNISHER SAME BALANCE ──────────────────────────────────────
     elif attack_type == "multi_furnisher_same_balance":
         reason = (
-            f"{opener}multiple companies are reporting what looks like "
-            f"the same amount. If this is one debt, only one company should "
-            f"be reporting it — whoever actually holds it right now. "
-            f"I am asking that each company show independent proof of ownership "
-            f"and their right to report. {v_close}"
+            f"Multiple companies — including {furnisher}{acct_str} — appear to be "
+            f"reporting the same balance{bal_str}. If this is one debt, only whoever "
+            f"actually holds it right now should be reporting it. I am asking each "
+            f"reporting company to show independent proof of ownership and their "
+            f"right to report under 15 U.S.C. §1681s-2. Any company that cannot "
+            f"prove they are the current holder of this debt needs to be removed."
         )
 
+    # ── CROSS-BUREAU BALANCE CONFLICT ─────────────────────────────────────
     elif attack_type == "cross_bureau_balance_conflict":
-        reason = (
-            f"This account shows a different balance depending on which "
-            f"bureau you look at. One of those numbers has to be wrong — "
-            f"the balance cannot be two things at once. I am asking that "
-            f"the correct balance be confirmed and the wrong one corrected."
-        )
-
-    elif attack_type == "cross_bureau_payment_status_conflict":
-        v = variation_idx % 3
-        if v == 0:
+        if v3 == 0:
             reason = (
-                f"The payment status on this account is different depending on "
-                f"which bureau is reporting it. That does not make sense — the "
-                f"status should be the same everywhere. I am asking that the "
-                f"accurate payment status be determined and reported consistently."
+                f"The balance on this {furnisher} account{acct_str} is being "
+                f"reported as {balance or 'different amounts'} at this bureau, "
+                f"but a different figure appears elsewhere. A balance is a specific "
+                f"dollar amount at a specific point in time — it cannot be two "
+                f"different numbers simultaneously. One of those figures has to be "
+                f"wrong. I am asking {furnisher} to document the actual correct "
+                f"balance and update all three bureaus to show the same number."
             )
-        elif v == 1:
+        elif v3 == 1:
             reason = (
-                f"This account is being reported with a different payment status "
-                f"at each bureau. The bureaus are showing conflicting information "
-                f"about the same account, which cannot all be correct. I am "
-                f"asking that the accurate status be verified and that all three "
-                f"bureaus reflect the same correct information."
+                f"I noticed that {furnisher}{acct_str} shows a balance of "
+                f"{balance or 'a certain amount'} here, but a different balance "
+                f"at another bureau{rpt_str}. There is only one correct balance "
+                f"for this account at any given time. Under 15 U.S.C. §1681e(b), "
+                f"I am requesting that the accurate figure be verified with account "
+                f"statements and reported consistently everywhere."
             )
         else:
             reason = (
-                f"The payment classification for this account varies across the "
-                f"bureaus. An account cannot have multiple payment statuses "
-                f"simultaneously — only one can be accurate. I am disputing "
-                f"whichever reporting is incorrect and requesting that the "
-                f"accurate status be applied consistently."
+                f"There is a balance discrepancy on this {furnisher} account{acct_str}. "
+                f"This bureau shows {balance or 'one amount'}, while another bureau "
+                f"shows something different. A creditor reports one balance — not "
+                f"different numbers to different bureaus. At least one bureau is "
+                f"receiving inaccurate data. I am requesting verification of the "
+                f"correct balance with primary account documentation and correction "
+                f"at whichever bureau is reporting the wrong figure."
             )
 
+    # ── CROSS-BUREAU PAYMENT STATUS CONFLICT ──────────────────────────────
+    elif attack_type == "cross_bureau_payment_status_conflict":
+        if v3 == 0:
+            reason = (
+                f"The payment status on this {furnisher} account{acct_str} is "
+                f"inconsistent across bureaus. Here it shows as '{pay_status}' — "
+                f"but a different status appears elsewhere. The same account cannot "
+                f"have two different payment statuses. I am asking that the accurate "
+                f"status be determined and reported the same way at every bureau."
+            )
+        elif v3 == 1:
+            reason = (
+                f"{furnisher}{acct_str} is reporting this account with a payment "
+                f"status of '{pay_status}' here, but the other bureaus show something "
+                f"different. These conflicting classifications cannot all be correct. "
+                f"Under 15 U.S.C. §1681e(b), I am asking that the right status be "
+                f"verified and that all three bureaus are updated to match."
+            )
+        else:
+            reason = (
+                f"I am disputing the payment classification on this account from "
+                f"{furnisher}{acct_str}. The status here is '{pay_status}' but it "
+                f"varies at other bureaus — which means at least one bureau is "
+                f"getting inaccurate information from the furnisher. Only one "
+                f"status can be correct. I am requesting verification and correction."
+            )
+
+    # ── CROSS-BUREAU ACCOUNT STATUS CONFLICT ──────────────────────────────
     elif attack_type == "cross_bureau_account_status_conflict":
         reason = (
-            f"This account has a different status — open, closed, or derogatory "
-            f"— depending on which bureau you check. One of them is wrong. "
-            f"I am asking that the correct status be confirmed and the "
-            f"discrepancy fixed."
+            f"This account from {furnisher}{acct_str} shows a status of '{status}' "
+            f"here, but a different status at another bureau. Whether an account is "
+            f"open, closed, charged off, or in collection is a factual matter — it "
+            f"cannot differ by bureau. I am asking that the correct status be "
+            f"determined and that the inaccurate reporting be corrected or deleted."
         )
 
+    # ── OPENED AFTER LAST ACTIVE ──────────────────────────────────────────
     elif attack_type == "opened_after_last_active":
         reason = (
-            f"This account shows an open date of {item.get('date_opened','')} "
-            f"but a date last active of {item.get('date_last_active','')} — "
-            f"which is earlier than when it was supposedly opened. An account "
-            f"cannot have activity before it existed. This chronological "
-            f"impossibility indicates that at least one of these dates is "
-            f"being reported inaccurately."
+            f"There is a date problem with this account from {furnisher}{acct_str}. "
+            f"The open date is listed as {date_opened}, but the last activity date "
+            f"is {date_active} — which is before the account supposedly opened. "
+            f"An account cannot have activity before it existed. At least one of "
+            f"these dates is wrong, and inaccurate dates violate 15 U.S.C. §1681e(b). "
+            f"I am asking that both dates be verified with the original records and "
+            f"the incorrect one corrected."
         )
 
+    # ── PAST DUE EXCEEDS BALANCE ──────────────────────────────────────────
     elif attack_type == "past_due_exceeds_balance":
         reason = (
-            f"This account reports a past-due amount of "
-            f"{item.get('past_due','')} on a total balance of only "
-            f"{item.get('balance','')}. The past-due amount cannot exceed the "
-            f"total balance — you cannot owe more past-due than the full "
-            f"outstanding debt. This is a mathematical impossibility and "
-            f"indicates that either the balance or the past-due figure is wrong."
+            f"The numbers on this account from {furnisher}{acct_str} do not make "
+            f"sense. The past-due amount being reported is {past_due}, but the total "
+            f"balance is only {balance}. You cannot owe more in past-due payments "
+            f"than the full outstanding debt. This is mathematically impossible, "
+            f"which means either the balance or the past-due figure — or both — "
+            f"is being reported incorrectly."
         )
 
+    # ── BALANCE EXCEEDS CREDIT LIMIT ──────────────────────────────────────
     elif attack_type == "balance_exceeds_credit_limit":
         reason = (
-            f"This account shows a balance of {item.get('balance','')} that "
-            f"substantially exceeds the reported credit limit of "
-            f"{item.get('credit_limit','')}. While fees and interest can push a "
-            f"balance slightly over limit, the extent of this overage indicates "
-            f"that either the balance or the credit limit is being reported "
-            f"inaccurately. I am requesting verification of both figures."
+            f"This account from {furnisher}{acct_str} shows a balance of {balance} "
+            f"against a credit limit of {credit_limit}. While fees can push a balance "
+            f"slightly over the limit, the extent of this difference indicates something "
+            f"is wrong — either the balance is inflated or the credit limit is being "
+            f"understated. Under 15 U.S.C. §1681e(b), both numbers need to be accurate. "
+            f"I am requesting documentation to verify both figures."
         )
 
+    # ── BALANCE EXCEEDS HIGH CREDIT ───────────────────────────────────────
     elif attack_type == "balance_exceeds_high_credit":
         reason = (
-            f"This installment account shows a current balance of "
-            f"{item.get('balance','')} that exceeds the original loan amount "
-            f"of {item.get('high_credit','')}. On an installment loan, "
-            f"the balance can only decrease over time as payments are made — "
-            f"it cannot grow beyond the original principal. This indicates "
-            f"a reporting error in either the balance or the original amount."
+            f"Something is wrong with the balance on this {furnisher} account{acct_str}. "
+            f"The current balance is {balance}, but that exceeds the original loan amount "
+            f"of {high_credit}. On an installment loan, the balance should decrease over "
+            f"time as payments are made — it cannot grow beyond the original principal "
+            f"without indicating a reporting error. I am asking that both figures be "
+            f"verified with original records and any error corrected."
         )
 
+    # ── OPEN STATUS / CHARGEOFF CONFLICT ──────────────────────────────────
     elif attack_type == "open_status_chargeoff_conflict":
         reason = (
-            f"This account is reported as 'Open' in its account status, "
-            f"but the payment status is '{item.get('payment_status','')}'. "
-            f"An account that has been charged off or placed in collection "
-            f"is by definition no longer open — it was closed when it was "
-            f"charged off. Reporting it as both open and charged-off is "
-            f"contradictory and inaccurate."
+            f"This account from {furnisher}{acct_str} is listed as 'Open' in the "
+            f"account status, but the payment status shows '{pay_status}'. Those two "
+            f"things cannot coexist. An account that has been charged off or sent to "
+            f"collections is not open — it was closed when it defaulted. Reporting "
+            f"it as both open and charged-off is directly contradictory and inaccurate "
+            f"under 15 U.S.C. §1681e(b). I am asking that the correct status be "
+            f"applied and the inaccurate one removed."
         )
 
+    # ── PAID STATUS WITH PAST DUE ─────────────────────────────────────────
     elif attack_type == "paid_status_with_past_due":
         reason = (
-            f"This account has a status of 'Paid' but is also reporting "
-            f"a past-due amount of {item.get('past_due','')}. An account "
-            f"that has been paid cannot simultaneously have an outstanding "
-            f"past-due balance. These two data points directly contradict "
-            f"each other and indicate an error in the reporting."
+            f"The reporting on this account from {furnisher}{acct_str} is contradictory. "
+            f"The status shows as 'Paid,' but there is also a past-due amount of "
+            f"{past_due} being reported. An account that has been paid cannot "
+            f"simultaneously carry an outstanding past-due balance — those two "
+            f"things directly contradict each other. One of them is wrong, and "
+            f"I am asking that the accurate information be verified and the "
+            f"inaccurate data corrected immediately."
         )
 
+    # ── CLOSED WITH BALANCE ───────────────────────────────────────────────
     elif attack_type == "closed_with_balance":
         reason = (
-            f"This account shows a status of 'Closed' but is reporting "
-            f"a balance of {item.get('balance','')}. A closed account that "
-            f"is not in collection or charged off should reflect a zero "
-            f"balance — the account was closed, meaning the relationship "
-            f"with the creditor ended. I am asking that this discrepancy "
-            f"be investigated and the balance be corrected."
+            f"This account from {furnisher}{acct_str} shows a status of 'Closed' "
+            f"but is still reporting a balance of {balance}. A closed account that "
+            f"is not in collection or charged off should carry a zero balance — "
+            f"when the account closed, the creditor relationship ended. "
+            f"I am asking that this discrepancy be investigated and either the "
+            f"balance be corrected to zero or the account status be updated to "
+            f"accurately reflect why a balance remains."
         )
 
+    # ── CURRENT PAYMENT / DEROGATORY STATUS ───────────────────────────────
     elif attack_type == "current_payment_derogatory_status":
         reason = (
-            f"This account shows a payment status of 'Current' — meaning "
-            f"no payment is overdue — but an account status of 'Derogatory'. "
-            f"If all payments are being made on time, the account cannot be "
-            f"classified as derogatory. These two classifications directly "
-            f"contradict each other. I am asking that the accurate status "
-            f"be determined and the incorrect one corrected or removed."
+            f"There is a direct contradiction in how {furnisher} is reporting "
+            f"this account{acct_str}. The payment status shows 'Current' — meaning "
+            f"no payment is overdue — but the account classification is 'Derogatory'. "
+            f"Those two things cannot both be true at the same time. If all payments "
+            f"are being made on time, the account cannot be classified as derogatory. "
+            f"I am asking that the accurate classification be applied and the "
+            f"conflicting one corrected under 15 U.S.C. §1681e(b)."
         )
 
+    # ── MONTHLY PAYMENT ON COLLECTION ─────────────────────────────────────
     elif attack_type == "monthly_payment_on_collection":
         reason = (
-            f"This collection account is reporting a monthly payment of "
-            f"{item.get('monthly_payment','')}. Collection accounts do not "
-            f"have an ongoing payment schedule — the original creditor "
-            f"relationship has ended and the debt has been transferred. "
-            f"There is no creditor expecting monthly payments, making "
-            f"this field inaccurate."
+            f"This collection account from {furnisher}{acct_str} is reporting a "
+            f"monthly payment of {monthly_pmt}. Collection accounts do not have an "
+            f"ongoing monthly payment schedule — the original creditor relationship "
+            f"ended when the account defaulted and was transferred. There is no "
+            f"entity expecting regular monthly payments from me on this account, "
+            f"which makes this field inaccurate and misleading under 15 U.S.C. §1681e(b)."
         )
 
+    # ── CROSS-BUREAU DATE OPENED CONFLICT ─────────────────────────────────
     elif attack_type == "cross_bureau_date_opened_conflict":
         reason = (
-            f"The date this account was opened is being reported differently "
-            f"across bureaus. The date an account was opened is a historical "
-            f"fact set by the original creditor — it cannot legitimately vary "
-            f"by bureau. I am asking that the correct opening date be verified "
-            f"and reported consistently."
+            f"The date this account from {furnisher}{acct_str} was opened is being "
+            f"reported differently across bureaus. Here it shows {date_opened}. "
+            f"The date an account was opened is a historical fact established by the "
+            f"original creditor — it cannot legitimately vary by bureau. I am asking "
+            f"that the correct opening date be verified with the original account "
+            f"records and reported consistently at all three bureaus."
         )
 
+    # ── CROSS-BUREAU ACCOUNT TYPE CONFLICT ────────────────────────────────
     elif attack_type == "cross_bureau_account_type_conflict":
         reason = (
-            f"This account is classified differently depending on which "
-            f"bureau is reporting it. The account type is a factual "
-            f"characteristic of the account that cannot change by bureau. "
-            f"At least one bureau is reporting an incorrect classification, "
-            f"which must be corrected."
+            f"This account from {furnisher}{acct_str} is classified differently "
+            f"depending on which bureau you look at. The account type is a factual "
+            f"characteristic set by the original creditor — it cannot legitimately "
+            f"change from bureau to bureau. At least one bureau is receiving "
+            f"inaccurate information. Under 15 U.S.C. §1681e(b), I am requesting "
+            f"that the correct account type be confirmed and applied consistently."
         )
 
+    # ── CROSS-BUREAU CREDIT LIMIT CONFLICT ────────────────────────────────
     elif attack_type == "cross_bureau_credit_limit_conflict":
         reason = (
-            f"The credit limit for this account differs across bureaus. "
-            f"A credit limit is set by the creditor and applies to the "
-            f"account — it cannot be a different number at different bureaus. "
-            f"I am asking that the accurate credit limit be confirmed and "
-            f"all bureaus report it correctly."
+            f"The credit limit for this {furnisher} account{acct_str} is being "
+            f"reported as a different number at different bureaus. A credit limit "
+            f"is set by the creditor and is specific to the account — it cannot "
+            f"be one amount here and a different amount somewhere else. "
+            f"I am asking that the accurate credit limit be confirmed and that "
+            f"all three bureaus report the same correct figure."
         )
 
+    # ── CROSS-BUREAU HIGH CREDIT CONFLICT ─────────────────────────────────
     elif attack_type == "cross_bureau_high_credit_conflict":
-        reason = (
-            f"The high credit amount — which reflects the original loan amount "
-            f"or highest balance — is being reported differently across bureaus. "
-            f"This is a factual characteristic of the account that should be "
-            f"consistent. The discrepancy indicates inaccurate reporting at "
-            f"one or more bureaus."
-        )
+        bal_note = f" This bureau shows {high_credit}" if high_credit else ""
+        if v3 == 0:
+            reason = (
+                f"The high credit amount for this {furnisher} account{acct_str} — "
+                f"which represents the original loan amount or the highest balance "
+                f"this account ever carried — is not the same at every bureau.{bal_note}, "
+                f"but another bureau shows a different number. That figure is a "
+                f"historical fact about the account that cannot legitimately differ "
+                f"by bureau. The discrepancy means at least one bureau is receiving "
+                f"inaccurate data from {furnisher}. Under 15 U.S.C. §1681e(b), "
+                f"I am asking that the correct amount be verified with original "
+                f"account records and reported consistently."
+            )
+        elif v3 == 1:
+            reason = (
+                f"I noticed that {furnisher}{acct_str} is reporting different high "
+                f"credit amounts depending on which bureau you look at.{bal_note} "
+                f"at this bureau. The high credit figure reflects the highest balance "
+                f"or original loan amount — a fact that does not change. Having a "
+                f"different number at each bureau means {furnisher} is not reporting "
+                f"accurately to all of them. I am asking that the correct figure be "
+                f"verified and corrected wherever it is wrong under 15 U.S.C. §1681e(b)."
+            )
+        else:
+            reason = (
+                f"There is an inconsistency in the high credit amount being reported "
+                f"for this {furnisher} account{acct_str} across bureaus.{bal_note} "
+                f"here. The original loan amount or highest balance reached on an "
+                f"account is a fixed data point — it cannot be a different number "
+                f"at one bureau versus another. At least one of those numbers is "
+                f"wrong. I am disputing the inaccurate figure and requesting that "
+                f"{furnisher} provide documentation of the correct amount so all "
+                f"bureaus can be updated."
+            )
 
+    # ── STUDENT LOAN — SPECIFIC ATTACKS ───────────────────────────────────
     elif attack_type == "student_loan_duplicate_tradeline":
         reason = (
-            f"This student loan appears to be reported more than once — the same "
-            f"loan is showing up as a separate tradeline with the same balance and "
-            f"opening date. This is consistent with the widespread servicer transfer "
-            f"errors that the Department of Education has acknowledged affecting over "
-            f"a million borrowers. When a loan transfers between servicers, only the "
-            f"current servicer should be reporting an active balance. Duplicate "
-            f"reporting inflates my total debt and is inaccurate under 15 U.S.C. "
-            f"§1681e(b). I am requesting removal of the duplicate entry."
+            f"This student loan from {furnisher}{acct_str} appears to be reported "
+            f"more than once — the same loan showing up as a separate tradeline. "
+            f"When a loan transfers between servicers, only the current servicer "
+            f"should be reporting an active balance. Having it listed twice by "
+            f"different parties inflates my total debt and is inaccurate under "
+            f"15 U.S.C. §1681e(b). I am requesting removal of the duplicate entry "
+            f"and confirmation that only one servicer is actively reporting this loan."
         )
 
     elif attack_type == "student_loan_transferred_still_active":
         reason = (
-            f"This student loan servicer appears to still be reporting this account "
-            f"as active after the loan was transferred to a new servicer. When a "
-            f"federal student loan is transferred, the previous servicer must update "
-            f"their tradeline to show a zero balance and a 'transferred' or 'closed' "
-            f"status. Continuing to report an active balance after transfer doubles "
-            f"the debt on my credit report and violates 15 U.S.C. §1681s-2(a)(1). "
+            f"This student loan from {furnisher}{acct_str} appears to still be "
+            f"reported as active after the loan was transferred to a new servicer. "
+            f"When a federal loan transfers, the prior servicer must update their "
+            f"tradeline to show a zero balance and a transferred or closed status. "
+            f"Continuing to report an active balance after the transfer doubles the "
+            f"debt on my credit report, which is a violation of 15 U.S.C. §1681s-2(a)(1). "
             f"I am requesting that this tradeline be corrected to reflect the transfer."
         )
 
     elif attack_type == "student_loan_deferment_late_payment":
         reason = (
-            f"This student loan is reporting a late payment during what appears to "
-            f"be a deferment or forbearance period. When a student loan is in an "
-            f"authorized deferment or forbearance, no payment is legally due — "
-            f"therefore no payment can be late. This error is consistent with the "
-            f"documented servicer billing mistakes following the COVID-19 payment "
-            f"pause, which the CFPB reported affected millions of borrowers. Reporting "
-            f"a late payment when no payment was due is a violation of 15 U.S.C. "
-            f"§1681e(b). I am requesting removal of this late payment notation."
+            f"This student loan from {furnisher}{acct_str} is showing a late payment "
+            f"during what appears to be a deferment or forbearance period. When a "
+            f"loan is in an authorized deferment or forbearance, no payment is legally "
+            f"due — so no payment can be late. Reporting a late mark when no payment "
+            f"was actually required is a violation of 15 U.S.C. §1681e(b). "
+            f"I am requesting removal of any late payment notation that falls during "
+            f"a deferment or forbearance period."
         )
 
     elif attack_type == "student_loan_paid_still_reporting":
         reason = (
-            f"This student loan account shows a paid or closed status but continues "
-            f"to report an outstanding balance. A loan that has been paid in full "
-            f"must reflect a zero balance. The failure to update the balance after "
-            f"payoff is a furnisher accuracy violation under 15 U.S.C. §1681s-2(a)(1). "
-            f"I am requesting that the balance be corrected to zero to accurately "
-            f"reflect the current status of this account."
+            f"This student loan from {furnisher}{acct_str} shows a paid or closed "
+            f"status but continues to report an outstanding balance{bal_str}. A loan "
+            f"that has been paid in full must show a zero balance. Failing to update "
+            f"the balance after payoff is a furnisher accuracy violation under "
+            f"15 U.S.C. §1681s-2(a)(1). I am requesting that the balance be "
+            f"corrected to zero to accurately reflect this account's current status."
         )
 
     elif attack_type == "student_loan_discharged_still_active":
-        v = variation_idx % 2
-        if v == 0:
-            reason = (
-                f"This student loan appears to have been discharged or forgiven, "
-                f"yet continues to show an active balance with a derogatory status. "
-                f"Loans discharged through PSLF, total and permanent disability, "
-                f"borrower defense, or other programs must be reported with a zero "
-                f"balance and appropriate discharged status. Failure to update the "
-                f"reporting after discharge violates 15 U.S.C. §1681s-2(a)(1). "
-                f"I am requesting verification of this loan's current status and "
-                f"correction of the credit reporting to reflect any discharge."
-            )
-        else:
-            reason = (
-                f"This account shows indicators of a loan discharge or forgiveness "
-                f"event but the credit reporting has not been updated to reflect it. "
-                f"The servicer is required under 15 U.S.C. §1681s-2(a)(1) to report "
-                f"accurate information — including updating a tradeline to zero balance "
-                f"and discharged status after any qualifying forgiveness event. I am "
-                f"disputing the accuracy of this account and requesting documentation "
-                f"of the current loan status directly from the Department of Education "
-                f"or the loan servicer."
-            )
+        reason = (
+            f"This student loan from {furnisher}{acct_str} appears to have been "
+            f"discharged or forgiven, yet continues to show an active balance{bal_str} "
+            f"with a derogatory status. Discharged loans — whether through PSLF, "
+            f"total and permanent disability, borrower defense, or other programs — "
+            f"must be reported with a zero balance and an appropriate discharged status. "
+            f"Continuing to show a balance and derogatory classification after discharge "
+            f"violates 15 U.S.C. §1681s-2(a)(1). I am requesting verification of "
+            f"this loan's discharge status and immediate correction of the reporting."
+        )
 
     elif attack_type == "student_loan_default_inaccurate":
         reason = (
-            f"This student loan is reporting a default status that may be inaccurate. "
-            f"When a federal student loan is successfully rehabilitated, consolidated "
-            f"out of default, or restored to good standing — including under the "
-            f"Department of Education's Fresh Start program that restored eligibility "
-            f"for approximately 3 million borrowers in 2023-2024 — the servicer is "
-            f"required to remove the default notation from the credit report. "
-            f"Under 15 U.S.C. §1681s-2(a)(1), furnishers must report accurate "
-            f"information. I am requesting verification of the current loan status "
-            f"and correction of any inaccurate default notation."
+            f"This student loan from {furnisher}{acct_str} is reporting a default "
+            f"status that I believe is inaccurate. When a federal student loan is "
+            f"successfully rehabilitated, consolidated out of default, or restored to "
+            f"good standing — including through the Department of Education's Fresh "
+            f"Start program — the servicer is required to remove the default notation. "
+            f"Under 15 U.S.C. §1681s-2(a)(1), furnishers must report accurate, "
+            f"current information. I am requesting verification of the current loan "
+            f"status and correction of any inaccurate default notation."
         )
 
     elif attack_type == "student_loan_balance_inflated":
         reason = (
-            f"This student loan is reporting a current balance that significantly "
-            f"exceeds the original loan amount. While interest accrual is expected, "
-            f"the magnitude of this discrepancy is consistent with documented "
-            f"servicer billing errors — including improper interest capitalization, "
-            f"processing errors during servicer transfers, and fees applied in error. "
-            f"The CFPB has documented widespread billing errors across major servicers. "
-            f"Under 15 U.S.C. §1681e(b), only accurate information may be reported. "
-            f"I am requesting a complete itemized statement of all interest, fees, "
-            f"and charges comprising this balance, and correction of any errors found."
+            f"This student loan from {furnisher}{acct_str} is reporting a current "
+            f"balance{bal_str} that significantly exceeds what I would expect based "
+            f"on the original loan amount. While interest accrual is normal, the "
+            f"extent of this difference is concerning. CFPB has documented widespread "
+            f"billing errors across major servicers — including improper interest "
+            f"capitalization and processing errors during transfers. Under 15 U.S.C. "
+            f"§1681e(b), only accurate information may be reported. I am requesting "
+            f"a complete itemized statement of all interest, fees, and charges, "
+            f"and correction of any errors."
         )
 
+    # ── REINSERTION VIOLATION ─────────────────────────────────────────────
     elif attack_type == "reinsertion_violation":
-        v = variation_idx % 2
-        if v == 0:
+        if v2 == 0:
             reason = (
-                f"This account was previously deleted from my credit report "
-                f"following a dispute. It has since reappeared without the "
-                f"written notice required by 15 U.S.C. §1681i(a)(5)(B). "
-                f"Before reinserting a deleted item, the bureau must notify "
-                f"the consumer within 5 business days and certify that the "
-                f"furnisher has verified the information. Neither requirement "
-                f"was met. This reinsertion is a willful violation subject to "
-                f"statutory damages of $100 to $1,000 per occurrence plus "
-                f"punitive damages under 15 U.S.C. §1681n. I am demanding "
-                f"immediate re-deletion and filing a CFPB complaint."
+                f"This account from {furnisher}{acct_str} was previously deleted "
+                f"from my credit report following a dispute. It has since reappeared "
+                f"without the written notice required by 15 U.S.C. §1681i(a)(5)(B). "
+                f"Before reinserting a deleted item, the bureau must notify the consumer "
+                f"within 5 business days and certify that the furnisher has verified the "
+                f"information. Neither of those steps happened. This reinsertion is a "
+                f"willful violation subject to statutory and punitive damages under "
+                f"15 U.S.C. §1681n. I am demanding immediate re-deletion."
             )
         else:
             reason = (
-                f"This account was removed from my credit report after a "
-                f"prior dispute. It has been reinserted without following "
-                f"the mandatory procedure under 15 U.S.C. §1681i(a)(5)(B), "
-                f"which requires: (1) consumer notice within 5 business days "
-                f"of reinsertion, and (2) certification by the furnisher that "
-                f"the information is complete and accurate. This procedure was "
-                f"not followed. Reinsertion without notice is among the most "
-                f"serious FCRA violations — I am demanding deletion and "
-                f"reserving all rights under 15 U.S.C. §1681n."
+                f"This account from {furnisher}{acct_str} was removed from my file "
+                f"after a prior dispute. It has been reinserted without following "
+                f"the mandatory consumer notice procedure under 15 U.S.C. §1681i(a)(5)(B) — "
+                f"which requires written notice to me within 5 business days and "
+                f"certification by the furnisher. That procedure was not followed. "
+                f"I am demanding this account be deleted again and I am preserving "
+                f"all rights under 15 U.S.C. §1681n for the unlawful reinsertion."
             )
 
+    # ── MEDICAL DEBT — UNDER $500 ─────────────────────────────────────────
     elif attack_type == "medical_debt_under_500":
-        bal = item.get("balance", "")
-        v   = variation_idx % 2
-        if v == 0:
+        if v2 == 0:
             reason = (
-                f"This is a medical collection with a reported balance of {bal}. "
-                f"In April 2023, all three major credit bureaus — Equifax, Experian, "
-                f"and TransUnion — publicly committed to removing all medical "
-                f"collection accounts with balances under $500 from consumer credit "
-                f"reports. This account falls below that threshold and should not "
-                f"be on my report. I am requesting its immediate removal per the "
-                f"bureau's own stated policy."
+                f"This is a medical collection from {furnisher}{acct_str} with a "
+                f"balance of {balance}. In April 2023, all three major credit bureaus "
+                f"publicly committed to removing medical collection accounts with "
+                f"balances under $500 from consumer credit reports. This account is "
+                f"below that threshold and should not be here. I am requesting its "
+                f"immediate removal per the bureau's own stated policy."
             )
         else:
             reason = (
-                f"This medical collection has a balance of {bal}, which is below "
-                f"the $500 threshold established by all three bureaus in April 2023. "
-                f"Under that voluntary commitment, sub-$500 medical debts are no "
-                f"longer reportable regardless of payment status. Continuing to "
-                f"report this account is inconsistent with the bureau's own policy "
-                f"and violates the accuracy standard under 15 U.S.C. §1681e(b)."
+                f"This medical debt from {furnisher}{acct_str} has a balance of "
+                f"{balance}, which falls below the $500 threshold established by "
+                f"all three bureaus in April 2023. Under that voluntary commitment, "
+                f"sub-$500 medical debts are no longer reportable regardless of "
+                f"payment status. Reporting this account is inconsistent with the "
+                f"bureau's own policy and violates the accuracy standard under "
+                f"15 U.S.C. §1681e(b). I am requesting immediate deletion."
             )
 
+    # ── PAID MEDICAL COLLECTION ───────────────────────────────────────────
     elif attack_type == "paid_medical_collection":
-        v = variation_idx % 2
-        if v == 0:
+        if v2 == 0:
             reason = (
-                f"This is a paid or settled medical collection. As of July 2022, "
-                f"all three major credit bureaus committed to removing paid medical "
-                f"collection accounts from consumer credit reports. This account "
-                f"reflects a zero balance or a paid status yet continues to appear "
+                f"This medical collection from {furnisher}{acct_str} has been paid "
+                f"or settled. As of July 2022, all three major credit bureaus committed "
+                f"to removing paid medical collection accounts from consumer credit "
+                f"reports. This account shows a zero balance or paid status yet remains "
                 f"as a derogatory item. I am requesting its removal per the bureau's "
-                f"own stated policy and 15 U.S.C. §1681e(b) accuracy requirements."
+                f"own policy and the accuracy requirements of 15 U.S.C. §1681e(b)."
             )
         else:
             reason = (
-                f"This medical collection has been paid or settled and should have "
-                f"been removed from my credit file. In July 2022, all three bureaus "
-                f"publicly committed to no longer reporting paid medical debt. "
-                f"Keeping this account on my report after payment is inaccurate "
-                f"and contrary to the bureau's stated policy. I am asking that "
-                f"it be deleted immediately."
+                f"This medical collection from {furnisher}{acct_str} was paid or "
+                f"settled and should have been removed from my credit file. In July "
+                f"2022, all three bureaus publicly committed to no longer reporting "
+                f"paid medical debt. Keeping this account as a derogatory item after "
+                f"payment is contrary to the bureau's own stated policy. I am asking "
+                f"for it to be deleted immediately."
             )
 
+    # ── MEDICAL DEBT PREMATURE ────────────────────────────────────────────
     elif attack_type == "medical_debt_premature":
-        opened = item.get("date_opened", "")
         reason = (
-            f"This medical collection was opened {opened} — less than 12 months "
-            f"ago. In 2022, all three credit bureaus committed to a 12-month "
-            f"waiting period before any medical debt may appear on a consumer "
-            f"credit report. This account is being reported before that window "
-            f"has elapsed. I am requesting that it be removed until the "
-            f"12-month period has fully passed."
+            f"This medical collection from {furnisher}{acct_str} was opened "
+            f"{date_opened} — less than 12 months ago. All three credit bureaus "
+            f"committed in 2022 to a 12-month waiting period before any medical "
+            f"debt may appear on a consumer credit report. This account is being "
+            f"reported before that window has passed. I am requesting that it be "
+            f"removed until the 12-month period has fully elapsed."
         )
 
+    # ── MEDICAL DEBT STATE LAW ────────────────────────────────────────────
     elif attack_type == "medical_debt_state_law":
         reason = (
-            f"This is a medical collection being reported for a consumer in a "
-            f"state that has enacted legal protections prohibiting medical debt "
-            f"from appearing on consumer credit reports. Reporting this account "
-            f"is not permitted under applicable state law. Under 15 U.S.C. "
-            f"§1681e(b), the bureau must maintain maximum possible accuracy, "
-            f"which includes compliance with state law restrictions. I am "
-            f"requesting immediate removal of this account."
+            f"This medical collection from {furnisher}{acct_str} is being reported "
+            f"for a consumer in a state that has enacted legal protections "
+            f"specifically prohibiting medical debt from appearing on consumer credit "
+            f"reports. Reporting this account violates applicable state law. Under "
+            f"15 U.S.C. §1681e(b), the bureau must maintain maximum possible "
+            f"accuracy, which includes compliance with state-level restrictions. "
+            f"I am requesting immediate removal of this account."
         )
 
+    # ── MEDICAL DEBT ACCURACY ─────────────────────────────────────────────
     elif attack_type == "medical_debt_accuracy":
-        v = variation_idx % 3
-        if v == 0:
+        if v3 == 0:
             reason = (
-                f"This is a medical collection and I am disputing its accuracy. "
-                f"Medical debt is uniquely prone to billing errors — insurance "
-                f"disputes, incorrect coding, surprise bills, and balance inflation "
-                f"are documented systemic problems. Under 15 U.S.C. §1681e(b), "
-                f"this bureau must maintain maximum possible accuracy. I am "
-                f"requesting full verification: itemized bill, proof that "
-                f"insurance was properly applied, original creditor name, "
+                f"I am disputing this medical collection from {furnisher}{acct_str} "
+                f"with a balance of {balance}. Medical billing is uniquely prone to "
+                f"error — insurance disputes, incorrect coding, surprise bills, and "
+                f"balance inflation are documented problems. Under 15 U.S.C. §1681e(b), "
+                f"I am requesting full verification: the complete itemized bill, proof "
+                f"that insurance was properly applied, the original creditor's name, "
                 f"and the exact amount owed at the time of default."
             )
-        elif v == 1:
+        elif v3 == 1:
             reason = (
-                f"I am disputing this medical collection. Medical billing is "
-                f"notoriously inaccurate — the CFPB has documented that medical "
-                f"debt is a poor predictor of creditworthiness and is often "
-                f"reported incorrectly. I am asking that {furnisher} provide "
-                f"a complete itemized statement, evidence that my insurance was "
-                f"properly billed and applied, and documentation that this amount "
-                f"is accurately stated. If the underlying bill cannot be fully "
-                f"verified, this account must be removed."
+                f"I am disputing this medical collection from {furnisher}{acct_str}. "
+                f"Medical bills are frequently incorrect — the CFPB has documented "
+                f"that medical debt is often reported with errors and is a poor "
+                f"predictor of creditworthiness. I am asking {furnisher} to provide "
+                f"a complete itemized statement, evidence that my insurance was properly "
+                f"billed and any adjustments applied, and documentation that the amount "
+                f"reported is accurate. If this cannot be fully verified, it must be removed."
             )
         else:
             reason = (
-                f"This medical collection requires verification under 15 U.S.C. "
-                f"§1681i(a). Medical bills are frequently the result of insurance "
-                f"billing errors, coordination failures, or amounts disputed with "
-                f"the provider. I am requesting that the furnisher provide the "
-                f"original itemized bill, confirmation of insurance payments and "
-                f"adjustments applied, and validation that the reported balance "
-                f"is accurate. Without that documentation, this account cannot "
-                f"be verified and must be deleted."
+                f"This medical collection from {furnisher}{acct_str}{bal_str} requires "
+                f"full verification under 15 U.S.C. §1681i(a). Medical bills often "
+                f"result from insurance billing failures, coordination errors, or "
+                f"disputed amounts. I am requesting the original itemized bill, "
+                f"confirmation of all insurance payments and adjustments, and validation "
+                f"that the reported balance is correct. Without that documentation, "
+                f"this account cannot be verified and must be deleted."
             )
 
+    # ── COLLECTION / LATE PAYMENT CONFLICT ────────────────────────────────
     elif attack_type == "collection_late_payment_conflict":
-        pay_status  = item.get("payment_status", "")
-        acct_detail = item.get("account_type_detail", "")
-        v = variation_idx % 3
-        if v == 0:
+        if v3 == 0:
             reason = (
-                f"This account is identified as a collection account but is also "
-                f"being reported with a payment status of '{pay_status}'. Those two "
-                f"classifications cannot coexist. A collection account represents a "
-                f"debt that has already defaulted and been transferred — there is no "
-                f"active payment obligation remaining, so it cannot simultaneously be "
-                f"late on payments to a creditor. Reporting both inflates the credit "
-                f"damage from a single event and is inaccurate under 15 U.S.C. "
-                f"\u00a71681e(b). I am asking that this be corrected so the account "
-                f"reflects only one accurate classification."
+                f"This account from {furnisher}{acct_str} is identified as a "
+                f"collection, but is also being reported with a payment status of "
+                f"'{pay_status}'. Those two classifications cannot coexist. A "
+                f"collection account represents a debt that has already defaulted "
+                f"and been transferred — there is no active payment obligation "
+                f"remaining, so it cannot simultaneously be 'late' on payments. "
+                f"Reporting both inflates the damage from a single event and "
+                f"is inaccurate under 15 U.S.C. §1681e(b). I am asking that the "
+                f"correct single classification be applied."
             )
-        elif v == 1:
+        elif v3 == 1:
             reason = (
-                f"The payment status of '{pay_status}' on this account conflicts "
-                f"directly with its account type of '{acct_detail}'. An account "
-                f"cannot be a collection — meaning it has already defaulted and been "
-                f"transferred from the original creditor — while also being in an "
-                f"active late-payment status. These are mutually exclusive states. "
-                f"I am requesting that the inaccurate classification be corrected "
-                f"or, if the account cannot be accurately described, that it be deleted."
+                f"The payment status of '{pay_status}' on this {furnisher} account"
+                f"{acct_str} directly conflicts with it being classified as a "
+                f"collection. An account that has defaulted and been transferred "
+                f"to a collector cannot simultaneously be in an active late-payment "
+                f"status — those are mutually exclusive. I am requesting that the "
+                f"inaccurate classification be corrected, or if the account cannot "
+                f"be accurately described at all, that it be deleted."
             )
         else:
             reason = (
-                f"I am disputing the classification of this account as both a "
-                f"collection and a '{pay_status}' account simultaneously. Once a "
-                f"debt is transferred to a collection agency, the original payment "
-                f"schedule no longer exists — there are no more monthly payments to "
-                f"be late on. The late payment notation is inaccurate and creates "
-                f"a double-negative from a single delinquency event. Under "
-                f"15 U.S.C. \u00a71681e(b), only accurate information may be reported."
+                f"I am disputing the dual classification on this {furnisher} account"
+                f"{acct_str} — it is being reported as both a collection and a "
+                f"'{pay_status}' account at the same time. Once a debt goes to a "
+                f"collection agency, the original payment schedule no longer exists. "
+                f"A late payment notation on top of a collection creates a "
+                f"double-negative from one single event, which is inaccurate under "
+                f"15 U.S.C. §1681e(b)."
             )
 
+    # ── LATE COLLECTION CONFLICT ──────────────────────────────────────────
     elif attack_type == "late_collection_conflict":
         reason = (
-            f"The way this account is classified does not add up. It appears "
-            f"to show both a late payment status and collection-type language "
-            f"at the same time, which are contradictory. I am asking that "
-            f"the correct classification be applied based on what the account "
-            f"actually is."
+            f"The classification on this account from {furnisher}{acct_str} does "
+            f"not add up. It appears to carry both a late payment status and "
+            f"collection-type language simultaneously, which are contradictory. "
+            f"A debt that has gone to collection has already defaulted — there are "
+            f"no more payments to be 'late' on. I am asking that the correct single "
+            f"classification be verified and applied, and any inaccurate duplicate "
+            f"notation be removed."
         )
 
+    # ── ABSENT BUREAU REPORTING INCONSISTENCY ─────────────────────────────
     elif attack_type == "absent_bureau_reporting_inconsistency":
-        v = variation_idx % 4
-        if v == 0:
+        if v4 == 0:
             reason = (
-                f"This account is showing as negative on some bureau reports "
-                f"but not on others. If whoever is reporting this has a valid "
-                f"basis to do so, I would expect it to show up consistently. "
-                f"I am asking that you verify whether what is being reported "
-                f"here is accurate and complete."
+                f"This account from {furnisher}{acct_str} is showing as a negative "
+                f"item here but does not appear consistently across all three bureaus. "
+                f"If the information is accurate and verifiable, I would expect it to "
+                f"be reported the same way everywhere. The inconsistency makes me "
+                f"question whether this reporting is accurate. I am asking that it be "
+                f"verified, and if it cannot be confirmed as accurate and complete, removed."
             )
-        elif v == 1:
+        elif v4 == 1:
             reason = (
-                f"I noticed this account appears on my report here but not "
-                f"across all three bureaus. That inconsistency makes me question "
-                f"whether the reporting is accurate. I am asking that this be "
-                f"verified and, if it cannot be confirmed as accurate and "
-                f"complete, that it be removed."
+                f"I noticed this account from {furnisher}{acct_str} appears here "
+                f"as a negative item but is not showing up the same way at all bureaus. "
+                f"Under 15 U.S.C. §1681e(b), every bureau must maintain maximum "
+                f"possible accuracy. An item that cannot be reported consistently "
+                f"raises serious concerns about its accuracy and needs to be "
+                f"fully verified or removed."
             )
-        elif v == 2:
+        elif v4 == 2:
             reason = (
-                f"This account is not being reported the same way at all three "
-                f"bureaus — it shows as a negative item here but not elsewhere. "
-                f"Under 15 U.S.C. \u00a71681e(b), every bureau must maintain "
-                f"maximum possible accuracy. An item that cannot be reported "
-                f"consistently at all bureaus raises serious accuracy concerns "
-                f"and needs to be fully verified."
+                f"The reporting on this {furnisher} account{acct_str} is not "
+                f"consistent. It shows as a derogatory item at this bureau but "
+                f"not at others in the same way. That inconsistency suggests the "
+                f"furnisher may be selectively reporting or reporting information "
+                f"that cannot be verified across all three bureaus. I am asking "
+                f"for full verification and removal if it cannot be confirmed "
+                f"as accurate at all bureaus."
             )
         else:
             reason = (
-                f"The reporting on this account is inconsistent across bureaus. "
-                f"It appears as a derogatory item in some places and not others, "
-                f"which suggests the furnisher is either selectively reporting "
-                f"or reporting information that cannot be verified. I am asking "
-                f"that this account be fully investigated and removed if the "
-                f"reporting cannot be verified as accurate at all bureaus."
+                f"This {furnisher} account{acct_str} appears as a negative here "
+                f"but the reporting is inconsistent across bureaus. A furnisher "
+                f"who reports to one bureau but not others — or reports different "
+                f"information — creates an accuracy problem. Under 15 U.S.C. "
+                f"§1681e(b), I am requesting verification and deletion if the "
+                f"account cannot be reported accurately and consistently."
             )
 
+    # ── LATE PAYMENT HISTORY DISPUTE ──────────────────────────────────────
     elif attack_type == "late_payment_history_dispute":
-        late_codes   = item.get("late_payment_codes", [])
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
         worst = "30"
         for code in actual_lates:
@@ -4448,111 +4592,138 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 worst = val
             elif val == "60" and worst == "30":
                 worst = val
-        late_str  = ", ".join(actual_lates) if actual_lates else "in the payment history"
-        status    = item.get("status","").lower()
-        is_closed = any(k in status for k in ("closed","paid","refinanced"))
-        v = variation_idx % 3
+        late_str = ", ".join(actual_lates) if actual_lates else "in the payment history"
         if is_closed:
-            if v == 0:
+            if v3 == 0:
                 reason = (
-                    f"This account is closed and shows a zero balance, but the payment "
-                    f"history contains a {worst}-day late mark ({late_str}). On a closed "
-                    f"account, late marks must be accurate and the Date of First Delinquency "
-                    f"must be reported correctly so the 7-year clock under 15 U.S.C. "
-                    f"\u00a71681c(a)(4) can be verified. I am requesting that {furnisher} "
-                    f"provide the original payment records confirming the date and amount "
-                    f"of the missed payment and the correct DOFD."
+                    f"This account from {furnisher}{acct_str} is closed and shows a "
+                    f"zero balance, but the payment history contains a {worst}-day "
+                    f"late mark ({late_str}). Late marks on closed accounts still "
+                    f"hurt my credit and must be accurate. I am asking that {furnisher} "
+                    f"provide the original payment records for that month — the exact "
+                    f"due date and the date payment was received — and confirm the "
+                    f"correct Date of First Delinquency. Under 15 U.S.C. §1681c(a)(4), "
+                    f"the DOFD controls how long this account can legally remain."
                 )
-            elif v == 1:
+            elif v3 == 1:
                 reason = (
-                    f"I am disputing a late payment mark on this closed account ({late_str}). "
-                    f"Because the account is paid, the reporting window is controlled by the "
-                    f"Date of First Delinquency under 15 U.S.C. \u00a71681c(c). I am "
-                    f"requesting that {furnisher} provide the original payment records "
-                    f"and the correct DOFD. If this cannot be verified, the late mark "
-                    f"must be removed."
+                    f"I am disputing a {worst}-day late payment mark on this closed "
+                    f"{furnisher} account{acct_str} ({late_str}). Even though the "
+                    f"account is paid, the late mark remains on my report and must "
+                    f"be verified under 15 U.S.C. §1681e(b). I am requesting that "
+                    f"{furnisher} provide original payment records and the correct "
+                    f"Date of First Delinquency. If the late mark cannot be "
+                    f"documented, it must be removed."
                 )
             else:
                 reason = (
-                    f"This closed account has a {worst}-day late payment in its history "
-                    f"({late_str}). Late marks on closed accounts still affect my credit "
-                    f"and must be accurate under 15 U.S.C. \u00a71681e(b). I am asking "
-                    f"{furnisher} to verify this with original payment records — due date, "
-                    f"receipt date — and to confirm the DOFD is correct at all bureaus."
+                    f"There is a {worst}-day late payment in the history of this "
+                    f"closed account from {furnisher}{acct_str} ({late_str}). "
+                    f"I am asking {furnisher} to verify this with original records "
+                    f"showing when the payment was due and when it was actually "
+                    f"received, and to confirm the DOFD is correct at all bureaus. "
+                    f"Under 15 U.S.C. §1681e(b), every piece of reported information "
+                    f"must be accurate."
                 )
         else:
-            if v == 0:
+            if v3 == 0:
                 reason = (
-                    f"This account shows a {worst}-day late payment in its history "
-                    f"({late_str}). Under 15 U.S.C. \u00a71681e(b), I am requesting "
-                    f"documentation from {furnisher} — original payment records showing "
-                    f"when payment was due and when it was received. If they cannot "
-                    f"produce that, the late mark must be removed."
+                    f"This account from {furnisher}{acct_str} shows a {worst}-day "
+                    f"late payment in its history ({late_str}){rpt_str}. I am "
+                    f"disputing this mark and requesting documentation from {furnisher} "
+                    f"— specifically the original payment records showing the exact "
+                    f"due date and when the payment was received. Under 15 U.S.C. "
+                    f"§1681e(b), if they cannot verify this with actual records, "
+                    f"the late mark must be removed."
                 )
-            elif v == 1:
+            elif v3 == 1:
                 reason = (
-                    f"I am disputing the {worst}-day late payment on this account "
-                    f"({late_str}). I am asking {furnisher} to provide the original "
-                    f"billing statement and payment records for that month, confirming "
-                    f"the exact due date and receipt date. Under 15 U.S.C. "
-                    f"\u00a71681s-2(a)(1), this cannot be reported without primary "
-                    f"documentation to back it up."
+                    f"I am disputing the {worst}-day late payment on this {furnisher} "
+                    f"account{acct_str} ({late_str}). I need {furnisher} to provide "
+                    f"the original billing statement and payment records for the months "
+                    f"in question, showing the exact due date and date of receipt. "
+                    f"Under 15 U.S.C. §1681s-2(a)(1), a late payment cannot be "
+                    f"reported without primary documentation to back it up."
                 )
             else:
                 reason = (
-                    f"There is a {worst}-day late mark in this account's history "
-                    f"({late_str}) that I am disputing. I am asking {furnisher} to "
-                    f"produce the original records for that month to confirm the mark "
-                    f"is accurate. Without that, the late payment cannot be verified "
-                    f"under the FCRA."
+                    f"There is a {worst}-day late mark in this {furnisher} account's "
+                    f"history{acct_str} ({late_str}) that I dispute. I am asking "
+                    f"them to produce original records for those months to confirm "
+                    f"the mark is accurate. A late mark that cannot be verified "
+                    f"with original payment documentation must be removed under "
+                    f"the FCRA."
                 )
 
+    # ── CROSS-BUREAU PAYMENT HISTORY DATE CONFLICT ────────────────────────
     elif attack_type == "cross_bureau_payment_history_date_conflict":
-        late_codes   = item.get("late_payment_codes", [])
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
-        late_str     = ", ".join(actual_lates) if actual_lates else "in the payment history"
-        v = variation_idx % 2
-        if v == 0:
+        late_str = ", ".join(actual_lates) if actual_lates else "in the payment history"
+        if v2 == 0:
             reason = (
-                f"This account shows a late payment ({late_str}) but the month reported "
-                f"is different depending on which bureau you look at. A payment can only "
-                f"be late on one specific date — the same event cannot be reported in "
-                f"different months at different bureaus. Under 15 U.S.C. \u00a71681e(b), "
-                f"I am requesting that {furnisher} provide the original payment records "
-                f"and correct the reporting to show the same accurate date at all three bureaus."
+                f"This account from {furnisher}{acct_str} shows a late payment "
+                f"({late_str}), but the month it is reported in differs depending on "
+                f"which bureau you look at. A payment can only be late on one specific "
+                f"date — the same event cannot appear in different months at different "
+                f"bureaus. Under 15 U.S.C. §1681e(b), I am requesting that {furnisher} "
+                f"provide the original payment records and correct the reporting to "
+                f"show the same accurate date consistently at all three bureaus."
             )
         else:
             reason = (
-                f"The late payment on this account is reported in different months "
-                f"across bureaus ({late_str} at this bureau). An event cannot happen "
-                f"on two different dates — this is an accuracy violation under "
-                f"15 U.S.C. \u00a71681e(b). I am asking that {furnisher} review the "
-                f"original payment records and correct all three bureaus to show the "
+                f"The late payment on this {furnisher} account{acct_str} ({late_str}) "
+                f"is being reported in different months across bureaus. An event "
+                f"cannot occur on two different dates — this is an accuracy violation "
+                f"under 15 U.S.C. §1681e(b). I am asking {furnisher} to review the "
+                f"original payment records and update all three bureaus to show the "
                 f"same accurate month. If the correct date cannot be verified, the "
-                f"late mark must be removed."
+                f"late mark must be removed entirely."
             )
 
-    else:  # requires_basic_verification
-        if variation_idx % 3 == 0:
+    # ── FALLBACK: requires_basic_verification ─────────────────────────────
+    else:
+        # Use every piece of available data to make this unique per account
+        details = []
+        if balance and balance not in ("0","0.0","$0.00",""):
+            details.append(f"a reported balance of {balance}")
+        if pay_status:
+            details.append(f"a payment status of '{pay_status}'")
+        if date_opened:
+            details.append(f"opened {date_opened}")
+        if last_rpt:
+            details.append(f"last reported {last_rpt}")
+
+        detail_str = ""
+        if details:
+            detail_str = f" I see it listed with {', '.join(details)}."
+
+        if v3 == 0:
             reason = (
-                f"I am disputing the accuracy of this account. I am asking that "
-                f"{furnisher} provide full documentation — original agreement, "
-                f"complete payment history, account status, and the exact date "
-                f"I first fell behind. {v_close}"
+                f"I went through my credit report carefully and I have questions "
+                f"about this account from {furnisher}{acct_str}.{detail_str} I am "
+                f"asking that {furnisher} provide the original credit agreement with "
+                f"my signature, a complete payment history from the date the account "
+                f"was opened, documentation of the current balance and how it was "
+                f"calculated, and the exact date I first fell behind. Without all of "
+                f"that, I cannot confirm this information is accurate or complete."
             )
-        elif variation_idx % 3 == 1:
+        elif v3 == 1:
             reason = (
-                f"{opener}I do not believe the information being reported here "
-                f"is complete or accurate. I need {furnisher} to back this up "
-                f"with the original contract, a full payment record, and the "
-                f"correct date of first delinquency. {v_close}"
+                f"I do not believe the information being reported by {furnisher} on "
+                f"this account{acct_str} is complete or accurate.{detail_str} I need "
+                f"them to back this up with the original contract, a full payment "
+                f"record showing every transaction, the correct date of first "
+                f"delinquency, and an explanation of the current status. "
+                f"Anything they cannot document with actual records needs to be deleted."
             )
         else:
             reason = (
-                f"I question the accuracy of this account as it is being reported. "
-                f"I am asking that {furnisher} provide all underlying records — "
-                f"original agreement, payment history, and the date I first "
-                f"missed a payment. {v_close}"
+                f"I am questioning the accuracy of how {furnisher} is reporting "
+                f"this account{acct_str}.{detail_str} I am asking them to produce "
+                f"all underlying records — the original agreement, the full payment "
+                f"history, and documentation of when I first missed a payment. "
+                f"If any of that cannot be produced, this account is not verifiable "
+                f"and must come off my report."
             )
 
     return reason + " DELETE OFF MY CREDIT REPORT."
@@ -4642,11 +4813,30 @@ def build_dispute_letter_engine(
                 these_items  = "these accounts" if n != 1 else "this account"
                 they_verb    = "are" if n != 1 else "is"
                 count_str    = f"{n} account{'s' if n != 1 else ''}"
+                # bureau_response_summary: incluir respuesta previa del bureau si existe
+                prev_response = item_meta.get("bureau_response", "") if (item_meta := locals().get("item_meta", {})) else ""
+                if is_r2 and prev_response:
+                    bureau_resp_block = (
+                        f"In my previous dispute, the response I received stated: "
+                        f'"{prev_response}" — I do not believe that constitutes a '
+                        f"reasonable reinvestigation under federal law.\n\n"
+                    )
+                elif is_r2:
+                    bureau_resp_block = (
+                        "The response I received to my prior dispute did not provide "
+                        "adequate documentation or explanation for why these accounts "
+                        "remain on my report.\n\n"
+                    )
+                else:
+                    bureau_resp_block = ""
+
                 opening      = tpl.format(
                     count=count_str,
                     verb=they_verb,
                     they_verb=they_verb,
                     these_items=these_items,
+                    consumer_name=consumer_name,
+                    bureau_response_summary=bureau_resp_block,
                 )
 
                 header = (
