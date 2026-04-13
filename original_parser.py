@@ -477,6 +477,30 @@ def parse_raw_account_blocks(lines: list[str]) -> list[dict[str, Any]]:
 # EXPANSION BY BUREAU
 # =========================
 
+def _detect_active_bureaus(raw_acc: dict[str, Any]) -> list[str] | None:
+    """
+    When a block has only 1 column of data (single-bureau reporting),
+    use the payment history structure to determine WHICH bureau that is.
+
+    The payment history table always labels rows as "TransUnion", "Experian",
+    "Equifax" — even if only one bureau has data. We use the bureau that
+    actually has payment entries (or any non-empty row) as the anchor.
+
+    Returns a list of active bureau display names in PDF column order,
+    or None if we cannot determine (fall back to positional logic).
+    """
+    ph = raw_acc.get("payment_history_structured", {})
+    if not ph:
+        return None
+
+    _display = ["TransUnion", "Experian", "Equifax"]
+    # Find which bureaus have any payment entry
+    active = [b for b in _display if ph.get(b)]
+    if active:
+        return active
+    return None
+
+
 def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any]]:
     numbers   = split_multi_values(raw_acc["account_number_raw"])
     statuses  = split_multi_values(raw_acc["status_raw"])
@@ -492,16 +516,12 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
     credit_limits   = split_multi_values(raw_acc.get("credit_limit_raw", ""))
     acct_types      = split_multi_values(raw_acc.get("account_type_raw", ""))
 
-    # Dates are shared across bureaus (the PDF collapses them per row)
-    # We take the first value for each date field as the canonical one,
-    # and store all values for cross-bureau comparison if needed.
     date_opened_raw      = raw_acc.get("date_opened_raw", "")
     date_last_active_raw = raw_acc.get("date_last_active_raw", "")
     dolp_raw             = raw_acc.get("date_of_last_payment_raw", "")
     last_reported_raw    = raw_acc.get("last_reported_raw", "")
     acct_type_detail     = raw_acc.get("account_type_detail_raw", "")
 
-    # Split date fields per bureau (same logic as other fields)
     date_opened_vals      = split_multi_values(date_opened_raw)
     date_last_active_vals = split_multi_values(date_last_active_raw)
     dolp_vals             = split_multi_values(dolp_raw)
@@ -523,14 +543,39 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
     late_summary      = raw_acc.get("late_payment_summary", {})
     ph_structured_raw = raw_acc.get("payment_history_structured", {})
 
+    # ── Bureau assignment fix ─────────────────────────────────────────────
+    # When a block has only 1 column of data, positional logic (idx=0→TU)
+    # is wrong if the data actually belongs to Experian or Equifax.
+    # Use the payment history to detect the correct bureau(s).
+    active_bureaus = _detect_active_bureaus(raw_acc)
+
+    # Build the ordered list of bureau display names for this block
+    if active_bureaus and len(active_bureaus) == max_len:
+        # Payment history confirms exactly which bureaus have data — use them
+        ordered_displays = active_bureaus
+    elif active_bureaus and max_len == 1 and len(active_bureaus) == 1:
+        # Single-bureau block: payment history tells us which one
+        ordered_displays = active_bureaus
+    else:
+        # Multi-bureau block or no payment history — fall back to positional
+        ordered_displays = _bureau_display
+
+    # Map display name → BUREAUS internal key
+    _display_to_key = {
+        "TransUnion": "transunion",
+        "Experian":   "experian",
+        "Equifax":    "equifax",
+    }
+
     expanded = []
     for idx in range(max_len):
-        display    = _bureau_display[idx] if idx < len(_bureau_display) else ""
+        display    = ordered_displays[idx] if idx < len(ordered_displays) else _bureau_display[idx]
+        bureau_key = _display_to_key.get(display, BUREAUS[idx])
         late_codes = late_summary.get(display, [])
         ph_entries = ph_structured_raw.get(display, [])
         expanded.append({
             "block_id":       raw_acc["block_id"],
-            "bureau":         BUREAUS[idx],
+            "bureau":         bureau_key,
             "name":           raw_acc["name"],
             "account_number": numbers[idx]   if idx < len(numbers)   else "",
             "status":         statuses[idx]  if idx < len(statuses)  else "",
