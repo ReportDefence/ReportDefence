@@ -9,7 +9,7 @@ Required env vars in Railway:
   JWT_SECRET            — secret for signing JWT tokens
 """
 
-import os, uuid, json, hashlib, hmac, time, traceback, shutil, re
+import os, uuid, json, hashlib, hmac, time, traceback, shutil, re, threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -351,12 +351,129 @@ async def client_letters(client_id: str, user=Depends(get_current_user)):
 #  JOB / REPORT ROUTES
 # ═══════════════════════════════════════════════════════════════
 
+@app.get("/jobs/{job_id}/status")
+async def get_job_status(job_id: str, user=Depends(get_current_user)):
+    """Lightweight polling endpoint — returns only status, not full job data."""
+    res = sb.table("api_jobs").select("job_id,status,error,report_date,scores,attack_count").eq("job_id", job_id).execute()
+    if not res.data:
+        raise HTTPException(404, "Job not found")
+    return res.data[0]
+
+
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str, user=Depends(get_current_user)):
     res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
     if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Job not found")
-    return res.data[0]
+    job = res.data[0]
+    # Migrate legacy letter_input_engine and letter_groups keys in-memory
+    if job.get("letter_input_engine"):
+        job["letter_input_engine"] = _migrate_letter_input(job["letter_input_engine"])
+    if job.get("letter_groups"):
+        job["letter_groups"] = _migrate_letter_input(job["letter_groups"])
+    return job
+
+def _run_parser_background(job_id: str, pdf_path: str, client_id: str,
+                           consumer_name: str, source: str, operator_id: str):
+    """
+    Runs build_report in a background thread.
+    Updates the job row in Supabase when done (status: completed / failed).
+    """
+    try:
+        from original_parser import build_report
+        result = build_report(pdf_path)
+
+        scoring = result.get("attack_scoring_engine", {})
+        attacks = []
+        for bureau, bureau_attacks in scoring.items():
+            for atk in bureau_attacks:
+                for acc in atk.get("accounts", []):
+                    attacks.append({
+                        "attack_type":    atk.get("attack_type", ""),
+                        "bureau":         bureau,
+                        "severity":       atk.get("priority", "medium"),
+                        "reason":         atk.get("reason", ""),
+                        "account_name":   acc.get("name", ""),
+                        "account_number": acc.get("account_number", ""),
+                    })
+
+        negatives = result.get("negatives_by_bureau", {})
+        attack_count = len(attacks)
+
+        inventory_out = {}
+        for bureau, accts in result.get("inventory_by_bureau", {}).items():
+            inventory_out[bureau] = [
+                {
+                    "name":                 a.get("name", ""),
+                    "account_number":       a.get("account_number", ""),
+                    "account_type":         a.get("account_type", ""),
+                    "account_type_detail":  a.get("account_type_detail", ""),
+                    "bureau_code":          a.get("bureau_code", ""),
+                    "status":               a.get("status", ""),
+                    "monthly_payment":      a.get("monthly_payment", ""),
+                    "payment_status":       a.get("payment_status", ""),
+                    "balance":              a.get("balance", ""),
+                    "no_of_months":         a.get("no_of_months", ""),
+                    "high_credit":          a.get("high_credit", ""),
+                    "credit_limit":         a.get("credit_limit", ""),
+                    "past_due":             a.get("past_due", ""),
+                    "date_opened":          a.get("date_opened", ""),
+                    "date_last_active":     a.get("date_last_active", ""),
+                    "date_of_last_payment": a.get("date_of_last_payment", ""),
+                    "last_reported":        a.get("last_reported", ""),
+                    "comments":             a.get("comments", ""),
+                    "late_payment_codes":   a.get("late_payment_codes", []),
+                    "payment_history":      a.get("payment_history", []),
+                    "has_30_in_history":    a.get("has_30_in_history", False),
+                    "has_60_in_history":    a.get("has_60_in_history", False),
+                    "has_90_in_history":    a.get("has_90_in_history", False),
+                }
+                for a in accts
+            ]
+
+        letters_in = result.get("letter_input_engine", {})
+        letter_input_serialized = {}
+        for b, groups in letters_in.items():
+            letter_input_serialized[b] = {}
+            for grp, items in groups.items():
+                letter_input_serialized[b][grp] = [
+                    {k: v for k, v in item.items()
+                     if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                    for item in items
+                ]
+
+        scores = result.get("scores", {"transunion": 0, "experian": 0, "equifax": 0})
+
+        sb.table("api_jobs").update({
+            "status":               "completed",
+            "scores":               scores,
+            "attack_count":         attack_count,
+            "negatives_by_bureau":  negatives,
+            "inventory_by_bureau":  inventory_out,
+            "personal_info":        result.get("personal_info", {}),
+            "personal_info_issues": result.get("personal_info_issues", []),
+            "letter_input_engine":  letter_input_serialized,
+            "letter_groups":        letter_input_serialized,
+            "attacks":              attacks,
+            "inquiries":            result.get("inquiries", []),
+            "inquiry_attacks":      result.get("inquiry_attacks", []),
+            "report_date":          result.get("report_date", ""),
+        }).eq("job_id", job_id).execute()
+
+        # Update client job_ids
+        client_res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
+        if client_res.data:
+            current_ids = client_res.data[0].get("job_ids") or []
+            if job_id not in current_ids:
+                current_ids.append(job_id)
+                sb.table("api_clients").update({"job_ids": current_ids}).eq("id", client_id).execute()
+
+    except Exception as e:
+        sb.table("api_jobs").update({
+            "status": "failed",
+            "error":  str(e)[:500],
+        }).eq("job_id", job_id).execute()
+
 
 @app.post("/upload-report")
 async def upload_report(
@@ -371,119 +488,46 @@ async def upload_report(
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # ── Run parser ──
-    from original_parser import build_report
-    result = build_report(pdf_path)
-
-    scores = result.get("scores", {"transunion": 0, "experian": 0, "equifax": 0})
-
-    # Build attacks flat list with severity
-    scoring = result.get("attack_scoring_engine", {})
-    attacks = []
-    for bureau, bureau_attacks in scoring.items():
-        for atk in bureau_attacks:
-            for acc in atk.get("accounts", []):
-                attacks.append({
-                    "attack_type":    atk.get("attack_type", ""),
-                    "bureau":         bureau,
-                    "severity":       atk.get("priority", "medium"),
-                    "reason":         atk.get("reason", ""),
-                    "account_name":   acc.get("name", ""),
-                    "account_number": acc.get("account_number", ""),
-                })
-
-    negatives = result.get("negatives_by_bureau", {})
-    attack_count = len(attacks)
-
-    # Build inventory with all fields including new ones
-    inventory_out = {}
-    for bureau, accts in result.get("inventory_by_bureau", {}).items():
-        inventory_out[bureau] = [
-            {
-                "name":                 a.get("name", ""),
-                "account_number":       a.get("account_number", ""),
-                "account_type":         a.get("account_type", ""),
-                "account_type_detail":  a.get("account_type_detail", ""),
-                "bureau_code":          a.get("bureau_code", ""),
-                "status":               a.get("status", ""),
-                "monthly_payment":      a.get("monthly_payment", ""),
-                "payment_status":       a.get("payment_status", ""),
-                "balance":              a.get("balance", ""),
-                "no_of_months":         a.get("no_of_months", ""),
-                "high_credit":          a.get("high_credit", ""),
-                "credit_limit":         a.get("credit_limit", ""),
-                "past_due":             a.get("past_due", ""),
-                "date_opened":          a.get("date_opened", ""),
-                "date_last_active":     a.get("date_last_active", ""),
-                "date_of_last_payment": a.get("date_of_last_payment", ""),
-                "last_reported":        a.get("last_reported", ""),
-                "comments":             a.get("comments", ""),
-                "late_payment_codes":   a.get("late_payment_codes", []),
-                "payment_history":      a.get("payment_history", []),
-                "has_30_in_history":    a.get("has_30_in_history", False),
-                "has_60_in_history":    a.get("has_60_in_history", False),
-                "has_90_in_history":    a.get("has_90_in_history", False),
-            }
-            for a in accts
-        ]
-
-    # Serialize letter_input_engine
-    letters_in = result.get("letter_input_engine", {})
-    letter_input_serialized = {}
-    for b, groups in letters_in.items():
-        letter_input_serialized[b] = {}
-        for grp, items in groups.items():
-            letter_input_serialized[b][grp] = [
-                {k: v for k, v in item.items()
-                 if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-                for item in items
-            ]
-
+    # ── Insert job immediately with status=processing ──
     job_data = {
-        "job_id": job_id,
-        "client_id": client_id,
-        "operator_id": user["id"],
-        "consumer_name": consumer_name,
-        "source": source,
-        "report_date": result.get("report_date", ""),
-        "pdf_path": pdf_path,
-        "scores": scores,
-        "attack_count": attack_count,
+        "job_id":           job_id,
+        "client_id":        client_id,
+        "operator_id":      user["id"],
+        "consumer_name":    consumer_name,
+        "source":           source,
+        "report_date":      "",
+        "pdf_path":         pdf_path,
+        "status":           "processing",
+        "scores":           {"transunion": 0, "experian": 0, "equifax": 0},
+        "attack_count":     0,
         "letters_generated": False,
-        "letter_files": [],
-        "negatives_by_bureau": negatives,
-        "inventory_by_bureau": inventory_out,
-        "personal_info": result.get("personal_info", {}),
-        "personal_info_issues": result.get("personal_info_issues", []),
-        "letter_input_engine": letter_input_serialized,
-        "attacks": attacks,
-        "inquiries": result.get("inquiries", []),
-        "inquiry_attacks": result.get("inquiry_attacks", []),
+        "letter_files":     [],
+        "negatives_by_bureau": {},
+        "inventory_by_bureau": {},
+        "personal_info":    {},
+        "personal_info_issues": [],
+        "letter_input_engine": {},
+        "attacks":          [],
+        "inquiries":        [],
+        "inquiry_attacks":  [],
         "response_history": [],
     }
     sb.table("api_jobs").insert(job_data).execute()
 
-    # Update client's job_ids array
-    client_res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
-    if client_res.data and len(client_res.data) > 0:
-        current_ids = client_res.data[0].get("job_ids") or []
-        current_ids.append(job_id)
-        sb.table("api_clients").update({"job_ids": current_ids}).eq("id", client_id).execute()
+    # ── Launch parser in background thread ──
+    t = threading.Thread(
+        target=_run_parser_background,
+        args=(job_id, pdf_path, client_id, consumer_name, source, user["id"]),
+        daemon=True,
+    )
+    t.start()
 
+    # Return immediately so the browser doesn't timeout
     return {
-        "job_id": job_id,
+        "job_id":        job_id,
+        "status":        "processing",
         "consumer_name": consumer_name,
-        "report_date": result.get("report_date", ""),
-        "source": source,
-        "scores": scores,
-        "negatives_by_bureau": negatives,
-        "attack_count": attack_count,
-        "attacks": attacks,
-        "letter_groups": letter_input_serialized,
-        "personal_info_issues": result.get("personal_info_issues", []),
-        "inventory_by_bureau": inventory_out,
-        "inquiries": result.get("inquiries", []),
-        "inquiry_attacks": result.get("inquiry_attacks", []),
+        "source":        source,
     }
 
 # ═══════════════════════════════════════════════════════════════
