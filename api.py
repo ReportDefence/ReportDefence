@@ -540,12 +540,22 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
             "Collections & Charge Offs": "collections",
         }
         category = cat_map.get(body.category, body.category.lower().replace(" ", "_"))
-        selected_nums = {a.get("account_number", "") for a in body.selected_accounts}
+
+        def _norm_acct(s: str) -> str:
+            """Normalize account number for comparison: lowercase, replace X/x/* with *."""
+            import re as _re
+            return _re.sub(r"[xX*]+", "*", (s or "").strip().lower())
+
+        # Build a set of normalized selected account numbers for fuzzy matching
+        selected_nums_raw = {a.get("account_number", "") for a in body.selected_accounts}
+        selected_nums_norm = {_norm_acct(n) for n in selected_nums_raw}
 
         filtered_input = {bureau: {category: []}}
         items = letter_input.get(bureau, {}).get(category, [])
         for item in items:
-            if item.get("account_number") in selected_nums:
+            item_acct = item.get("account_number", "")
+            # Match exact OR normalized (handles **** vs XXXX masking differences)
+            if item_acct in selected_nums_raw or _norm_acct(item_acct) in selected_nums_norm:
                 item["recommended_round"] = body.round or "round_1"
                 filtered_input[bureau][category].append(item)
         letter_input_to_use = filtered_input
