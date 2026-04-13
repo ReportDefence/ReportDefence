@@ -9,3 +9,5 @@ reportlab==4.2.2
 python-dotenv==1.0.1
 google-auth==2.29.0
 supabase
+pdf2image
+pytesseract
