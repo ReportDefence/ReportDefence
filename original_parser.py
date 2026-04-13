@@ -3250,76 +3250,76 @@ def build_account_reason_from_strategy(strategy_item: dict[str, Any], account: d
 
     reasons = {
         "duplicate_account_number": (
-            f"{furnisher} is reporting account {acct_num} in multiple separate tradelines, "
+            f"the creditor is reporting account {acct_num} in multiple separate tradelines, "
             "which creates a clear accuracy and reinvestigation problem."
         ),
         "same_account_number_same_balance": (
-            f"{furnisher} is tied to account {acct_num}, which is being reported with the same balance across multiple tradelines, "
+            f"the creditor is tied to account {acct_num}, which is being reported with the same balance across multiple tradelines, "
             "requiring deletion unless full ownership and reporting authority are proven."
         ),
         "same_account_number_different_furnisher": (
-            f"{furnisher} is associated with account {acct_num}, but the same account number is also being reported under a different furnisher identity, "
+            f"the creditor is associated with account {acct_num}, but the same account number is also being reported under a different furnisher identity, "
             "which must be resolved through documented verification."
         ),
         "multi_furnisher_same_balance": (
-            f"{furnisher} is reporting the same balance as another negative tradeline, "
+            f"the creditor is reporting the same balance as another negative tradeline, "
             "which creates a multi-furnisher inconsistency requiring deletion if not fully verified."
         ),
         "collector_original_creditor_pattern": (
-            f"{furnisher} appears in a collector/original-creditor reporting pattern, "
+            f"the creditor appears in a collector/original-creditor reporting pattern, "
             "which requires chain of title and proof of lawful reporting authority."
         ),
         "collector_original_creditor_self_declared": (
-            f"{furnisher} declares an original creditor directly in its own name on account {acct_num}. "
+            f"the creditor declares an original creditor directly in its own name on account {acct_num}. "
             "The reporting entity must prove the lawful chain of assignment and authority to report under 15 USC 1681s-2(b)."
         ),
         "late_collection_conflict": (
-            f"{furnisher} is reporting late-payment language while the tradeline also reflects collection indicators, "
+            f"the creditor is reporting late-payment language while the tradeline also reflects collection indicators, "
             "which is materially inconsistent and inaccurate."
         ),
         "cross_bureau_balance_conflict": (
-            f"{furnisher} is reporting account {acct_num} with a different balance on this bureau than on others. "
+            f"the creditor is reporting account {acct_num} with a different balance on this bureau than on others. "
             "The furnisher must report the same accurate balance to all bureaus."
         ),
         "cross_bureau_payment_status_conflict": (
-            f"{furnisher} is reporting account {acct_num} with a different payment status on this bureau than on others. "
+            f"the creditor is reporting account {acct_num} with a different payment status on this bureau than on others. "
             "The inconsistent classification across bureaus is a material accuracy violation."
         ),
         "cross_bureau_furnisher_identity_shift": (
-            f"Account {acct_num} appears under the name {furnisher} on this bureau but under a different identity on others. "
+            f"Account {acct_num} appears under the name the creditor on this bureau but under a different identity on others. "
             "The furnisher must clarify its legal identity and authority to report."
         ),
         "cross_bureau_account_status_conflict": (
-            f"{furnisher} reports account {acct_num} with a different account status on this bureau than on others. "
+            f"the creditor reports account {acct_num} with a different account status on this bureau than on others. "
             "The furnisher must report a consistent and accurate account status to all bureaus."
         ),
         "obsolete_account_7yr_limit": (
-            f"{furnisher} account {acct_num} has exceeded the FCRA maximum 7-year reporting period "
+            f"this account {acct_num} has exceeded the FCRA maximum 7-year reporting period "
             f"under 15 USC 1681c(a)(4). This account is time-barred from appearing on any consumer "
             f"report and must be deleted immediately. No reinvestigation is required — "
             f"the statute mandates deletion."
         ),
         "potential_re_aging": (
-            f"{furnisher} appears to have reset the reporting clock on account {acct_num} "
+            f"the creditor appears to have reset the reporting clock on account {acct_num} "
             f"by using its own acquisition date rather than the original Date of First Delinquency. "
             f"This re-aging practice violates 15 USC 1681c(c). The furnisher must provide the "
             f"original DOFD from the original creditor along with documentation of the chain of title."
         ),
         "dofd_unknown_verification_required": (
-            f"{furnisher} account {acct_num} does not disclose a verifiable Date of First Delinquency. "
+            f"this account {acct_num} does not disclose a verifiable Date of First Delinquency. "
             f"Without the DOFD, it is impossible to confirm this account is within the FCRA 7-year "
             f"reporting window under 15 USC 1681c(c). The furnisher must provide the DOFD or the "
             f"account must be deleted as unverifiable under 15 USC 1681i(a)(5)."
         ),
         "absent_bureau_reporting_inconsistency": (
-            f"{furnisher} account {acct_num} is reported as negative on this bureau but does not appear on all other bureaus. "
+            f"this account {acct_num} is reported as negative on this bureau but does not appear on all other bureaus. "
             "The furnisher must either report consistently to all bureaus or cease reporting."
         ),
     }
 
     return reasons.get(
         attack_type,
-        f"{furnisher} is reporting materially inconsistent information on account {acct_num}."
+        f"the creditor is reporting materially inconsistent information on account {acct_num}."
     )
 
 
@@ -3503,9 +3503,9 @@ def build_letter_input_engine(
                         "recommended_methods":   ["bureau_dispute", "direct_furnisher_dispute"],
                         "reason": (
                             f"I went through my credit report and found this account from "
-                            f"{furnisher} listed as a negative item. I do not recognize this "
+                            f"the creditor listed as a negative item. I do not recognize this "
                             f"as something I can confirm is accurate. I am asking that you "
-                            f"require {furnisher} to provide the original agreement, a complete "
+                            f"require them to provide the original agreement, a complete "
                             f"payment history, and documentation of the exact balance and status "
                             f"being reported. If they cannot verify every detail, it needs to "
                             f"come off my report."
@@ -3970,7 +3970,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v3 == 1:
             reason = (
-                f"This account from {furnisher}{acct_str} has been on my credit "
+                f"This account has been on my credit "
                 f"report longer than the law allows. My first delinquency was around "
                 f"{dofd}, which means the seven-year FCRA clock expired around "
                 f"{fcra_exp} under 15 U.S.C. §1681c(a)(4). Keeping it on my report "
@@ -3981,7 +3981,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"The math on this account does not add up in my favor — it adds up "
                 f"in the law's favor. First delinquency around {dofd} means the FCRA "
                 f"seven-year limit (15 U.S.C. §1681c(a)(4)) ran out around {fcra_exp}. "
-                f"{furnisher} cannot legally keep this on my report past that date. "
+                f"the creditor cannot legally keep this on my report past that date. "
                 f"I am requesting deletion with no further reinvestigation required — "
                 f"the statute is clear."
             )
@@ -3989,7 +3989,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CHILD SUPPORT ──────────────────────────────────────────────────────
     elif neg_type == "child_support":
         reason = (
-            f"I am disputing this child or family support account from {furnisher}{acct_str}. "
+            f"I am disputing this child or family support account from them. "
             f"Under 15 U.S.C. §1681s-1, only overdue support that has been certified "
             f"by the state agency may be reported. The balance shown{bal_str} and the "
             f"past-due amount of {past_due} need to be backed up by a current state "
@@ -4001,11 +4001,11 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── STUDENT LOAN — generic ─────────────────────────────────────────────
     elif neg_type == "student_loan":
         reason = (
-            f"I am disputing this student loan from {furnisher}{acct_str}. "
+            f"I am disputing this student loan from them. "
             f"Student loan accounts have a documented history of servicer errors — "
             f"loans reported by multiple servicers at once, balances that do not "
             f"update after transfers, and late marks that appear during deferment "
-            f"periods when no payment was actually due. I need {furnisher} to confirm "
+            f"periods when no payment was actually due. I need them to confirm "
             f"they are the current authorized servicer, provide the complete payment "
             f"history from origination, and verify that no other servicer is "
             f"reporting the same loan. If this cannot all be verified, it must be removed."
@@ -4014,12 +4014,12 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── BANKRUPTCY ────────────────────────────────────────────────────────
     elif neg_type == "bankruptcy":
         reason = (
-            f"I am disputing how {furnisher} is reporting this account{acct_str} "
+            f"I am disputing how the creditor is reporting this account "
             f"in connection with a bankruptcy. Under 15 U.S.C. §1681c(a)(1), "
             f"accounts included in a bankruptcy discharge must accurately reflect "
             f"that discharged status — they cannot continue showing an active balance "
             f"or derogatory payment history after the discharge date. "
-            f"I need {furnisher} to confirm the correct bankruptcy chapter, the filing "
+            f"I need them to confirm the correct bankruptcy chapter, the filing "
             f"date, the discharge date, and that every field reflects what actually "
             f"happened legally. Anything that does not match the discharge record "
             f"needs to be corrected or deleted."
@@ -4029,12 +4029,12 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif neg_type == "repossession":
         bal_note = f" The remaining balance shown is{bal_str}." if balance and balance not in ("0","0.0","$0.00","") else ""
         reason = (
-            f"I am disputing this repossession from {furnisher}{acct_str}{open_str}. "
+            f"I am disputing this repossession from them{open_str}. "
             f"Under UCC Article 9, when a vehicle is repossessed and sold, the net "
             f"proceeds of that sale must be applied to the outstanding balance and the "
             f"consumer must be notified. Any deficiency balance that gets reported can "
             f"only reflect what remained after those proceeds were properly credited.{bal_note} "
-            f"I need {furnisher} to provide: (1) documentation of the repossession, "
+            f"I need them to provide: (1) documentation of the repossession, "
             f"(2) proof the vehicle was sold and the actual sale price, "
             f"(3) an itemized accounting of how the proceeds were applied, and "
             f"(4) confirmation the reported balance is only the legitimate deficiency. "
@@ -4045,24 +4045,24 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif neg_type == "charge_off_deficiency":
         reason = (
             f"I am disputing the balance on this charged-off account from "
-            f"{furnisher}{acct_str}. When an account is charged off, the creditor "
+            f"the creditor. When an account is charged off, the creditor "
             f"writes it off as a loss — but the balance they continue to report must "
             f"reflect only what was actually owed at that point, not an inflated "
             f"figure padded with fees or interest added after the charge-off date. "
             f"The balance shown{bal_str} needs to be backed up with a complete "
             f"itemized accounting: the original charged-off amount, any post-charge-off "
-            f"additions, and any payments made. If {furnisher} cannot produce that, "
+            f"additions, and any payments made. If the creditor cannot produce that, "
             f"this account must be corrected or removed."
         )
 
     # ── PAID COLLECTION ───────────────────────────────────────────────────
     elif neg_type == "paid_collection":
         reason = (
-            f"This account from {furnisher}{acct_str} has been paid or settled — "
+            f"This account has been paid or settled — "
             f"the balance is zero — yet it continues to be reported with a derogatory "
             f"classification. Under 15 U.S.C. §1681e(b), reporting a negative status "
             f"on an account that has been resolved is not accurate. I am asking that "
-            f"{furnisher} update the status to correctly reflect that this account was "
+            f"the creditor update the status to correctly reflect that this account was "
             f"paid or settled, and also confirm the correct Date of First Delinquency "
             f"so the 7-year reporting clock can be verified. If the current reporting "
             f"is not corrected, it needs to be deleted."
@@ -4072,7 +4072,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "potential_re_aging":
         if v4 == 0:
             reason = (
-                f"I looked at the dates on this account from {furnisher}{acct_str} "
+                f"I looked at the dates on this account "
                 f"and something does not add up. The date being used is well after "
                 f"when I actually stopped paying — which was around {dofd}. Under "
                 f"15 U.S.C. §1681c(c), the seven-year clock runs from my original "
@@ -4084,10 +4084,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v4 == 1:
             reason = (
-                f"The date associated with this account from {furnisher}{acct_str} "
+                f"The date associated with this account "
                 f"does not match when I actually first fell behind. My last payment "
                 f"to the original creditor was around {dofd}. The date being shown "
-                f"looks like when {furnisher} acquired the account — not my actual "
+                f"looks like when the creditor acquired the account — not my actual "
                 f"delinquency date. Under 15 U.S.C. §1681c(c), only the original "
                 f"date of first delinquency controls the reporting period. I need "
                 f"the original date verified with records from the original creditor. "
@@ -4096,9 +4096,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v4 == 2:
             reason = (
-                f"Something is off about the dates on this {furnisher} account{acct_str}. "
+                f"Something is off about the dates on this account. "
                 f"I first fell behind around {dofd}, which means this account's legal "
-                f"reporting window should have closed around {fcra_exp}. If {furnisher} "
+                f"reporting window should have closed around {fcra_exp}. If the creditor "
                 f"is using a later date — like when they obtained the account — to "
                 f"extend how long this stays on my report, that is re-aging under "
                 f"15 U.S.C. §1681c(c). I am requesting documentation of the original "
@@ -4106,11 +4106,11 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"The reporting date on this account from {furnisher}{acct_str} "
+                f"The reporting date on this account "
                 f"appears to be later than my actual delinquency date of around {dofd}. "
                 f"That pushes the FCRA expiration past {fcra_exp} — longer than the "
                 f"law permits. Under 15 U.S.C. §1681c(c), only my original date of "
-                f"first delinquency counts. I am asking {furnisher} to produce that "
+                f"first delinquency counts. I am asking them to produce that "
                 f"date with primary documentation. If they use their own acquisition "
                 f"date, that is a statutory violation I intend to pursue."
             )
@@ -4120,19 +4120,19 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         if dla_refresh:
             if v2 == 0:
                 reason = (
-                    f"I noticed something on this account from {furnisher}{acct_str}: "
+                    f"I noticed something on this account: "
                     f"the 'date last active' matches almost exactly when it was last "
-                    f"reported to you{rpt_str}. That looks like {furnisher} is refreshing "
+                    f"reported to you{rpt_str}. That looks like the creditor is refreshing "
                     f"that date to make the account appear more recent than it actually is. "
                     f"The seven-year window under the FCRA must run from when I first "
                     f"missed a payment — not from the last time they updated their own "
-                    f"record. I am asking {furnisher} to disclose the original date of "
+                    f"record. I am asking them to disclose the original date of "
                     f"first delinquency with backup documentation from the original creditor. "
                     f"If they cannot do that, this account cannot be reported."
                 )
             else:
                 reason = (
-                    f"The date being used for this {furnisher} account{acct_str} appears "
+                    f"The date being used for this account appears "
                     f"to reflect when they last touched the record{active_str}, not when "
                     f"I actually first fell behind. That is a meaningful difference. "
                     f"Under 15 U.S.C. §1681c(c), the reporting clock starts from my "
@@ -4144,20 +4144,20 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             if v2 == 0:
                 reason = (
                     f"I cannot tell from what is being reported when I actually first "
-                    f"fell behind on this account from {furnisher}{acct_str}. That date "
+                    f"fell behind on this account. That date "
                     f"is critical — it controls how long this account is legally allowed "
                     f"to stay on my report under 15 U.S.C. §1681c(c). Without it, I "
                     f"cannot confirm this account is even within its seven-year window. "
-                    f"I am asking {furnisher} to provide the original date of first "
+                    f"I am asking them to provide the original date of first "
                     f"delinquency with supporting records. If they cannot produce it, "
                     f"the account cannot be verified and must be deleted."
                 )
             else:
                 reason = (
-                    f"The date of first delinquency for this {furnisher} account{acct_str} "
+                    f"The date of first delinquency for this account "
                     f"is not clearly shown{rpt_str}. Without that date, I have no way to "
                     f"confirm this account falls within the FCRA's seven-year reporting "
-                    f"window under 15 U.S.C. §1681c(c). I am requesting that {furnisher} "
+                    f"window under 15 U.S.C. §1681c(c). I am requesting that they "
                     f"produce the original DOFD from the original creditor's records. "
                     f"If they cannot establish that date, this account is unverifiable "
                     f"and must be deleted under 15 U.S.C. §1681i(a)(5)."
@@ -4170,10 +4170,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     }:
         if v2 == 0:
             reason = (
-                f"This account from {furnisher}{acct_str} is being reported by what "
+                f"This account is being reported by what "
                 f"appears to be a collection company. Before I accept this as accurate, "
                 f"I need to know they actually have the legal right to put this on my "
-                f"credit report. I am asking {furnisher} to provide: the original signed "
+                f"credit report. I am asking them to provide: the original signed "
                 f"agreement between me and the original creditor, a complete chain of "
                 f"assignment showing how this account got from the original creditor to "
                 f"them, and documentation that they have the legal authority to report "
@@ -4182,13 +4182,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"I dispute whether {furnisher} has any legal authority to report "
-                f"this account{acct_str} on my credit file. For a collection account, "
+                f"I dispute whether the creditor has any legal authority to report "
+                f"this account on my credit file. For a collection account, "
                 f"that means producing the original contract with my signature, proof "
                 f"of the full assignment chain from the original creditor, and "
                 f"documentation of their standing to report under federal law. "
                 f"I am also asking for the original date of first delinquency from "
-                f"the original creditor's records — not from {furnisher}'s own files. "
+                f"the original creditor's records — not from their own files. "
                 f"If any part of that cannot be produced, this account is unverifiable."
             )
 
@@ -4199,7 +4199,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     }:
         if v4 == 0:
             reason = (
-                f"This account number{bal_str} from {furnisher}{acct_str} is showing "
+                f"This account number{bal_str} from them is showing "
                 f"up more than once on my credit report. As far as I know, this is one "
                 f"debt — not two separate obligations. Having it listed twice makes my "
                 f"report look worse than it actually is, and reporting the same debt "
@@ -4209,7 +4209,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v4 == 1:
             reason = (
-                f"I see this same account from {furnisher}{acct_str}{bal_str} appearing "
+                f"I see this same account from them{bal_str} appearing "
                 f"more than once on my report. If it is the same debt, only the entity "
                 f"that currently holds it should be reporting it — and only once. "
                 f"I am asking that every reporting party provide independent proof of "
@@ -4217,7 +4217,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v4 == 2:
             reason = (
-                f"The account number tied to this entry from {furnisher}{acct_str} "
+                f"The account number tied to this entry from them "
                 f"matches another entry already on my report{bal_str}. A single "
                 f"obligation cannot create two separate negative tradelines. "
                 f"I am requesting that you identify which entity has the legal right "
@@ -4225,7 +4225,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"This account{acct_str} from {furnisher}{bal_str} appears to be "
+                f"This account{bal_str} appears to be "
                 f"reported under more than one name. Only one party can own and "
                 f"report the same debt at any time. I am requesting proof of ownership "
                 f"from each party, and deletion of any entry that cannot independently "
@@ -4235,7 +4235,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── MULTI FURNISHER SAME BALANCE ──────────────────────────────────────
     elif attack_type == "multi_furnisher_same_balance":
         reason = (
-            f"Multiple companies — including {furnisher}{acct_str} — appear to be "
+            f"Multiple companies — including the creditor — appear to be "
             f"reporting the same balance{bal_str}. If this is one debt, only whoever "
             f"actually holds it right now should be reporting it. I am asking each "
             f"reporting company to show independent proof of ownership and their "
@@ -4247,17 +4247,17 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "cross_bureau_balance_conflict":
         if v3 == 0:
             reason = (
-                f"The balance on this {furnisher} account{acct_str} is being "
+                f"The balance on this account is being "
                 f"reported as {balance or 'different amounts'} at this bureau, "
                 f"but a different figure appears elsewhere. A balance is a specific "
                 f"dollar amount at a specific point in time — it cannot be two "
                 f"different numbers simultaneously. One of those figures has to be "
-                f"wrong. I am asking {furnisher} to document the actual correct "
+                f"wrong. I am asking them to document the actual correct "
                 f"balance and update all three bureaus to show the same number."
             )
         elif v3 == 1:
             reason = (
-                f"I noticed that {furnisher}{acct_str} shows a balance of "
+                f"I noticed that the creditor shows a balance of "
                 f"{balance or 'a certain amount'} here, but a different balance "
                 f"at another bureau{rpt_str}. There is only one correct balance "
                 f"for this account at any given time. Under 15 U.S.C. §1681e(b), "
@@ -4266,7 +4266,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"There is a balance discrepancy on this {furnisher} account{acct_str}. "
+                f"There is a balance discrepancy on this account. "
                 f"This bureau shows {balance or 'one amount'}, while another bureau "
                 f"shows something different. A creditor reports one balance — not "
                 f"different numbers to different bureaus. At least one bureau is "
@@ -4279,7 +4279,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "cross_bureau_payment_status_conflict":
         if v3 == 0:
             reason = (
-                f"The payment status on this {furnisher} account{acct_str} is "
+                f"The payment status on this account is "
                 f"inconsistent across bureaus. Here it shows as '{pay_status}' — "
                 f"but a different status appears elsewhere. The same account cannot "
                 f"have two different payment statuses. I am asking that the accurate "
@@ -4287,7 +4287,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v3 == 1:
             reason = (
-                f"{furnisher}{acct_str} is reporting this account with a payment "
+                f"the creditor is reporting this account with a payment "
                 f"status of '{pay_status}' here, but the other bureaus show something "
                 f"different. These conflicting classifications cannot all be correct. "
                 f"Under 15 U.S.C. §1681e(b), I am asking that the right status be "
@@ -4296,7 +4296,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         else:
             reason = (
                 f"I am disputing the payment classification on this account from "
-                f"{furnisher}{acct_str}. The status here is '{pay_status}' but it "
+                f"the creditor. The status here is '{pay_status}' but it "
                 f"varies at other bureaus — which means at least one bureau is "
                 f"getting inaccurate information from the furnisher. Only one "
                 f"status can be correct. I am requesting verification and correction."
@@ -4305,7 +4305,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CROSS-BUREAU ACCOUNT STATUS CONFLICT ──────────────────────────────
     elif attack_type == "cross_bureau_account_status_conflict":
         reason = (
-            f"This account from {furnisher}{acct_str} shows a status of '{status}' "
+            f"This account shows a status of '{status}' "
             f"here, but a different status at another bureau. Whether an account is "
             f"open, closed, charged off, or in collection is a factual matter — it "
             f"cannot differ by bureau. I am asking that the correct status be "
@@ -4315,7 +4315,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── OPENED AFTER LAST ACTIVE ──────────────────────────────────────────
     elif attack_type == "opened_after_last_active":
         reason = (
-            f"There is a date problem with this account from {furnisher}{acct_str}. "
+            f"There is a date problem with this account. "
             f"The open date is listed as {date_opened}, but the last activity date "
             f"is {date_active} — which is before the account supposedly opened. "
             f"An account cannot have activity before it existed. At least one of "
@@ -4327,7 +4327,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── PAST DUE EXCEEDS BALANCE ──────────────────────────────────────────
     elif attack_type == "past_due_exceeds_balance":
         reason = (
-            f"The numbers on this account from {furnisher}{acct_str} do not make "
+            f"The numbers on this account do not make "
             f"sense. The past-due amount being reported is {past_due}, but the total "
             f"balance is only {balance}. You cannot owe more in past-due payments "
             f"than the full outstanding debt. This is mathematically impossible, "
@@ -4338,7 +4338,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── BALANCE EXCEEDS CREDIT LIMIT ──────────────────────────────────────
     elif attack_type == "balance_exceeds_credit_limit":
         reason = (
-            f"This account from {furnisher}{acct_str} shows a balance of {balance} "
+            f"This account shows a balance of {balance} "
             f"against a credit limit of {credit_limit}. While fees can push a balance "
             f"slightly over the limit, the extent of this difference indicates something "
             f"is wrong — either the balance is inflated or the credit limit is being "
@@ -4349,7 +4349,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── BALANCE EXCEEDS HIGH CREDIT ───────────────────────────────────────
     elif attack_type == "balance_exceeds_high_credit":
         reason = (
-            f"Something is wrong with the balance on this {furnisher} account{acct_str}. "
+            f"Something is wrong with the balance on this account. "
             f"The current balance is {balance}, but that exceeds the original loan amount "
             f"of {high_credit}. On an installment loan, the balance should decrease over "
             f"time as payments are made — it cannot grow beyond the original principal "
@@ -4360,7 +4360,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── OPEN STATUS / CHARGEOFF CONFLICT ──────────────────────────────────
     elif attack_type == "open_status_chargeoff_conflict":
         reason = (
-            f"This account from {furnisher}{acct_str} is listed as 'Open' in the "
+            f"This account is listed as 'Open' in the "
             f"account status, but the payment status shows '{pay_status}'. Those two "
             f"things cannot coexist. An account that has been charged off or sent to "
             f"collections is not open — it was closed when it defaulted. Reporting "
@@ -4372,7 +4372,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── PAID STATUS WITH PAST DUE ─────────────────────────────────────────
     elif attack_type == "paid_status_with_past_due":
         reason = (
-            f"The reporting on this account from {furnisher}{acct_str} is contradictory. "
+            f"The reporting on this account is contradictory. "
             f"The status shows as 'Paid,' but there is also a past-due amount of "
             f"{past_due} being reported. An account that has been paid cannot "
             f"simultaneously carry an outstanding past-due balance — those two "
@@ -4384,7 +4384,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CLOSED WITH BALANCE ───────────────────────────────────────────────
     elif attack_type == "closed_with_balance":
         reason = (
-            f"This account from {furnisher}{acct_str} shows a status of 'Closed' "
+            f"This account shows a status of 'Closed' "
             f"but is still reporting a balance of {balance}. A closed account that "
             f"is not in collection or charged off should carry a zero balance — "
             f"when the account closed, the creditor relationship ended. "
@@ -4396,8 +4396,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CURRENT PAYMENT / DEROGATORY STATUS ───────────────────────────────
     elif attack_type == "current_payment_derogatory_status":
         reason = (
-            f"There is a direct contradiction in how {furnisher} is reporting "
-            f"this account{acct_str}. The payment status shows 'Current' — meaning "
+            f"There is a direct contradiction in how the creditor is reporting "
+            f"this account. The payment status shows 'Current' — meaning "
             f"no payment is overdue — but the account classification is 'Derogatory'. "
             f"Those two things cannot both be true at the same time. If all payments "
             f"are being made on time, the account cannot be classified as derogatory. "
@@ -4408,7 +4408,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── MONTHLY PAYMENT ON COLLECTION ─────────────────────────────────────
     elif attack_type == "monthly_payment_on_collection":
         reason = (
-            f"This collection account from {furnisher}{acct_str} is reporting a "
+            f"This collection account from them is reporting a "
             f"monthly payment of {monthly_pmt}. Collection accounts do not have an "
             f"ongoing monthly payment schedule — the original creditor relationship "
             f"ended when the account defaulted and was transferred. There is no "
@@ -4419,7 +4419,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CROSS-BUREAU DATE OPENED CONFLICT ─────────────────────────────────
     elif attack_type == "cross_bureau_date_opened_conflict":
         reason = (
-            f"The date this account from {furnisher}{acct_str} was opened is being "
+            f"The date this account was opened is being "
             f"reported differently across bureaus. Here it shows {date_opened}. "
             f"The date an account was opened is a historical fact established by the "
             f"original creditor — it cannot legitimately vary by bureau. I am asking "
@@ -4430,7 +4430,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CROSS-BUREAU ACCOUNT TYPE CONFLICT ────────────────────────────────
     elif attack_type == "cross_bureau_account_type_conflict":
         reason = (
-            f"This account from {furnisher}{acct_str} is classified differently "
+            f"This account is classified differently "
             f"depending on which bureau you look at. The account type is a factual "
             f"characteristic set by the original creditor — it cannot legitimately "
             f"change from bureau to bureau. At least one bureau is receiving "
@@ -4441,7 +4441,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── CROSS-BUREAU CREDIT LIMIT CONFLICT ────────────────────────────────
     elif attack_type == "cross_bureau_credit_limit_conflict":
         reason = (
-            f"The credit limit for this {furnisher} account{acct_str} is being "
+            f"The credit limit for this account is being "
             f"reported as a different number at different bureaus. A credit limit "
             f"is set by the creditor and is specific to the account — it cannot "
             f"be one amount here and a different amount somewhere else. "
@@ -4454,42 +4454,42 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         bal_note = f" This bureau shows {high_credit}" if high_credit else ""
         if v3 == 0:
             reason = (
-                f"The high credit amount for this {furnisher} account{acct_str} — "
+                f"The high credit amount for this account — "
                 f"which represents the original loan amount or the highest balance "
                 f"this account ever carried — is not the same at every bureau.{bal_note}, "
                 f"but another bureau shows a different number. That figure is a "
                 f"historical fact about the account that cannot legitimately differ "
                 f"by bureau. The discrepancy means at least one bureau is receiving "
-                f"inaccurate data from {furnisher}. Under 15 U.S.C. §1681e(b), "
+                f"inaccurate data from them. Under 15 U.S.C. §1681e(b), "
                 f"I am asking that the correct amount be verified with original "
                 f"account records and reported consistently."
             )
         elif v3 == 1:
             reason = (
-                f"I noticed that {furnisher}{acct_str} is reporting different high "
+                f"I noticed that the creditor is reporting different high "
                 f"credit amounts depending on which bureau you look at.{bal_note} "
                 f"at this bureau. The high credit figure reflects the highest balance "
                 f"or original loan amount — a fact that does not change. Having a "
-                f"different number at each bureau means {furnisher} is not reporting "
+                f"different number at each bureau means the creditor is not reporting "
                 f"accurately to all of them. I am asking that the correct figure be "
                 f"verified and corrected wherever it is wrong under 15 U.S.C. §1681e(b)."
             )
         else:
             reason = (
                 f"There is an inconsistency in the high credit amount being reported "
-                f"for this {furnisher} account{acct_str} across bureaus.{bal_note} "
+                f"for this account across bureaus.{bal_note} "
                 f"here. The original loan amount or highest balance reached on an "
                 f"account is a fixed data point — it cannot be a different number "
                 f"at one bureau versus another. At least one of those numbers is "
                 f"wrong. I am disputing the inaccurate figure and requesting that "
-                f"{furnisher} provide documentation of the correct amount so all "
+                f"the creditor provide documentation of the correct amount so all "
                 f"bureaus can be updated."
             )
 
     # ── STUDENT LOAN — SPECIFIC ATTACKS ───────────────────────────────────
     elif attack_type == "student_loan_duplicate_tradeline":
         reason = (
-            f"This student loan from {furnisher}{acct_str} appears to be reported "
+            f"This student loan from them appears to be reported "
             f"more than once — the same loan showing up as a separate tradeline. "
             f"When a loan transfers between servicers, only the current servicer "
             f"should be reporting an active balance. Having it listed twice by "
@@ -4500,7 +4500,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     elif attack_type == "student_loan_transferred_still_active":
         reason = (
-            f"This student loan from {furnisher}{acct_str} appears to still be "
+            f"This student loan from them appears to still be "
             f"reported as active after the loan was transferred to a new servicer. "
             f"When a federal loan transfers, the prior servicer must update their "
             f"tradeline to show a zero balance and a transferred or closed status. "
@@ -4511,7 +4511,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     elif attack_type == "student_loan_deferment_late_payment":
         reason = (
-            f"This student loan from {furnisher}{acct_str} is showing a late payment "
+            f"This student loan from them is showing a late payment "
             f"during what appears to be a deferment or forbearance period. When a "
             f"loan is in an authorized deferment or forbearance, no payment is legally "
             f"due — so no payment can be late. Reporting a late mark when no payment "
@@ -4522,7 +4522,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     elif attack_type == "student_loan_paid_still_reporting":
         reason = (
-            f"This student loan from {furnisher}{acct_str} shows a paid or closed "
+            f"This student loan from them shows a paid or closed "
             f"status but continues to report an outstanding balance{bal_str}. A loan "
             f"that has been paid in full must show a zero balance. Failing to update "
             f"the balance after payoff is a furnisher accuracy violation under "
@@ -4532,7 +4532,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     elif attack_type == "student_loan_discharged_still_active":
         reason = (
-            f"This student loan from {furnisher}{acct_str} appears to have been "
+            f"This student loan from them appears to have been "
             f"discharged or forgiven, yet continues to show an active balance{bal_str} "
             f"with a derogatory status. Discharged loans — whether through PSLF, "
             f"total and permanent disability, borrower defense, or other programs — "
@@ -4544,7 +4544,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     elif attack_type == "student_loan_default_inaccurate":
         reason = (
-            f"This student loan from {furnisher}{acct_str} is reporting a default "
+            f"This student loan from them is reporting a default "
             f"status that I believe is inaccurate. When a federal student loan is "
             f"successfully rehabilitated, consolidated out of default, or restored to "
             f"good standing — including through the Department of Education's Fresh "
@@ -4556,7 +4556,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     elif attack_type == "student_loan_balance_inflated":
         reason = (
-            f"This student loan from {furnisher}{acct_str} is reporting a current "
+            f"This student loan from them is reporting a current "
             f"balance{bal_str} that significantly exceeds what I would expect based "
             f"on the original loan amount. While interest accrual is normal, the "
             f"extent of this difference is concerning. CFPB has documented widespread "
@@ -4571,7 +4571,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "reinsertion_violation":
         if v2 == 0:
             reason = (
-                f"This account from {furnisher}{acct_str} was previously deleted "
+                f"This account was previously deleted "
                 f"from my credit report following a dispute. It has since reappeared "
                 f"without the written notice required by 15 U.S.C. §1681i(a)(5)(B). "
                 f"Before reinserting a deleted item, the bureau must notify the consumer "
@@ -4582,7 +4582,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"This account from {furnisher}{acct_str} was removed from my file "
+                f"This account was removed from my file "
                 f"after a prior dispute. It has been reinserted without following "
                 f"the mandatory consumer notice procedure under 15 U.S.C. §1681i(a)(5)(B) — "
                 f"which requires written notice to me within 5 business days and "
@@ -4595,7 +4595,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "medical_debt_under_500":
         if v2 == 0:
             reason = (
-                f"This is a medical collection from {furnisher}{acct_str} with a "
+                f"This is a medical collection from them with a "
                 f"balance of {balance}. In April 2023, all three major credit bureaus "
                 f"publicly committed to removing medical collection accounts with "
                 f"balances under $500 from consumer credit reports. This account is "
@@ -4604,7 +4604,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"This medical debt from {furnisher}{acct_str} has a balance of "
+                f"This medical debt from them has a balance of "
                 f"{balance}, which falls below the $500 threshold established by "
                 f"all three bureaus in April 2023. Under that voluntary commitment, "
                 f"sub-$500 medical debts are no longer reportable regardless of "
@@ -4617,7 +4617,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "paid_medical_collection":
         if v2 == 0:
             reason = (
-                f"This medical collection from {furnisher}{acct_str} has been paid "
+                f"This medical collection from them has been paid "
                 f"or settled. As of July 2022, all three major credit bureaus committed "
                 f"to removing paid medical collection accounts from consumer credit "
                 f"reports. This account shows a zero balance or paid status yet remains "
@@ -4626,7 +4626,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"This medical collection from {furnisher}{acct_str} was paid or "
+                f"This medical collection from them was paid or "
                 f"settled and should have been removed from my credit file. In July "
                 f"2022, all three bureaus publicly committed to no longer reporting "
                 f"paid medical debt. Keeping this account as a derogatory item after "
@@ -4637,7 +4637,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── MEDICAL DEBT PREMATURE ────────────────────────────────────────────
     elif attack_type == "medical_debt_premature":
         reason = (
-            f"This medical collection from {furnisher}{acct_str} was opened "
+            f"This medical collection from them was opened "
             f"{date_opened} — less than 12 months ago. All three credit bureaus "
             f"committed in 2022 to a 12-month waiting period before any medical "
             f"debt may appear on a consumer credit report. This account is being "
@@ -4648,7 +4648,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── MEDICAL DEBT STATE LAW ────────────────────────────────────────────
     elif attack_type == "medical_debt_state_law":
         reason = (
-            f"This medical collection from {furnisher}{acct_str} is being reported "
+            f"This medical collection from them is being reported "
             f"for a consumer in a state that has enacted legal protections "
             f"specifically prohibiting medical debt from appearing on consumer credit "
             f"reports. Reporting this account violates applicable state law. Under "
@@ -4661,7 +4661,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "medical_debt_accuracy":
         if v3 == 0:
             reason = (
-                f"I am disputing this medical collection from {furnisher}{acct_str} "
+                f"I am disputing this medical collection from them "
                 f"with a balance of {balance}. Medical billing is uniquely prone to "
                 f"error — insurance disputes, incorrect coding, surprise bills, and "
                 f"balance inflation are documented problems. Under 15 U.S.C. §1681e(b), "
@@ -4671,17 +4671,17 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v3 == 1:
             reason = (
-                f"I am disputing this medical collection from {furnisher}{acct_str}. "
+                f"I am disputing this medical collection from them. "
                 f"Medical bills are frequently incorrect — the CFPB has documented "
                 f"that medical debt is often reported with errors and is a poor "
-                f"predictor of creditworthiness. I am asking {furnisher} to provide "
+                f"predictor of creditworthiness. I am asking them to provide "
                 f"a complete itemized statement, evidence that my insurance was properly "
                 f"billed and any adjustments applied, and documentation that the amount "
                 f"reported is accurate. If this cannot be fully verified, it must be removed."
             )
         else:
             reason = (
-                f"This medical collection from {furnisher}{acct_str}{bal_str} requires "
+                f"This medical collection from them{bal_str} requires "
                 f"full verification under 15 U.S.C. §1681i(a). Medical bills often "
                 f"result from insurance billing failures, coordination errors, or "
                 f"disputed amounts. I am requesting the original itemized bill, "
@@ -4694,7 +4694,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "collection_late_payment_conflict":
         if v3 == 0:
             reason = (
-                f"This account from {furnisher}{acct_str} is identified as a "
+                f"This account is identified as a "
                 f"collection, but is also being reported with a payment status of "
                 f"'{pay_status}'. Those two classifications cannot coexist. A "
                 f"collection account represents a debt that has already defaulted "
@@ -4706,8 +4706,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v3 == 1:
             reason = (
-                f"The payment status of '{pay_status}' on this {furnisher} account"
-                f"{acct_str} directly conflicts with it being classified as a "
+                f"The payment status of '{pay_status}' on this account"
+                f" directly conflicts with it being classified as a "
                 f"collection. An account that has defaulted and been transferred "
                 f"to a collector cannot simultaneously be in an active late-payment "
                 f"status — those are mutually exclusive. I am requesting that the "
@@ -4716,8 +4716,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"I am disputing the dual classification on this {furnisher} account"
-                f"{acct_str} — it is being reported as both a collection and a "
+                f"I am disputing the dual classification on this account"
+                f" — it is being reported as both a collection and a "
                 f"'{pay_status}' account at the same time. Once a debt goes to a "
                 f"collection agency, the original payment schedule no longer exists. "
                 f"A late payment notation on top of a collection creates a "
@@ -4728,7 +4728,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── LATE COLLECTION CONFLICT ──────────────────────────────────────────
     elif attack_type == "late_collection_conflict":
         reason = (
-            f"The classification on this account from {furnisher}{acct_str} does "
+            f"The classification on this account does "
             f"not add up. It appears to carry both a late payment status and "
             f"collection-type language simultaneously, which are contradictory. "
             f"A debt that has gone to collection has already defaulted — there are "
@@ -4741,7 +4741,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "absent_bureau_reporting_inconsistency":
         if v4 == 0:
             reason = (
-                f"This account from {furnisher}{acct_str} is showing as a negative "
+                f"This account is showing as a negative "
                 f"item here but does not appear consistently across all three bureaus. "
                 f"If the information is accurate and verifiable, I would expect it to "
                 f"be reported the same way everywhere. The inconsistency makes me "
@@ -4750,7 +4750,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v4 == 1:
             reason = (
-                f"I noticed this account from {furnisher}{acct_str} appears here "
+                f"I noticed this account appears here "
                 f"as a negative item but is not showing up the same way at all bureaus. "
                 f"Under 15 U.S.C. §1681e(b), every bureau must maintain maximum "
                 f"possible accuracy. An item that cannot be reported consistently "
@@ -4759,7 +4759,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v4 == 2:
             reason = (
-                f"The reporting on this {furnisher} account{acct_str} is not "
+                f"The reporting on this account is not "
                 f"consistent. It shows as a derogatory item at this bureau but "
                 f"not at others in the same way. That inconsistency suggests the "
                 f"furnisher may be selectively reporting or reporting information "
@@ -4769,7 +4769,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"This {furnisher} account{acct_str} appears as a negative here "
+                f"This account appears as a negative here "
                 f"but the reporting is inconsistent across bureaus. A furnisher "
                 f"who reports to one bureau but not others — or reports different "
                 f"information — creates an accuracy problem. Under 15 U.S.C. "
@@ -4791,10 +4791,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         if is_closed:
             if v3 == 0:
                 reason = (
-                    f"This account from {furnisher}{acct_str} is closed and shows a "
+                    f"This account is closed and shows a "
                     f"zero balance, but the payment history contains a {worst}-day "
                     f"late mark ({late_str}). Late marks on closed accounts still "
-                    f"hurt my credit and must be accurate. I am asking that {furnisher} "
+                    f"hurt my credit and must be accurate. I am asking that the creditor "
                     f"provide the original payment records for that month — the exact "
                     f"due date and the date payment was received — and confirm the "
                     f"correct Date of First Delinquency. Under 15 U.S.C. §1681c(a)(4), "
@@ -4803,18 +4803,18 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             elif v3 == 1:
                 reason = (
                     f"I am disputing a {worst}-day late payment mark on this closed "
-                    f"{furnisher} account{acct_str} ({late_str}). Even though the "
+                    f"this account ({late_str}). Even though the "
                     f"account is paid, the late mark remains on my report and must "
                     f"be verified under 15 U.S.C. §1681e(b). I am requesting that "
-                    f"{furnisher} provide original payment records and the correct "
+                    f"the creditor provide original payment records and the correct "
                     f"Date of First Delinquency. If the late mark cannot be "
                     f"documented, it must be removed."
                 )
             else:
                 reason = (
                     f"There is a {worst}-day late payment in the history of this "
-                    f"closed account from {furnisher}{acct_str} ({late_str}). "
-                    f"I am asking {furnisher} to verify this with original records "
+                    f"closed account from them ({late_str}). "
+                    f"I am asking them to verify this with original records "
                     f"showing when the payment was due and when it was actually "
                     f"received, and to confirm the DOFD is correct at all bureaus. "
                     f"Under 15 U.S.C. §1681e(b), every piece of reported information "
@@ -4823,9 +4823,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         else:
             if v3 == 0:
                 reason = (
-                    f"This account from {furnisher}{acct_str} shows a {worst}-day "
+                    f"This account shows a {worst}-day "
                     f"late payment in its history ({late_str}){rpt_str}. I am "
-                    f"disputing this mark and requesting documentation from {furnisher} "
+                    f"disputing this mark and requesting documentation from them "
                     f"— specifically the original payment records showing the exact "
                     f"due date and when the payment was received. Under 15 U.S.C. "
                     f"§1681e(b), if they cannot verify this with actual records, "
@@ -4833,8 +4833,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 )
             elif v3 == 1:
                 reason = (
-                    f"I am disputing the {worst}-day late payment on this {furnisher} "
-                    f"account{acct_str} ({late_str}). I need {furnisher} to provide "
+                    f"I am disputing the {worst}-day late payment on this account "
+                    f"account ({late_str}). I need them to provide "
                     f"the original billing statement and payment records for the months "
                     f"in question, showing the exact due date and date of receipt. "
                     f"Under 15 U.S.C. §1681s-2(a)(1), a late payment cannot be "
@@ -4842,8 +4842,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 )
             else:
                 reason = (
-                    f"There is a {worst}-day late mark in this {furnisher} account's "
-                    f"history{acct_str} ({late_str}) that I dispute. I am asking "
+                    f"There is a {worst}-day late mark in this account's "
+                    f"history ({late_str}) that I dispute. I am asking "
                     f"them to produce original records for those months to confirm "
                     f"the mark is accurate. A late mark that cannot be verified "
                     f"with original payment documentation must be removed under "
@@ -4856,20 +4856,20 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         late_str = ", ".join(actual_lates) if actual_lates else "in the payment history"
         if v2 == 0:
             reason = (
-                f"This account from {furnisher}{acct_str} shows a late payment "
+                f"This account shows a late payment "
                 f"({late_str}), but the month it is reported in differs depending on "
                 f"which bureau you look at. A payment can only be late on one specific "
                 f"date — the same event cannot appear in different months at different "
-                f"bureaus. Under 15 U.S.C. §1681e(b), I am requesting that {furnisher} "
+                f"bureaus. Under 15 U.S.C. §1681e(b), I am requesting that they "
                 f"provide the original payment records and correct the reporting to "
                 f"show the same accurate date consistently at all three bureaus."
             )
         else:
             reason = (
-                f"The late payment on this {furnisher} account{acct_str} ({late_str}) "
+                f"The late payment on this account ({late_str}) "
                 f"is being reported in different months across bureaus. An event "
                 f"cannot occur on two different dates — this is an accuracy violation "
-                f"under 15 U.S.C. §1681e(b). I am asking {furnisher} to review the "
+                f"under 15 U.S.C. §1681e(b). I am asking them to review the "
                 f"original payment records and update all three bureaus to show the "
                 f"same accurate month. If the correct date cannot be verified, the "
                 f"late mark must be removed entirely."
@@ -4895,8 +4895,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         if v3 == 0:
             reason = (
                 f"I went through my credit report carefully and I have questions "
-                f"about this account from {furnisher}{acct_str}.{detail_str} I am "
-                f"asking that {furnisher} provide the original credit agreement with "
+                f"about this account.{detail_str} I am "
+                f"asking that they provide the original credit agreement with "
                 f"my signature, a complete payment history from the date the account "
                 f"was opened, documentation of the current balance and how it was "
                 f"calculated, and the exact date I first fell behind. Without all of "
@@ -4904,8 +4904,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         elif v3 == 1:
             reason = (
-                f"I do not believe the information being reported by {furnisher} on "
-                f"this account{acct_str} is complete or accurate.{detail_str} I need "
+                f"I do not believe the information being reported by the creditor on "
+                f"this account is complete or accurate.{detail_str} I need "
                 f"them to back this up with the original contract, a full payment "
                 f"record showing every transaction, the correct date of first "
                 f"delinquency, and an explanation of the current status. "
@@ -4913,8 +4913,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
             )
         else:
             reason = (
-                f"I am questioning the accuracy of how {furnisher} is reporting "
-                f"this account{acct_str}.{detail_str} I am asking them to produce "
+                f"I am questioning the accuracy of how the creditor is reporting "
+                f"this account.{detail_str} I am asking them to produce "
                 f"all underlying records — the original agreement, the full payment "
                 f"history, and documentation of when I first missed a payment. "
                 f"If any of that cannot be produced, this account is not verifiable "
@@ -5075,7 +5075,7 @@ def build_dispute_letter_engine(
                     used_reasons.add(reason)
                     account_lines.append(
                         f"{idx}. {fname} \u2014 Account #: {facct}\n"
-                        f"Reason: {reason}\n"
+                        f"{reason}\n"
                     )
 
                 accounts_block = "\n\n".join(account_lines)
@@ -7327,7 +7327,7 @@ def _what_needed_to_verify(attack_type: str, furnisher: str) -> str:
     }:
         return (
             f"the original signed agreement, the complete chain of assignment "
-            f"from the original creditor to {furnisher}, and proof of their "
+            f"from the original creditor to the creditor, and proof of their "
             f"legal authority to report this specific account"
         )
     elif attack_type in {"potential_re_aging", "dofd_unknown_verification_required"}:
@@ -7407,7 +7407,7 @@ def build_verified_response_letter(
         needed_docs = _what_needed_to_verify(attack_type, furnisher)
 
         section = (
-            f"{i}. {furnisher} \u2014 Account #: {acct}\n"
+            f"{i}. the creditor \u2014 Account #: {acct}\n"
             f"You indicated this account was verified. Under "
             f"15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am requesting:\n\n"
             f"(a) A complete description of the reinvestigation procedure you "
@@ -7419,7 +7419,7 @@ def build_verified_response_letter(
             f"A genuine verification of this account would have required "
             f"{needed_docs}.\n\n"
             f"If your reinvestigation consisted only of sending an automated "
-            f"inquiry to {furnisher} and accepting their response without "
+            f"inquiry to the creditor and accepting their response without "
             f"independently reviewing documentation, that does not constitute "
             f"a reasonable reinvestigation under 15 U.S.C. \u00a71681i(a) and "
             f"this account remains unverifiable and must be deleted."
@@ -7570,7 +7570,7 @@ def build_updated_response_letter(
         attack_type = acc.get("attack_type", "")
 
         section = (
-            f"{i}. {furnisher} \u2014 Account #: {acct}\n"
+            f"{i}. the creditor \u2014 Account #: {acct}\n"
             f"You have indicated this account was updated. I have the following "
             f"questions and demands regarding this update:\n\n"
             f"(a) What specific information was changed? Please provide a "
@@ -7581,7 +7581,7 @@ def build_updated_response_letter(
             f"An update to a peripheral field does not resolve this.\n\n"
             f"(c) Was this account fully verified with primary documentation, "
             f"or was the update based solely on information provided by "
-            f"{furnisher} without independent review?\n\n"
+            f"the creditor without independent review?\n\n"
             f"If the update did not fully resolve my original dispute — or if "
             f"the account still cannot be verified with primary documentation — "
             f"it must be deleted under 15 U.S.C. \u00a71681i(a)(5)."
@@ -7761,7 +7761,7 @@ def build_frivolous_response_letter(
         attack_type = acc.get("attack_type", "")
 
         section = (
-            f"{i}. {furnisher} \u2014 Account #: {acct}\n"
+            f"{i}. the creditor \u2014 Account #: {acct}\n"
             f"I am resubmitting this dispute with additional specificity. "
             f"The specific inaccuracy I am disputing is: "
             f"{_short_attack_description(attack_type, furnisher)}. "
@@ -7841,7 +7841,7 @@ def build_unable_to_process_letter(
         furnisher = acc.get("furnisher_name", "")
         acct      = acc.get("account_number", "")
         sections.append(
-            f"{i}. {furnisher} \u2014 Account #: {acct}\n"
+            f"{i}. the creditor \u2014 Account #: {acct}\n"
             f"I am resubmitting my dispute for this account. "
             f"If there is a specific issue that prevented processing "
             f"of this item, please advise in writing."
@@ -7905,7 +7905,7 @@ def build_no_response_letter(
         furnisher = acc.get("furnisher_name", "")
         acct      = acc.get("account_number", "")
         sections.append(
-            f"{i}. {furnisher} \u2014 Account #: {acct}\n"
+            f"{i}. the creditor \u2014 Account #: {acct}\n"
             f"This item was disputed on {dispute_label}. The 30-day "
             f"reinvestigation period has expired without a response. "
             f"Under 15 U.S.C. \u00a71681i(a)(1), this item must be "
@@ -7939,11 +7939,11 @@ def _short_attack_description(attack_type: str, furnisher: str) -> str:
     """One-sentence plain-language description of the dispute ground."""
     descs = {
         "collector_original_creditor_self_declared": (
-            f"the lack of documented legal authority for {furnisher} to report "
+            f"the lack of documented legal authority for the creditor to report "
             f"this collection account, including missing chain of assignment"
         ),
         "collector_original_creditor_pattern": (
-            f"the absence of proof that {furnisher} holds the legal right "
+            f"the absence of proof that the creditor holds the legal right "
             f"to report this account, given the collector/original creditor pattern"
         ),
         "same_account_number_same_balance": (
@@ -7954,7 +7954,7 @@ def _short_attack_description(attack_type: str, furnisher: str) -> str:
             "the same account number appearing in multiple separate tradelines"
         ),
         "potential_re_aging": (
-            f"the incorrect reporting period, where {furnisher} appears to be "
+            f"the incorrect reporting period, where the creditor appears to be "
             f"using its own acquisition date rather than the original date of "
             f"first delinquency, artificially extending the 7-year clock"
         ),
