@@ -13,15 +13,41 @@ BUREAUS = ["transunion", "experian", "equifax"]
 # =========================
 
 def extract_text_from_pdf(pdf_path: str) -> str:
+    """
+    Extract text from a PDF using pdfplumber.
+    If the PDF has no extractable text (e.g. scanned / Print-to-PDF),
+    falls back to OCR via pytesseract automatically.
+    """
     text_parts = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
-            if text:
+            if text and text.strip():
                 text_parts.append(text)
 
-    return "\n".join(text_parts)
+    # If we got meaningful text, return it
+    full_text = "\n".join(text_parts).strip()
+    if full_text and len(full_text) > 200:
+        return full_text
+
+    # ── Fallback: OCR ─────────────────────────────────────────────────────
+    # PDF has no extractable text (Microsoft Print to PDF, scanned, etc.)
+    # Rasterize each page and run pytesseract OCR.
+    try:
+        import pytesseract
+        from pdf2image import convert_from_path
+
+        ocr_parts = []
+        images = convert_from_path(pdf_path, dpi=200)
+        for img in images:
+            ocr_text = pytesseract.image_to_string(img, lang="eng")
+            if ocr_text and ocr_text.strip():
+                ocr_parts.append(ocr_text)
+        return "\n".join(ocr_parts)
+    except Exception as e:
+        # If OCR fails for any reason, return whatever we had
+        return full_text
 
 
 def normalize_text(text: str) -> str:
