@@ -263,6 +263,27 @@ def join_continuation_lines(lines: list[str], start_index: int, max_scan: int = 
 # ACCOUNT NAME DETECTION
 # =========================
 
+def normalize_furnisher_name(name: str) -> str:
+    """
+    Normalize furnisher names for matching/grouping purposes.
+    Strips common legal suffixes and whitespace so that
+    'LVNV FUNDING' and 'LVNV FUNDING LLC' resolve to the same key,
+    and 'LVNV FUNDING (Original Creditor: ...)' also matches.
+    """
+    import re as _re
+    n = name.upper().strip()
+    # Strip parenthetical annotations like "(Original Creditor: ...)"
+    n = _re.sub(r"\(.*?\)", "", n).strip()
+    # Strip common legal suffixes
+    for suffix in [" LLC", " INC", " CORP", " LTD", " NA", " N.A.", " N A",
+                   " CO", " LP", " PLC", " BANK", " FINANCIAL", " SERVICES"]:
+        if n.endswith(suffix):
+            n = n[:-len(suffix)].strip()
+    # Normalize spaces
+    n = _re.sub(r"\s+", " ", n).strip()
+    return n
+
+
 def find_account_name(lines: list[str], idx: int) -> str:
     candidates = []
 
@@ -660,6 +681,37 @@ def infer_missing_names(inventory: dict[str, list[dict[str, Any]]]) -> dict[str,
                 acc["name"] = account_balance_lookup[(acct, bal)]
             elif acct in account_lookup:
                 acc["name"] = account_lookup[acct]
+
+    # ── Cross-name normalization pass ────────────────────────────────────
+    # If two entries share the same account number and normalized furnisher
+    # name key (e.g. "LVNV FUNDING" vs "LVNV FUNDING LLC"), unify the name
+    # to whichever has the most complete version (longest non-parenthetical).
+    norm_name_to_canonical: dict[tuple[str, str], str] = {}
+    for bureau_accounts in inventory.values():
+        for acc in bureau_accounts:
+            acct = normalize_spaces(acc.get("account_number", ""))
+            name = normalize_spaces(acc.get("name", ""))
+            if not acct or not name:
+                continue
+            # Strip parentheticals for the key but keep full name as value
+            import re as _re2
+            name_no_paren = _re2.sub(r"\(.*?\)", "", name).strip()
+            norm_key = (acct, normalize_furnisher_name(name))
+            existing = norm_name_to_canonical.get(norm_key, "")
+            # Prefer shorter name without parenthetical annotation as canonical
+            if not existing or len(name_no_paren) < len(_re2.sub(r"\(.*?\)", "", existing).strip()):
+                norm_name_to_canonical[norm_key] = name_no_paren if name_no_paren else name
+
+    for bureau_accounts in inventory.values():
+        for acc in bureau_accounts:
+            acct = normalize_spaces(acc.get("account_number", ""))
+            name = normalize_spaces(acc.get("name", ""))
+            if not acct or not name:
+                continue
+            norm_key = (acct, normalize_furnisher_name(name))
+            canonical = norm_name_to_canonical.get(norm_key)
+            if canonical and canonical != name:
+                acc["name"] = canonical
 
     return inventory
 
