@@ -41,7 +41,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         ocr_parts = []
         images = convert_from_path(pdf_path, dpi=200)
         for img in images:
-            ocr_text = pytesseract.image_to_string(img, lang="eng")
+            ocr_text = pytesseract.image_to_string(img, lang="eng", config="--psm 6")
             if ocr_text and ocr_text.strip():
                 ocr_parts.append(ocr_text)
         return "\n".join(ocr_parts)
@@ -368,57 +368,103 @@ def parse_raw_account_blocks(lines: list[str]) -> list[dict[str, Any]]:
 
             j = i
 
+            # ── Helper: get value from current line; if the label has no value
+            # (OCR split label and value onto separate lines), peek at the next
+            # non-empty line as long as it doesn't start a new label.
+            _BLOCK_LABELS = (
+                "Account #:", "Account Type - Detail:", "Account Type:",
+                "Bureau Code:", "Account Status:", "Monthly Payment:",
+                "No. of Months (terms):", "High Credit:", "Credit Limit:",
+                "Payment Status:", "Balance:", "Past Due:", "Date Opened:",
+                "Date Last Active:", "Date of Last Payment:", "Last Reported:",
+                "Comments:", "Two-Year payment history",
+            )
+
+            def _get_field(label, current_line, line_list, pos):
+                """Return (value, new_pos). Peeks forward if value is empty."""
+                val = extract_value(current_line, label).strip()
+                if val:
+                    return val, pos
+                peek = pos + 1
+                while peek < len(line_list):
+                    nxt = line_list[peek].strip()
+                    if not nxt:
+                        peek += 1
+                        continue
+                    if any(nxt.startswith(lbl) for lbl in _BLOCK_LABELS):
+                        break
+                    if nxt.startswith("http") or nxt.lower().startswith("two-year"):
+                        break
+                    return nxt, peek
+                return val, pos
+
             while j < len(lines):
                 current = lines[j].strip()
                 block["raw_lines"].append(current)
 
                 if current.startswith("Account #:"):
-                    block["account_number_raw"] = extract_value(current, "Account #:")
+                    val, j = _get_field("Account #:", current, lines, j)
+                    block["account_number_raw"] = val
 
                 elif current.startswith("Account Status:"):
-                    block["status_raw"] = extract_value(current, "Account Status:")
+                    val, j = _get_field("Account Status:", current, lines, j)
+                    block["status_raw"] = val
 
                 elif current.startswith("Account Type - Detail:"):
-                    block["account_type_detail_raw"] = extract_value(current, "Account Type - Detail:")
+                    val, j = _get_field("Account Type - Detail:", current, lines, j)
+                    block["account_type_detail_raw"] = val
 
                 elif current.startswith("Account Type:"):
-                    block["account_type_raw"] = extract_value(current, "Account Type:")
+                    val, j = _get_field("Account Type:", current, lines, j)
+                    block["account_type_raw"] = val
 
                 elif current.startswith("Bureau Code:"):
-                    block["bureau_code_raw"] = extract_value(current, "Bureau Code:")
+                    val, j = _get_field("Bureau Code:", current, lines, j)
+                    block["bureau_code_raw"] = val
 
                 elif current.startswith("Monthly Payment:"):
-                    block["monthly_payment_raw"] = extract_value(current, "Monthly Payment:")
+                    val, j = _get_field("Monthly Payment:", current, lines, j)
+                    block["monthly_payment_raw"] = val
 
                 elif current.startswith("No. of Months (terms):"):
-                    block["no_of_months_raw"] = extract_value(current, "No. of Months (terms):")
+                    val, j = _get_field("No. of Months (terms):", current, lines, j)
+                    block["no_of_months_raw"] = val
 
                 elif current.startswith("High Credit:"):
-                    block["high_credit_raw"] = extract_value(current, "High Credit:")
+                    val, j = _get_field("High Credit:", current, lines, j)
+                    block["high_credit_raw"] = val
 
                 elif current.startswith("Credit Limit:"):
-                    block["credit_limit_raw"] = extract_value(current, "Credit Limit:")
+                    val, j = _get_field("Credit Limit:", current, lines, j)
+                    block["credit_limit_raw"] = val
 
                 elif current.startswith("Payment Status:"):
-                    block["payment_raw"] = extract_value(current, "Payment Status:")
+                    val, j = _get_field("Payment Status:", current, lines, j)
+                    block["payment_raw"] = val
 
                 elif current.startswith("Balance:"):
-                    block["balance_raw"] = extract_value(current, "Balance:")
+                    val, j = _get_field("Balance:", current, lines, j)
+                    block["balance_raw"] = val
 
                 elif current.startswith("Past Due:"):
-                    block["past_due_raw"] = extract_value(current, "Past Due:")
+                    val, j = _get_field("Past Due:", current, lines, j)
+                    block["past_due_raw"] = val
 
                 elif current.startswith("Date Opened:"):
-                    block["date_opened_raw"] = extract_value(current, "Date Opened:")
+                    val, j = _get_field("Date Opened:", current, lines, j)
+                    block["date_opened_raw"] = val
 
                 elif current.startswith("Date Last Active:"):
-                    block["date_last_active_raw"] = extract_value(current, "Date Last Active:")
+                    val, j = _get_field("Date Last Active:", current, lines, j)
+                    block["date_last_active_raw"] = val
 
                 elif current.startswith("Date of Last Payment:"):
-                    block["date_of_last_payment_raw"] = extract_value(current, "Date of Last Payment:")
+                    val, j = _get_field("Date of Last Payment:", current, lines, j)
+                    block["date_of_last_payment_raw"] = val
 
                 elif current.startswith("Last Reported:"):
-                    block["last_reported_raw"] = extract_value(current, "Last Reported:")
+                    val, j = _get_field("Last Reported:", current, lines, j)
+                    block["last_reported_raw"] = val
 
                 elif current.startswith("Comments:"):
                     first_part = extract_value(current, "Comments:")
