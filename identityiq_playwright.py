@@ -55,14 +55,20 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--no-zygote",
-                "--single-process",
+                # NOTE: --single-process removed — causes crashes in Docker
                 "--disable-extensions",
-                "--disable-software-rasterizer",
                 "--disable-background-networking",
                 "--disable-default-apps",
+                "--disable-sync",
+                "--disable-translate",
+                "--hide-scrollbars",
+                "--metrics-recording-only",
                 "--mute-audio",
                 "--no-first-run",
-                "--shm-size=128m",
+                "--safebrowsing-disable-auto-update",
+                "--ignore-certificate-errors",
+                "--ignore-ssl-errors",
+                "--ignore-certificate-errors-spki-list",
             ]
         }
         if system_chromium:
