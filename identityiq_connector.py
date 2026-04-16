@@ -546,13 +546,16 @@ def _is_negative(acc: dict) -> bool:
         return True
     if "collection" in payment or "chargeoff" in payment or "charge off" in payment:
         return True
-    if "late" in payment and "current" not in payment:
+    # Late X Days pattern (e.g. "Late 120 Days", "Late 30 Days")
+    if "late" in payment and any(str(n) in payment for n in [30,60,90,120,150,180]):
         return True
     if acc.get("has_30_in_history") or acc.get("has_60_in_history") or acc.get("has_90_in_history"):
         return True
-    if any(k in name for k in ["lvnv", "midland", "portfolio", "cavalry", "resurgent"]):
-        if "collection" in payment or "derogatory" in status:
-            return True
+    # Known debt buyers
+    debt_buyers = ["lvnv", "midland", "portfolio", "cavalry", "resurgent",
+                   "aldous", "jefferson", "asset acceptance"]
+    if any(k in name for k in debt_buyers):
+        return True
     return False
 
 
@@ -561,12 +564,19 @@ def _negative_type(acc: dict) -> str:
     payment = acc.get("payment_status", "").lower()
     name    = acc.get("name", "").lower()
 
+    debt_buyers = ["lvnv", "midland", "portfolio", "cavalry", "resurgent",
+                   "aldous", "jefferson", "asset acceptance"]
+
+    if any(k in name for k in debt_buyers):
+        return "collection"
     if "collection" in payment or "chargeoff" in payment:
         return "collection"
-    if "derogatory" in status:
-        return "charge_off"
+    if "late" in payment and any(str(n) in payment for n in [30,60,90,120,150,180]):
+        return "late_payment"
     if acc.get("has_30_in_history") or acc.get("has_60_in_history") or acc.get("has_90_in_history"):
         return "late_payment"
+    if "derogatory" in status:
+        return "charge_off"
     return "derogatory"
 
 
@@ -574,6 +584,9 @@ def parse_identityiq_json(data: dict) -> dict:
     """
     Main parser. Takes the parsed JSON dict and returns the same
     format as build_report() in original_parser.py.
+    
+    Runs the full FCRA attack detection pipeline from original_parser.py
+    so that the JSON flow produces identical results to the PDF flow.
     """
     merge = _get_merge_report(data)
 
@@ -599,11 +612,14 @@ def parse_identityiq_json(data: dict) -> dict:
         "dob":     {},
     }
 
+    # Report date from JSON
+    report_date = _safe(merge.get("@reportDate") or "")
+
     # Tradelines → raw accounts → inventory
     raw_accounts = _parse_tradelines(merge)
     inventory    = _build_inventory(raw_accounts)
 
-    # Negatives
+    # Negatives — basic detection
     negatives_by_bureau: dict[str, list] = {b: [] for b in BUREAUS}
     for bureau, accts in inventory.items():
         for acc in accts:
@@ -612,28 +628,121 @@ def parse_identityiq_json(data: dict) -> dict:
                 enriched["negative_type"] = _negative_type(acc)
                 negatives_by_bureau[bureau].append(enriched)
 
-    # Inquiries
-    inquiries = _parse_inquiries(merge)
+    # ── Run full FCRA attack pipeline from original_parser ────────────────
+    try:
+        from original_parser import (
+            build_dofd_engine,
+            build_legal_detection_engine,
+            build_legal_detection_summary,
+            build_attack_scoring_engine,
+            build_strategy_engine,
+            build_letter_input_engine,
+            build_dispute_letter_engine,
+            build_furnisher_letter_engine,
+            build_base_tradeline_engine as _orig_base,
+            detect_inquiry_attacks,
+            build_inquiry_letters,
+        )
 
-    # Attack count (simplified — just count negatives)
-    attack_count = sum(len(v) for v in negatives_by_bureau.values())
+        # DOFD enrichment
+        negatives_by_bureau = build_dofd_engine(negatives_by_bureau, report_date)
+
+        # Build a minimal base_tradeline_engine compatible structure
+        base_tradeline_engine = []
+        for acct in raw_accounts:
+            bureau_entries = {}
+            for bureau, bd in acct["bureau_data"].items():
+                bureau_entries[bureau] = {
+                    "account_number":        bd["account_number"],
+                    "masked_account_number": bd["account_number"].replace("*", "X"),
+                    "status":                bd["status"],
+                    "payment_status":        bd["payment_status"],
+                    "balance":               bd["balance"],
+                    "past_due":              bd["past_due"],
+                    "comments":              bd["comments"],
+                }
+            base_tradeline_engine.append({
+                "base_tradeline_id": acct["block_id"],
+                "furnisher_name":    acct["name"],
+                "bureau_entries":    bureau_entries,
+                "raw_lines":         [],
+            })
+
+        # Legal detection
+        legal_detection_engine = build_legal_detection_engine(
+            negatives_by_bureau,
+            base_tradeline_engine,
+            report_date=report_date,
+            client_state="",
+        )
+        legal_detection_summary = build_legal_detection_summary(
+            negatives_by_bureau,
+            legal_detection_engine,
+        )
+        attack_scoring_engine = build_attack_scoring_engine(legal_detection_engine)
+        strategy_engine       = build_strategy_engine(attack_scoring_engine)
+        letter_input_engine   = build_letter_input_engine(strategy_engine, negatives_by_bureau)
+        dispute_letters       = build_dispute_letter_engine(
+            letter_input_engine,
+            consumer_name="[CLIENT NAME]",
+            report_date=report_date,
+            personal_info=personal_info,
+            personal_info_issues=[],
+        )
+        furnisher_letters = build_furnisher_letter_engine(
+            letter_input_engine,
+            consumer_name="[CLIENT NAME]",
+            report_date=report_date,
+        )
+
+        # Inquiries
+        inquiries       = _parse_inquiries(merge)
+        inquiry_attacks = detect_inquiry_attacks(inquiries)
+        inquiry_letters = build_inquiry_letters(inquiries,
+                            consumer_name="[CLIENT NAME]",
+                            report_date=report_date)
+
+        # Collect all attacks
+        attacks = []
+        for bureau_attacks in legal_detection_engine.values():
+            attacks.extend(bureau_attacks)
+
+        attack_count = len(attacks)
+
+        print(f"[IIQ Parser] Full pipeline complete: {attack_count} attacks, "
+              f"{sum(len(v) for v in negatives_by_bureau.values())} negatives")
+
+    except Exception as e:
+        import traceback
+        print(f"[IIQ Parser] Full pipeline failed, using basic detection: {e}")
+        print(traceback.format_exc())
+        inquiries             = _parse_inquiries(merge)
+        inquiry_attacks       = []
+        inquiry_letters       = {}
+        letter_input_engine   = {b: {} for b in BUREAUS}
+        dispute_letters       = {}
+        furnisher_letters     = {}
+        attack_count          = sum(len(v) for v in negatives_by_bureau.values())
+        attacks               = []
+        base_tradeline_engine = []
 
     return {
-        "source": "identityiq_json",
-        "scores": scores,
-        "personal_info": personal_info,
+        "source":               "identityiq_json",
+        "scores":               scores,
+        "personal_info":        personal_info,
         "personal_info_issues": [],
-        "inventory_by_bureau": inventory,
-        "negatives_by_bureau": negatives_by_bureau,
-        "inquiries": inquiries,
-        "inquiry_attacks": [],
-        "attack_count": attack_count,
-        "attacks": [],
-        "letter_input_engine": {b: {} for b in BUREAUS},
-        "dispute_letters": {},
-        "furnisher_letters": {},
-        "report_date": "",
-        "raw_accounts_count": len(raw_accounts),
+        "inventory_by_bureau":  inventory,
+        "negatives_by_bureau":  negatives_by_bureau,
+        "inquiries":            inquiries,
+        "inquiry_attacks":      inquiry_attacks,
+        "inquiry_letters":      inquiry_letters,
+        "attack_count":         attack_count,
+        "attacks":              attacks,
+        "letter_input_engine":  letter_input_engine,
+        "dispute_letters":      dispute_letters,
+        "furnisher_letters":    furnisher_letters,
+        "report_date":          report_date,
+        "raw_accounts_count":   len(raw_accounts),
     }
 
 
