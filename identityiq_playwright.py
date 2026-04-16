@@ -154,12 +154,15 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 except Exception:
                     continue
 
-            # Wait for navigation after login
+            # Wait for navigation after login — use load instead of networkidle
+            # networkidle can hang on SPAs with continuous background requests
             print("[PW] Waiting for page load after login click...")
             try:
-                page.wait_for_load_state("networkidle", timeout=20000)
+                page.wait_for_load_state("load", timeout=15000)
             except Exception as e:
-                print(f"[PW] networkidle timeout (ok): {e}")
+                print(f"[PW] load timeout (ok): {e}")
+            # Give the SPA a moment to redirect
+            page.wait_for_timeout(2000)
             print(f"[PW] After login URL: {page.url}")
             print(f"[PW] Page title: {page.title()}")
 
@@ -299,6 +302,7 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
             raise ValueError(f"IdentityIQ connection error: {e}")
         finally:
             browser.close()
+
 
 def pull_and_parse(username: str, password: str, ssn_last4: str) -> dict:
     """
