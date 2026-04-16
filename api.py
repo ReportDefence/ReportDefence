@@ -532,6 +532,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
     # Run in background
     async def _run():
         try:
+            print(f"[connect-identityiq] Starting job={job_id} user={body.username}")
             from identityiq_connector import pull_and_parse
 
             # Run blocking IO in thread pool
@@ -599,6 +600,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
                 "source":            "identityiq_json",
             }).eq("job_id", job_id).execute()
 
+            print(f"[connect-identityiq] Completed job={job_id} attacks={attack_count}")
             # Add job to client
             client_res2 = sb.table("api_clients").select("job_ids").eq("id", body.client_id).execute()
             if client_res2.data:
@@ -607,9 +609,12 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
                 sb.table("api_clients").update({"job_ids": current_ids}).eq("id", body.client_id).execute()
 
         except Exception as e:
+            import traceback
+            err_detail = traceback.format_exc()
+            print(f"[connect-identityiq] FAILED job={job_id}: {e}\n{err_detail}")
             sb.table("api_jobs").update({
                 "status": "failed",
-                "error":  str(e),
+                "error":  f"{str(e)}\n\n{err_detail}",
             }).eq("job_id", job_id).execute()
 
     asyncio.create_task(_run())
