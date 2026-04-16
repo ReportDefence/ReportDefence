@@ -1,12 +1,1 @@
-[phases.setup]
-nixPkgs = ["tesseract", "poppler_utils"]
 
-[phases.install]
-cmds = [
-  "pip install -r requirements.txt",
-  "apt-get update && apt-get install -y chromium-browser || apt-get install -y chromium || true",
-  "playwright install chromium || true"
-]
-
-[phases.build]
-cmds = ["echo 'Build complete'"]
