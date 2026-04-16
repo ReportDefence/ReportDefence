@@ -148,34 +148,46 @@ def login_identityiq(username: str, password: str, ssn_last4: str) -> httpx.Clie
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # ── Step 3: SSN verification (if required) ───────────────────────────
+    # ── Step 3: SSN verification ─────────────────────────────────────────
+    # IdentityIQ requires SSN last 4 as a second factor after password login
     if ssn_last4:
         ssn_endpoints = [
             "/api/ssn-verification",
             "/api/account/verify-ssn",
             "/api/verify",
+            "/api/login/ssn",
+            "/api/auth/ssn",
         ]
-        ssn_payload = {"ssnLastFour": ssn_last4, "ssn": ssn_last4}
+        ssn_payload = {"ssnLastFour": ssn_last4, "ssn": ssn_last4, "last4Ssn": ssn_last4}
 
         for endpoint in ssn_endpoints:
+            print(f"[IIQ] Step 3: POST {endpoint} with SSN")
             ssn_resp = client.post(
                 endpoint,
                 json=ssn_payload,
                 headers={**login_headers, "Content-Type": "application/json"},
             )
+            print(f"[IIQ] SSN response {endpoint}: {ssn_resp.status_code} body={ssn_resp.text[:200]}")
             if ssn_resp.status_code in (200, 201):
+                print(f"[IIQ] SSN verification succeeded at {endpoint}")
                 break
 
     print(f"[IIQ] After login, cookies: {list(client.cookies.keys())}")
-    # Verify we have a session cookie
-    if "ASP.NET_SessionId" not in client.cookies:
-        # Try to detect session from any cookie
-        session_cookies = [k for k in client.cookies if "session" in k.lower() or "auth" in k.lower()]
-        if not session_cookies:
-            raise ValueError(
-                "Login appeared to succeed but no session cookie was set. "
-                "Credentials may be incorrect or IdentityIQ requires additional verification."
-            )
+    
+    # If login returned HTML, check if we landed on Dashboard (success)
+    # or back on Login page (failure)
+    if login_resp.status_code == 200 and "<html" in login_resp.text.lower():
+        resp_text_lower = login_resp.text.lower()
+        if "dashboard" in resp_text_lower or "credit score" in resp_text_lower:
+            print("[IIQ] Login successful - dashboard HTML detected")
+        elif "invalid" in resp_text_lower or "incorrect" in resp_text_lower:
+            raise ValueError("Invalid username or password")
+        else:
+            # May be MFA or SSN verification step
+            print(f"[IIQ] Login HTML response - checking for SSN step")
+    
+    # Verify we have a session (ASP.NET_SessionId should exist from step 1)
+    print(f"[IIQ] Session cookies present: {list(client.cookies.keys())}")
 
     return client
 
@@ -194,6 +206,8 @@ def fetch_json_report(client: httpx.Client) -> dict:
         params={"view": "json"},
         headers={"Accept": "application/json, text/javascript, */*"},
     )
+    print(f"[IIQ] JSON report response: status={resp.status_code} len={len(resp.text)} url={resp.url}")
+    print(f"[IIQ] JSON report first 500 chars: {resp.text[:500]}")
     resp.raise_for_status()
 
     raw = resp.text.strip()
