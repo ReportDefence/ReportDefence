@@ -77,7 +77,9 @@ def login_identityiq(username: str, password: str, ssn_last4: str) -> httpx.Clie
     )
 
     # ── Step 1: GET homepage to initialize session + get CSRF token ──────
+    print(f"[IIQ] Step 1: GET homepage for user={username}")
     resp = client.get("/")
+    print(f"[IIQ] Step 1 response: {resp.status_code}, cookies: {list(resp.cookies.keys())}")
     resp.raise_for_status()
 
     # Extract __RequestVerificationToken if present in HTML
@@ -109,11 +111,13 @@ def login_identityiq(username: str, password: str, ssn_last4: str) -> httpx.Clie
         login_headers["__RequestVerificationToken"] = csrf_token
         login_headers["RequestVerificationToken"]   = csrf_token
 
+    print(f"[IIQ] Step 2: POST /api/login")
     login_resp = client.post(
         "/api/login",
         json=login_payload,
         headers=login_headers,
     )
+    print(f"[IIQ] Login response: {login_resp.status_code} body={login_resp.text[:300]}")
 
     # Handle non-JSON or error responses
     if login_resp.status_code == 404:
@@ -162,6 +166,7 @@ def login_identityiq(username: str, password: str, ssn_last4: str) -> httpx.Clie
             if ssn_resp.status_code in (200, 201):
                 break
 
+    print(f"[IIQ] After login, cookies: {list(client.cookies.keys())}")
     # Verify we have a session cookie
     if "ASP.NET_SessionId" not in client.cookies:
         # Try to detect session from any cookie
@@ -183,6 +188,7 @@ def fetch_json_report(client: httpx.Client) -> dict:
     """
     Fetch the JSONP credit report and parse it into a Python dict.
     """
+    print(f"[IIQ] Fetching JSON report...")
     resp = client.get(
         "/CreditReport.aspx",
         params={"view": "json"},
