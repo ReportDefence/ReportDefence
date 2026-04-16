@@ -130,12 +130,19 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                     continue
 
             # Wait for navigation after login
-            page.wait_for_load_state("networkidle", timeout=20000)
+            print("[PW] Waiting for page load after login click...")
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception as e:
+                print(f"[PW] networkidle timeout (ok): {e}")
             print(f"[PW] After login URL: {page.url}")
+            print(f"[PW] Page title: {page.title()}")
 
             # ── Step 4: SSN verification (if required) ────────────────────
             current_url = page.url.lower()
             page_text   = page.content().lower()
+            print(f"[PW] Checking for SSN step... url={current_url[:80]}")
+            print(f"[PW] Page has 'ssn': {'ssn' in page_text}, 'last 4': {'last 4' in page_text}")
 
             ssn_required = (
                 "ssn" in page_text or
@@ -162,7 +169,6 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                     except Exception:
                         continue
 
-                # Click verify/continue button
                 verify_sel = (
                     "button:has-text('Verify')",
                     "button:has-text('Continue')",
@@ -177,40 +183,51 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                     except Exception:
                         continue
 
-                page.wait_for_load_state("networkidle", timeout=20000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception as e:
+                    print(f"[PW] SSN networkidle timeout (ok): {e}")
                 print(f"[PW] After SSN URL: {page.url}")
+            else:
+                print("[PW] No SSN step detected, proceeding...")
 
             # ── Step 5: Verify we're logged in ────────────────────────────
             final_url = page.url.lower()
+            print(f"[PW] Final URL before JSON fetch: {page.url}")
             if "login" in final_url and "dashboard" not in final_url:
                 page_content = page.content().lower()
                 if "invalid" in page_content or "incorrect" in page_content:
                     raise ValueError("Invalid username or password")
                 raise ValueError(
-                    f"Login failed — still on login page after credentials. "
-                    f"URL: {page.url}"
+                    f"Login failed — still on login page. URL: {page.url}"
                 )
             print(f"[PW] Successfully logged in. URL: {page.url}")
 
             # ── Step 6: Fetch JSON report ─────────────────────────────────
-            print("[PW] Fetching JSON report...")
-            
-            # Use page.evaluate to fetch the JSON with session cookies
-            json_text = page.evaluate("""
-                async () => {
-                    const resp = await fetch(
-                        '/CreditReport.aspx?view=json',
-                        {
-                            credentials: 'include',
-                            headers: { 'Accept': 'application/json, text/javascript, */*' }
+            print("[PW] Fetching JSON report via page.evaluate...")
+            try:
+                json_text = page.evaluate("""
+                    async () => {
+                        try {
+                            const resp = await fetch(
+                                '/CreditReport.aspx?view=json',
+                                {
+                                    credentials: 'include',
+                                    headers: { 'Accept': 'application/json, text/javascript, */*' }
+                                }
+                            );
+                            const text = await resp.text();
+                            return text;
+                        } catch(e) {
+                            return 'FETCH_ERROR: ' + e.toString();
                         }
-                    );
-                    return await resp.text();
-                }
-            """)
-
-            print(f"[PW] JSON response length: {len(json_text)}")
-            print(f"[PW] JSON first 100 chars: {json_text[:100]}")
+                    }
+                """)
+                print(f"[PW] JSON response length: {len(json_text) if json_text else 0}")
+                print(f"[PW] JSON first 150 chars: {json_text[:150] if json_text else 'EMPTY'}")
+            except Exception as e:
+                print(f"[PW] page.evaluate failed: {e}")
+                json_text = ""
 
             if not json_text or len(json_text) < 10:
                 raise ValueError(
