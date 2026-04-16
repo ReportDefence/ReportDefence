@@ -12,3 +12,4 @@ supabase
 pdf2image
 pytesseract
 playwright
+httpx
