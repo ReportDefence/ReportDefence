@@ -533,13 +533,13 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
     async def _run():
         try:
             print(f"[connect-identityiq] Starting job={job_id} user={body.username}")
-            from identityiq_connector import pull_and_parse
+            # Use Playwright (headless browser) to bypass Imperva WAF
+            from identityiq_playwright import pull_and_parse as pw_pull_and_parse
 
-            # Run blocking IO in thread pool
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                partial(pull_and_parse, body.username, body.password, body.ssn_last4)
+                partial(pw_pull_and_parse, body.username, body.password, body.ssn_last4)
             )
 
             scores = result.get("scores", {})
