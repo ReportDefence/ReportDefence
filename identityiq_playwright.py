@@ -54,8 +54,15 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--no-zygote",
                 "--single-process",
                 "--disable-extensions",
+                "--disable-software-rasterizer",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--mute-audio",
+                "--no-first-run",
+                "--shm-size=128m",
             ]
         }
         if system_chromium:
@@ -64,7 +71,9 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
         else:
             print(f"[PW] No system Chromium found, trying Playwright default")
 
+        print(f"[PW] Launching browser...")
         browser = p.chromium.launch(**launch_kwargs)
+        print(f"[PW] Browser launched successfully")
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -78,7 +87,11 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
         try:
             # ── Step 1: Navigate to login page ───────────────────────────
             print("[PW] Navigating to IdentityIQ login...")
-            page.goto("https://member.identityiq.com/", wait_until="networkidle", timeout=30000)
+            try:
+                page.goto("https://member.identityiq.com/", wait_until="networkidle", timeout=30000)
+            except Exception as e:
+                print(f"[PW] goto networkidle failed, trying domcontentloaded: {e}")
+                page.goto("https://member.identityiq.com/", wait_until="domcontentloaded", timeout=30000)
             print(f"[PW] Login page loaded: {page.url}")
 
             # ── Step 2: Fill credentials ──────────────────────────────────
