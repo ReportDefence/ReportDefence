@@ -165,15 +165,23 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 print(f"[PW] Verification loop {attempt+1}: {page.url}")
 
                 if "security-question" in cur or "verify" in cur:
-                    print("[PW] Verification page — waiting for input...")
-                    # Wait explicitly for an input field to be visible
-                    try:
-                        page.wait_for_selector("input:visible", timeout=8000)
-                    except Exception as e:
-                        print(f"[PW] No visible input found: {e}")
+                    print("[PW] Verification page — waiting for React to render input...")
+                    # SPA renders the form via JS — wait longer and poll
+                    input_found = False
+                    for wait_attempt in range(10):
+                        page.wait_for_timeout(1000)
+                        # Try to find any input in the page
+                        inputs = page.query_selector_all("input")
+                        print(f"[PW] Wait {wait_attempt+1}/10 — inputs found: {len(inputs)}")
+                        if inputs:
+                            input_found = True
+                            break
+                    
+                    if not input_found:
+                        print(f"[PW] No input found after 10s. Page: {page.content()[:500]}")
                         break
 
-                    # Fill SSN into the visible input
+                    # Fill SSN into the first available input
                     filled = False
                     for sel in (
                         "input[placeholder*='SSN']",
@@ -184,23 +192,26 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                         "input[name*='ssn']",
                         "input[name*='answer']",
                         "input[maxlength='4']",
-                        "input[type='text']:visible",
-                        "input[type='number']:visible",
-                        "input[type='password']:visible",
+                        "input[type='text']",
+                        "input[type='number']",
+                        "input[type='password']",
+                        "input",
                     ):
                         try:
                             el = page.query_selector(sel)
-                            if el and el.is_visible():
+                            if el:
+                                el.scroll_into_view_if_needed()
                                 el.click()
                                 el.fill(ssn_last4)
-                                print(f"[PW] Filled SSN: {sel}")
+                                print(f"[PW] Filled SSN with: {sel} value={ssn_last4}")
                                 filled = True
                                 break
-                        except Exception:
+                        except Exception as e:
+                            print(f"[PW] Selector {sel} failed: {e}")
                             continue
 
                     if not filled:
-                        print(f"[PW] WARNING: no input filled. Page snippet: {page.content()[:300]}")
+                        print(f"[PW] WARNING: no input filled.")
 
                     # Click submit button
                     for sel in (
