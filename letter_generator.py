@@ -102,7 +102,22 @@ def _make_doc(path: str) -> SimpleDocTemplate:
 
 
 def _esc(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """
+    Escape for ReportLab XML and sanitize Unicode characters that
+    Helvetica (Latin-1 / Type-1) cannot render — they appear as 'a^'
+    or other garbage in the PDF output.
+    """
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("—", "-")   # em dash
+    text = text.replace("–", "-")   # en dash
+    text = text.replace("‘", "'")   # left single quote
+    text = text.replace("’", "'")   # right single quote
+    text = text.replace("“", '"')  # left double quote
+    text = text.replace("”", '"')  # right double quote
+    text = text.replace("•", "-")   # bullet
+    text = text.replace(" ", " ")   # non-breaking space
+    text = text.replace("…", "...") # ellipsis
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +142,7 @@ def text_to_story(letter_text: str, certified: bool = True) -> list:
 
     if certified:
         story.append(Paragraph(
-            "VIA CERTIFIED MAIL \u2014 RETURN RECEIPT REQUESTED",
+            "VIA CERTIFIED MAIL - RETURN RECEIPT REQUESTED",
             STYLES["certified"],
         ))
         story.append(_sp(5))
