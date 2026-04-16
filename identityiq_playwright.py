@@ -216,35 +216,42 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 )
             print(f"[PW] Successfully logged in. URL: {page.url}")
 
-            # ── Step 6: Fetch JSON report via page.goto ───────────────────
-            print("[PW] Fetching JSON report via page.goto...")
+            # ── Step 6: Fetch JSON using session cookies via httpx ────────
+            print("[PW] Extracting session cookies from browser...")
             try:
-                page.goto(
-                    "https://member.identityiq.com/CreditReport.aspx?view=json",
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
-                json_text = page.content()
-                print(f"[PW] JSON page content length: {len(json_text)}")
-                print(f"[PW] JSON first 150 chars: {json_text[:150]}")
+                # Get all cookies from the browser context
+                browser_cookies = context.cookies()
+                print(f"[PW] Browser cookies: {[c['name'] for c in browser_cookies]}")
                 
-                # page.content() wraps in <html><body><pre>...</pre></body></html>
-                # Extract just the JSON text
-                import re as _re
-                pre_match = _re.search(r'<pre[^>]*>(.*?)</pre>', json_text, _re.DOTALL)
-                if pre_match:
-                    json_text = pre_match.group(1).strip()
-                    print(f"[PW] Extracted from <pre>: {len(json_text)} chars")
-                elif "JSON_CALLBACK" in json_text:
-                    # Already raw JSON
-                    pass
-                else:
-                    # Try stripping HTML tags
-                    json_text = _re.sub(r'<[^>]+>', '', json_text).strip()
-                    print(f"[PW] After HTML strip: {len(json_text)} chars")
+                # Build cookie header string
+                cookie_header = "; ".join(
+                    f"{c['name']}={c['value']}" for c in browser_cookies
+                )
+                
+                # Use httpx with those cookies to fetch the JSON
+                import httpx as _httpx
+                headers = {
+                    "Cookie": cookie_header,
+                    "Accept": "application/json, text/javascript, */*",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Referer": "https://member.identityiq.com/Dashboard.aspx",
+                }
+                
+                with _httpx.Client(follow_redirects=True, timeout=30.0) as http_client:
+                    resp = http_client.get(
+                        "https://member.identityiq.com/CreditReport.aspx?view=json",
+                        headers=headers,
+                    )
+                    json_text = resp.text
+                    print(f"[PW] httpx JSON response: status={resp.status_code} len={len(json_text)}")
+                    print(f"[PW] JSON first 150 chars: {json_text[:150]}")
                     
             except Exception as e:
-                print(f"[PW] page.goto JSON failed: {e}")
+                print(f"[PW] Cookie-based fetch failed: {e}")
                 json_text = ""
 
             if not json_text or len(json_text) < 10:
