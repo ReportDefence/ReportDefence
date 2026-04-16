@@ -626,24 +626,36 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
                     for a in accts
                 ]
 
+            # Serialize letter_input_engine
+            letters_in = result.get("letter_input_engine", {})
+            letter_input_serialized = {}
+            for b, groups in letters_in.items():
+                letter_input_serialized[b] = {}
+                for grp, items in groups.items():
+                    letter_input_serialized[b][grp] = [
+                        {k: v for k, v in item.items()
+                         if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                        for item in (items if isinstance(items, list) else [])
+                    ]
+
             # Update job as completed
             sb.table("api_jobs").update({
-                "status":            "completed",
-                "scores":            scores,
-                "attack_count":      attack_count,
+                "status":              "completed",
+                "scores":              scores,
+                "attack_count":        attack_count,
                 "negatives_by_bureau": negatives,
                 "inventory_by_bureau": inventory_out,
-                "personal_info":     result.get("personal_info", {}),
+                "personal_info":       result.get("personal_info", {}),
                 "personal_info_issues": result.get("personal_info_issues", []),
-                "attacks":           result.get("attacks", []),
-                "inquiries":         result.get("inquiries", []),
-                "inquiry_attacks":   result.get("inquiry_attacks", []),
-                "letter_input_engine": {b: {} for b in ["transunion", "experian", "equifax"]},
-                "letters_generated": False,
-                "letter_files":      [],
-                "response_history":  [],
-                "report_date":       result.get("report_date", ""),
-                "source":            "identityiq_json",
+                "attacks":             result.get("attacks", []),
+                "inquiries":           result.get("inquiries", []),
+                "inquiry_attacks":     result.get("inquiry_attacks", []),
+                "letter_input_engine": letter_input_serialized,
+                "letters_generated":   False,
+                "letter_files":        [],
+                "response_history":    [],
+                "report_date":         result.get("report_date", ""),
+                "source":              "identityiq_json",
             }).eq("job_id", job_id).execute()
 
             print(f"[connect-identityiq] Completed job={job_id} attacks={attack_count}")
