@@ -143,13 +143,24 @@ async def debug_chromium():
     nix_paths = glob.glob("/nix/store/*/bin/chromium*")
     results["nix_glob"] = nix_paths[:5]
     
-    # find command
-    try:
-        out = subprocess.check_output(["find", "/nix", "-name", "chromium", "-type", "f"], 
-                                       timeout=10, stderr=subprocess.DEVNULL).decode()
-        results["find_nix"] = out.strip().split("\n")[:5]
-    except Exception as e:
-        results["find_nix"] = str(e)
+    # find chromium anywhere
+    for search_path in ["/nix", "/usr", "/opt", "/snap", "/home"]:
+        try:
+            out = subprocess.check_output(
+                ["find", search_path, "-name", "chromium*", "-type", "f"],
+                timeout=10, stderr=subprocess.DEVNULL
+            ).decode()
+            results[f"find_{search_path}"] = out.strip().split("\n")[:5]
+        except Exception as e:
+            results[f"find_{search_path}"] = str(e)
+    
+    # check playwright cache
+    pw_cache = glob.glob("/root/.cache/ms-playwright/*/chrome*/chrome*")
+    results["playwright_cache"] = pw_cache[:5]
+    
+    # check /app/.venv playwright
+    venv_pw = glob.glob("/app/.venv/lib/*/site-packages/playwright/driver/*")
+    results["venv_playwright"] = venv_pw[:5]
     
     # check PATH
     results["PATH"] = os.environ.get("PATH", "")
