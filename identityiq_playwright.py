@@ -30,15 +30,34 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
+        import shutil, os
+
+        # Use system Chromium (installed via nixpkgs) to avoid
+        # Playwright's download cache not persisting in Railway runtime
+        system_chromium = (
+            shutil.which("chromium") or
+            shutil.which("chromium-browser") or
+            shutil.which("google-chrome") or
+            "/run/current-system/sw/bin/chromium"
+        )
+
+        launch_kwargs = {
+            "headless": True,
+            "args": [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--single-process",
             ]
-        )
+        }
+        if system_chromium and os.path.exists(system_chromium):
+            launch_kwargs["executable_path"] = system_chromium
+            print(f"[PW] Using system Chromium: {system_chromium}")
+        else:
+            print(f"[PW] System Chromium not found, using Playwright default")
+
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
