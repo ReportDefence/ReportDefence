@@ -165,53 +165,55 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 print(f"[PW] Verification loop {attempt+1}: {page.url}")
 
                 if "security-question" in cur or "verify" in cur:
-                    print("[PW] Verification page — waiting for React to render input...")
-                    # SPA renders the form via JS — wait longer and poll
-                    input_found = False
-                    for wait_attempt in range(10):
-                        page.wait_for_timeout(1000)
-                        # Try to find any input in the page
-                        inputs = page.query_selector_all("input")
-                        print(f"[PW] Wait {wait_attempt+1}/10 — inputs found: {len(inputs)}")
-                        if inputs:
-                            input_found = True
-                            break
+                    print("[PW] Security question page — waiting 3s for React...")
+                    page.wait_for_timeout(3000)
                     
-                    if not input_found:
-                        print(f"[PW] No input found after 10s. Page: {page.content()[:500]}")
-                        break
+                    # Log all inputs found for debugging
+                    all_inputs = page.query_selector_all("input")
+                    print(f"[PW] Inputs found: {len(all_inputs)}")
+                    for idx, inp in enumerate(all_inputs):
+                        try:
+                            print(f"[PW]   input[{idx}]: type={inp.get_attribute('type')} placeholder={inp.get_attribute('placeholder')} name={inp.get_attribute('name')}")
+                        except Exception:
+                            pass
 
-                    # Fill SSN into the first available input
+                    # Fill the SSN input — try specific selectors first, then any input
                     filled = False
                     for sel in (
+                        "input[placeholder*='four']",
                         "input[placeholder*='SSN']",
-                        "input[placeholder*='last four']",
-                        "input[placeholder*='Last four']",
                         "input[placeholder*='last 4']",
-                        "input[placeholder*='Last 4']",
                         "input[name*='ssn']",
                         "input[name*='answer']",
                         "input[maxlength='4']",
-                        "input[type='text']",
-                        "input[type='number']",
-                        "input[type='password']",
-                        "input",
                     ):
                         try:
                             el = page.query_selector(sel)
                             if el:
-                                el.scroll_into_view_if_needed()
-                                el.click()
-                                el.fill(ssn_last4)
-                                print(f"[PW] Filled SSN with: {sel} value={ssn_last4}")
+                                el.triple_click()
+                                el.type(ssn_last4)
+                                print(f"[PW] Filled SSN with: {sel}")
                                 filled = True
                                 break
                         except Exception as e:
-                            print(f"[PW] Selector {sel} failed: {e}")
                             continue
 
+                    if not filled and all_inputs:
+                        # Use the first non-hidden input
+                        for inp in all_inputs:
+                            try:
+                                itype = inp.get_attribute('type') or 'text'
+                                if itype not in ('hidden', 'submit', 'button', 'checkbox', 'radio'):
+                                    inp.triple_click()
+                                    inp.type(ssn_last4)
+                                    print(f"[PW] Filled SSN into first available input (type={itype})")
+                                    filled = True
+                                    break
+                            except Exception:
+                                continue
+
                     if not filled:
-                        print(f"[PW] WARNING: no input filled.")
+                        print(f"[PW] Could not fill SSN input")
 
                     # Click submit button
                     for sel in (
@@ -271,7 +273,7 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                             return 'FETCH_ERROR: ' + e.toString();
                         }
                     }
-                """, timeout=60000)
+                """)
                 print(f"[PW] JSON response length: {len(json_text) if json_text else 0}")
                 print(f"[PW] JSON first 150 chars: {json_text[:150] if json_text else 'EMPTY'}")
             except Exception as e:
