@@ -488,6 +488,139 @@ async def upload_report(
         "inquiry_attacks": result.get("inquiry_attacks", []),
     }
 
+
+# ═══════════════════════════════════════════════════════════════
+#  IDENTITYIQ DIRECT CONNECT
+# ═══════════════════════════════════════════════════════════════
+
+class ConnectIdentityIQBody(BaseModel):
+    client_id: str
+    username: str
+    password: str
+    ssn_last4: str
+
+@app.post("/connect-identityiq")
+async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_current_user)):
+    """
+    Pull credit report directly from IdentityIQ using client credentials.
+    Authenticates, fetches the JSON report, parses it, and stores the job
+    in the same format as /upload-report.
+    """
+    import asyncio
+    from functools import partial
+
+    # Validate client exists
+    client_res = sb.table("api_clients").select("*").eq("id", body.client_id).execute()
+    if not client_res.data:
+        raise HTTPException(404, "Client not found")
+    client_data = client_res.data[0]
+    consumer_name = client_data.get("name", "")
+
+    job_id = str(uuid.uuid4())
+
+    # Store pending job
+    sb.table("api_jobs").insert({
+        "job_id":      job_id,
+        "client_id":   body.client_id,
+        "operator_id": user["id"],
+        "consumer_name": consumer_name,
+        "source":      "identityiq_json",
+        "status":      "pending",
+        "error":       None,
+    }).execute()
+
+    # Run in background
+    async def _run():
+        try:
+            from identityiq_connector import pull_and_parse
+
+            # Run blocking IO in thread pool
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                partial(pull_and_parse, body.username, body.password, body.ssn_last4)
+            )
+
+            scores = result.get("scores", {})
+            negatives = result.get("negatives_by_bureau", {})
+            attack_count = result.get("attack_count", 0)
+
+            # Build inventory_out (same format as upload-report)
+            inventory_out = {}
+            for bureau, accts in result.get("inventory_by_bureau", {}).items():
+                inventory_out[bureau] = [
+                    {
+                        "block_id":             a.get("block_id", ""),
+                        "possible_duplicate_group": a.get("possible_duplicate_group", ""),
+                        "name":                 a.get("name", ""),
+                        "account_number":       a.get("account_number", ""),
+                        "account_type":         a.get("account_type", ""),
+                        "account_type_detail":  a.get("account_type_detail", ""),
+                        "bureau_code":          a.get("bureau_code", ""),
+                        "status":               a.get("status", ""),
+                        "monthly_payment":      a.get("monthly_payment", ""),
+                        "payment_status":       a.get("payment_status", ""),
+                        "balance":              a.get("balance", ""),
+                        "no_of_months":         a.get("no_of_months", ""),
+                        "high_credit":          a.get("high_credit", ""),
+                        "credit_limit":         a.get("credit_limit", ""),
+                        "past_due":             a.get("past_due", ""),
+                        "date_opened":          a.get("date_opened", ""),
+                        "date_last_active":     a.get("date_last_active", ""),
+                        "date_of_last_payment": a.get("date_of_last_payment", ""),
+                        "last_reported":        a.get("last_reported", ""),
+                        "comments":             a.get("comments", ""),
+                        "late_payment_codes":   a.get("late_payment_codes", []),
+                        "payment_history":      a.get("payment_history", []),
+                        "has_30_in_history":    a.get("has_30_in_history", False),
+                        "has_60_in_history":    a.get("has_60_in_history", False),
+                        "has_90_in_history":    a.get("has_90_in_history", False),
+                    }
+                    for a in accts
+                ]
+
+            # Update job as completed
+            sb.table("api_jobs").update({
+                "status":            "completed",
+                "scores":            scores,
+                "attack_count":      attack_count,
+                "negatives_by_bureau": negatives,
+                "inventory_by_bureau": inventory_out,
+                "personal_info":     result.get("personal_info", {}),
+                "personal_info_issues": result.get("personal_info_issues", []),
+                "attacks":           result.get("attacks", []),
+                "inquiries":         result.get("inquiries", []),
+                "inquiry_attacks":   result.get("inquiry_attacks", []),
+                "letter_input_engine": {b: {} for b in ["transunion", "experian", "equifax"]},
+                "letters_generated": False,
+                "letter_files":      [],
+                "response_history":  [],
+                "report_date":       result.get("report_date", ""),
+                "source":            "identityiq_json",
+            }).eq("job_id", job_id).execute()
+
+            # Add job to client
+            client_res2 = sb.table("api_clients").select("job_ids").eq("id", body.client_id).execute()
+            if client_res2.data:
+                current_ids = client_res2.data[0].get("job_ids") or []
+                current_ids.append(job_id)
+                sb.table("api_clients").update({"job_ids": current_ids}).eq("id", body.client_id).execute()
+
+        except Exception as e:
+            sb.table("api_jobs").update({
+                "status": "failed",
+                "error":  str(e),
+            }).eq("job_id", job_id).execute()
+
+    asyncio.create_task(_run())
+
+    return {
+        "job_id":        job_id,
+        "consumer_name": consumer_name,
+        "source":        "identityiq_json",
+        "status":        "pending",
+    }
+
 # ═══════════════════════════════════════════════════════════════
 #  LETTER GENERATION
 # ═══════════════════════════════════════════════════════════════
