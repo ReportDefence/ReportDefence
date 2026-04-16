@@ -32,13 +32,19 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
     with sync_playwright() as p:
         import shutil, os
 
-        # Use system Chromium (installed via nixpkgs) to avoid
-        # Playwright's download cache not persisting in Railway runtime
-        system_chromium = (
-            shutil.which("chromium") or
-            shutil.which("chromium-browser") or
-            shutil.which("google-chrome") or
-            "/run/current-system/sw/bin/chromium"
+        # Search for system Chromium in common locations
+        chromium_candidates = [
+            shutil.which("chromium"),
+            shutil.which("chromium-browser"),
+            shutil.which("google-chrome"),
+            shutil.which("google-chrome-stable"),
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+        ]
+        system_chromium = next(
+            (p for p in chromium_candidates if p and os.path.exists(p)),
+            None
         )
 
         launch_kwargs = {
@@ -49,13 +55,14 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--single-process",
+                "--disable-extensions",
             ]
         }
-        if system_chromium and os.path.exists(system_chromium):
+        if system_chromium:
             launch_kwargs["executable_path"] = system_chromium
             print(f"[PW] Using system Chromium: {system_chromium}")
         else:
-            print(f"[PW] System Chromium not found, using Playwright default")
+            print(f"[PW] No system Chromium found, trying Playwright default")
 
         browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
