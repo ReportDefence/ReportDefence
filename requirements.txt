@@ -11,3 +11,4 @@ google-auth==2.29.0
 supabase
 pdf2image
 pytesseract
+playwright
