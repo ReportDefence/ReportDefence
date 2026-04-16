@@ -423,6 +423,8 @@ async def upload_report(
                 "has_30_in_history":    a.get("has_30_in_history", False),
                 "has_60_in_history":    a.get("has_60_in_history", False),
                 "has_90_in_history":    a.get("has_90_in_history", False),
+                "block_id":             a.get("block_id", ""),
+                "possible_duplicate_group": a.get("possible_duplicate_group", ""),
             }
             for a in accts
         ]
