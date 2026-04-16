@@ -140,13 +140,7 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
 
             # ── Step 3: Click Login ───────────────────────────────────────
             print("[PW] Clicking login button...")
-            login_btn_sel = (
-                "button:has-text('Login')",
-                "button[type='submit']",
-                "input[type='submit']",
-                "button:has-text('Sign In')",
-            )
-            for sel in login_btn_sel:
+            for sel in ("button:has-text('Login')", "button[type='submit']", "input[type='submit']"):
                 try:
                     page.click(sel, timeout=3000)
                     print(f"[PW] Clicked login with selector: {sel}")
@@ -154,100 +148,98 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 except Exception:
                     continue
 
-            # Wait for navigation after login — use load instead of networkidle
-            # networkidle can hang on SPAs with continuous background requests
-            print("[PW] Waiting for page load after login click...")
+            # Wait for URL to change after login click
+            print("[PW] Waiting for post-login redirect...")
             try:
-                page.wait_for_load_state("load", timeout=15000)
-            except Exception as e:
-                print(f"[PW] load timeout (ok): {e}")
-            # Give the SPA a moment to redirect
-            page.wait_for_timeout(2000)
+                page.wait_for_url(
+                    lambda url: url != "https://member.identityiq.com/" and "member.identityiq.com" in url,
+                    timeout=15000
+                )
+            except Exception:
+                page.wait_for_timeout(3000)
             print(f"[PW] After login URL: {page.url}")
-            print(f"[PW] Page title: {page.title()}")
 
-            # ── Step 4: Handle post-login verification steps ─────────────
-            current_url = page.url.lower()
-            page_text   = page.content().lower()
-            print(f"[PW] Post-login URL: {page.url}")
+            # ── Step 4: Handle verification steps in a loop ───────────────
+            for attempt in range(4):
+                cur = page.url.lower()
+                print(f"[PW] Verification loop {attempt+1}: {page.url}")
 
-            # Handle security-question page (new device/IP detection)
-            if "security-question" in current_url:
-                print("[PW] Security question page — attempting to handle...")
-                # Try to find and answer the security question field
-                # The page likely has a text input for the answer
-                page_html = page.content()
-                print(f"[PW] Security question page snippet: {page_html[page_html.find('question'):page_html.find('question')+500] if 'question' in page_html.lower() else 'not found'}")
-                raise ValueError(
-                    "IdentityIQ requires a security question answer. "
-                    "Please log in manually at member.identityiq.com from a browser, "
-                    "answer the security question once, then try again from the app."
-                )
-
-            # Handle SSN verification (last 4 digits)
-            ssn_required = (
-                "last 4" in page_text or
-                "last four" in page_text or
-                (("ssn" in page_text or "social security" in page_text) 
-                 and "security-question" not in current_url)
-            )
-
-            if ssn_required and ssn_last4:
-                print("[PW] SSN verification required, filling SSN...")
-                ssn_sel = (
-                    "input[placeholder*='SSN']",
-                    "input[placeholder*='last 4']",
-                    "input[placeholder*='Last 4']",
-                    "input[name*='ssn']",
-                    "input[maxlength='4']",
-                    "input[type='password']",
-                    "input[type='text']",
-                    "input[type='number']",
-                )
-                filled = False
-                for sel in ssn_sel:
+                if "security-question" in cur or "verify" in cur:
+                    print("[PW] Verification page — waiting for input...")
+                    # Wait explicitly for an input field to be visible
                     try:
-                        page.fill(sel, ssn_last4, timeout=3000)
-                        print(f"[PW] Filled SSN with selector: {sel}")
-                        filled = True
+                        page.wait_for_selector("input:visible", timeout=8000)
+                    except Exception as e:
+                        print(f"[PW] No visible input found: {e}")
                         break
-                    except Exception:
-                        continue
 
-                if filled:
-                    verify_sel = (
-                        "button:has-text('Verify')",
-                        "button:has-text('Continue')",
-                        "button:has-text('Submit')",
-                        "button[type='submit']",
-                    )
-                    for sel in verify_sel:
+                    # Fill SSN into the visible input
+                    filled = False
+                    for sel in (
+                        "input[placeholder*='SSN']",
+                        "input[placeholder*='last four']",
+                        "input[placeholder*='Last four']",
+                        "input[placeholder*='last 4']",
+                        "input[placeholder*='Last 4']",
+                        "input[name*='ssn']",
+                        "input[name*='answer']",
+                        "input[maxlength='4']",
+                        "input[type='text']:visible",
+                        "input[type='number']:visible",
+                        "input[type='password']:visible",
+                    ):
                         try:
-                            page.click(sel, timeout=3000)
-                            print(f"[PW] Clicked verify with selector: {sel}")
-                            break
+                            el = page.query_selector(sel)
+                            if el and el.is_visible():
+                                el.click()
+                                el.fill(ssn_last4)
+                                print(f"[PW] Filled SSN: {sel}")
+                                filled = True
+                                break
                         except Exception:
                             continue
 
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=20000)
-                    except Exception as e:
-                        print(f"[PW] SSN networkidle timeout (ok): {e}")
-                    print(f"[PW] After SSN URL: {page.url}")
-            else:
-                print("[PW] No additional verification needed, proceeding...")
+                    if not filled:
+                        print(f"[PW] WARNING: no input filled. Page snippet: {page.content()[:300]}")
 
-            # ── Step 5: Verify we're logged in ────────────────────────────
+                    # Click submit button
+                    for sel in (
+                        "button:has-text('Submit')",
+                        "button:has-text('Verify')",
+                        "button:has-text('Continue')",
+                        "button[type='submit']",
+                        "input[type='submit']",
+                    ):
+                        try:
+                            el = page.query_selector(sel)
+                            if el and el.is_visible():
+                                el.click()
+                                print(f"[PW] Clicked submit: {sel}")
+                                break
+                        except Exception:
+                            continue
+
+                    # Wait for redirect away from verification page
+                    try:
+                        page.wait_for_url(
+                            lambda url: "security-question" not in url.lower() and "verify" not in url.lower(),
+                            timeout=10000
+                        )
+                    except Exception:
+                        page.wait_for_timeout(3000)
+                    print(f"[PW] After verification: {page.url}")
+
+                else:
+                    # Not on a verification page — done
+                    print(f"[PW] No more verification steps needed")
+                    break
+
+            # ── Step 5: Verify authenticated ──────────────────────────────
             final_url = page.url.lower()
-            print(f"[PW] Final URL before JSON fetch: {page.url}")
-            if "login" in final_url and "dashboard" not in final_url:
-                page_content = page.content().lower()
-                if "invalid" in page_content or "incorrect" in page_content:
-                    raise ValueError("Invalid username or password")
-                raise ValueError(
-                    f"Login failed — still on login page. URL: {page.url}"
-                )
-            print(f"[PW] Successfully logged in. URL: {page.url}")
+            print(f"[PW] Final URL: {page.url}")
+            if "login" in final_url and "security-question" not in final_url and "dashboard" not in final_url:
+                raise ValueError("Login failed — invalid credentials")
+            print(f"[PW] Successfully authenticated. URL: {page.url}")
 
             # ── Step 6: Fetch JSON via page.evaluate (proven working) ────
             print("[PW] Fetching JSON report via page.evaluate...")
@@ -268,7 +260,7 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                             return 'FETCH_ERROR: ' + e.toString();
                         }
                     }
-                """)
+                """, timeout=60000)
                 print(f"[PW] JSON response length: {len(json_text) if json_text else 0}")
                 print(f"[PW] JSON first 150 chars: {json_text[:150] if json_text else 'EMPTY'}")
             except Exception as e:
