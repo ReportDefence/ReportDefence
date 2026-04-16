@@ -216,30 +216,35 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 )
             print(f"[PW] Successfully logged in. URL: {page.url}")
 
-            # ── Step 6: Fetch JSON report ─────────────────────────────────
-            print("[PW] Fetching JSON report via page.evaluate...")
+            # ── Step 6: Fetch JSON report via page.goto ───────────────────
+            print("[PW] Fetching JSON report via page.goto...")
             try:
-                json_text = page.evaluate("""
-                    async () => {
-                        try {
-                            const resp = await fetch(
-                                '/CreditReport.aspx?view=json',
-                                {
-                                    credentials: 'include',
-                                    headers: { 'Accept': 'application/json, text/javascript, */*' }
-                                }
-                            );
-                            const text = await resp.text();
-                            return text;
-                        } catch(e) {
-                            return 'FETCH_ERROR: ' + e.toString();
-                        }
-                    }
-                """)
-                print(f"[PW] JSON response length: {len(json_text) if json_text else 0}")
-                print(f"[PW] JSON first 150 chars: {json_text[:150] if json_text else 'EMPTY'}")
+                page.goto(
+                    "https://member.identityiq.com/CreditReport.aspx?view=json",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                json_text = page.content()
+                print(f"[PW] JSON page content length: {len(json_text)}")
+                print(f"[PW] JSON first 150 chars: {json_text[:150]}")
+                
+                # page.content() wraps in <html><body><pre>...</pre></body></html>
+                # Extract just the JSON text
+                import re as _re
+                pre_match = _re.search(r'<pre[^>]*>(.*?)</pre>', json_text, _re.DOTALL)
+                if pre_match:
+                    json_text = pre_match.group(1).strip()
+                    print(f"[PW] Extracted from <pre>: {len(json_text)} chars")
+                elif "JSON_CALLBACK" in json_text:
+                    # Already raw JSON
+                    pass
+                else:
+                    # Try stripping HTML tags
+                    json_text = _re.sub(r'<[^>]+>', '', json_text).strip()
+                    print(f"[PW] After HTML strip: {len(json_text)} chars")
+                    
             except Exception as e:
-                print(f"[PW] page.evaluate failed: {e}")
+                print(f"[PW] page.goto JSON failed: {e}")
                 json_text = ""
 
             if not json_text or len(json_text) < 10:
