@@ -88,11 +88,17 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
             # ── Step 1: Navigate to login page ───────────────────────────
             print("[PW] Navigating to IdentityIQ login...")
             try:
-                page.goto("https://member.identityiq.com/", wait_until="networkidle", timeout=30000)
+                page.goto("https://member.identityiq.com/", wait_until="domcontentloaded", timeout=20000)
+                print(f"[PW] Login page loaded: {page.url}")
             except Exception as e:
-                print(f"[PW] goto networkidle failed, trying domcontentloaded: {e}")
-                page.goto("https://member.identityiq.com/", wait_until="domcontentloaded", timeout=30000)
-            print(f"[PW] Login page loaded: {page.url}")
+                print(f"[PW] goto failed: {e}")
+                # Try direct login URL
+                try:
+                    page.goto("https://member.identityiq.com/login", wait_until="domcontentloaded", timeout=20000)
+                    print(f"[PW] Login page (alt) loaded: {page.url}")
+                except Exception as e2:
+                    print(f"[PW] Both goto attempts failed: {e2}")
+                    raise ValueError(f"Cannot reach IdentityIQ: {e2}")
 
             # ── Step 2: Fill credentials ──────────────────────────────────
             print("[PW] Filling credentials...")
