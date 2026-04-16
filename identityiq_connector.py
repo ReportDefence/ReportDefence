@@ -352,7 +352,11 @@ def _parse_tradelines(merge: dict) -> list[dict]:
 
                 creditor_name = creditor_name or _safe(t.get("@creditorName"))
                 gt = t.get("GrantedTrade", {}) or {}
+                if isinstance(gt, list):
+                    gt = gt[0] if gt else {}
                 collection = t.get("CollectionTrade", {}) or {}
+                if isinstance(collection, list):
+                    collection = collection[0] if collection else {}
 
                 # Payment history lates
                 late_30 = int(_safe(gt.get("@late30Count", "0")) or 0)
@@ -362,9 +366,13 @@ def _parse_tradelines(merge: dict) -> list[dict]:
                 # Original creditor for collections
                 orig_creditor = _safe(collection.get("@originalCreditor"))
 
-                # Remark
+                # Remark — can be dict or list
                 remark_obj = t.get("Remark", {}) or {}
-                remark_code = remark_obj.get("RemarkCode", {}) or {}
+                if isinstance(remark_obj, list):
+                    remark_obj = remark_obj[0] if remark_obj else {}
+                remark_code = remark_obj.get("RemarkCode", {}) or {} if isinstance(remark_obj, dict) else {}
+                if isinstance(remark_code, list):
+                    remark_code = remark_code[0] if remark_code else {}
                 comments = _safe(remark_code.get("@description")) if isinstance(remark_code, dict) else ""
 
                 bureau_data[bureau] = {
