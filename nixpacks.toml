@@ -1,9 +1,5 @@
 [phases.setup]
-nixPkgs = ["tesseract", "poppler_utils", "chromium", "nss", "nspr", "atk", "cups", "dbus", "expat", "libdrm", "libxkbcommon", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "mesa", "gtk3", "pango", "cairo", "alsa-lib"]
+nixPkgs = ["tesseract", "poppler_utils", "chromium"]
 
 [phases.install]
-cmds = [
-  "pip install -r requirements.txt",
-  "playwright install chromium",
-  "playwright install-deps chromium"
-]
+cmds = ["pip install -r requirements.txt"]
