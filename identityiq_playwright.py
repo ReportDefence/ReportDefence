@@ -228,42 +228,30 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 )
             print(f"[PW] Successfully logged in. URL: {page.url}")
 
-            # ── Step 6: Fetch JSON using session cookies via httpx ────────
-            print("[PW] Extracting session cookies from browser...")
+            # ── Step 6: Fetch JSON via page.evaluate (proven working) ────
+            print("[PW] Fetching JSON report via page.evaluate...")
             try:
-                # Get all cookies from the browser context
-                browser_cookies = context.cookies()
-                print(f"[PW] Browser cookies: {[c['name'] for c in browser_cookies]}")
-                
-                # Build cookie header string
-                cookie_header = "; ".join(
-                    f"{c['name']}={c['value']}" for c in browser_cookies
-                )
-                
-                # Use httpx with those cookies to fetch the JSON
-                import httpx as _httpx
-                headers = {
-                    "Cookie": cookie_header,
-                    "Accept": "application/json, text/javascript, */*",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    "Referer": "https://member.identityiq.com/Dashboard.aspx",
-                }
-                
-                with _httpx.Client(follow_redirects=True, timeout=30.0) as http_client:
-                    resp = http_client.get(
-                        "https://member.identityiq.com/CreditReport.aspx?view=json",
-                        headers=headers,
-                    )
-                    json_text = resp.text
-                    print(f"[PW] httpx JSON response: status={resp.status_code} len={len(json_text)}")
-                    print(f"[PW] JSON first 150 chars: {json_text[:150]}")
-                    
+                json_text = page.evaluate("""
+                    async () => {
+                        try {
+                            const resp = await fetch(
+                                '/CreditReport.aspx?view=json',
+                                {
+                                    credentials: 'include',
+                                    headers: { 'Accept': 'application/json, text/javascript, */*' }
+                                }
+                            );
+                            const text = await resp.text();
+                            return text || 'EMPTY_RESPONSE';
+                        } catch(e) {
+                            return 'FETCH_ERROR: ' + e.toString();
+                        }
+                    }
+                """, timeout=60000)
+                print(f"[PW] JSON response length: {len(json_text) if json_text else 0}")
+                print(f"[PW] JSON first 150 chars: {json_text[:150] if json_text else 'EMPTY'}")
             except Exception as e:
-                print(f"[PW] Cookie-based fetch failed: {e}")
+                print(f"[PW] page.evaluate failed: {e}")
                 json_text = ""
 
             if not json_text or len(json_text) < 10:
