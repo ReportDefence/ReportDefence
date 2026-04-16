@@ -127,6 +127,43 @@ def user_response(u: dict):
         "role": u["role"],
     }
 
+
+@app.get("/debug/chromium")
+async def debug_chromium():
+    """Temporary endpoint to find Chromium path on Railway."""
+    import subprocess, shutil, glob, os
+    results = {}
+    
+    # which commands
+    for cmd in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]:
+        path = shutil.which(cmd)
+        results[f"which_{cmd}"] = path
+    
+    # glob search in common nix paths
+    nix_paths = glob.glob("/nix/store/*/bin/chromium*")
+    results["nix_glob"] = nix_paths[:5]
+    
+    # find command
+    try:
+        out = subprocess.check_output(["find", "/nix", "-name", "chromium", "-type", "f"], 
+                                       timeout=10, stderr=subprocess.DEVNULL).decode()
+        results["find_nix"] = out.strip().split("\n")[:5]
+    except Exception as e:
+        results["find_nix"] = str(e)
+    
+    # check PATH
+    results["PATH"] = os.environ.get("PATH", "")
+    
+    # ls /usr/bin chromium
+    try:
+        out = subprocess.check_output(["ls", "/usr/bin/"], timeout=5).decode()
+        chrome_bins = [x for x in out.split() if "chrom" in x.lower()]
+        results["usr_bin_chrome"] = chrome_bins
+    except Exception as e:
+        results["usr_bin_chrome"] = str(e)
+
+    return results
+
 @app.post("/auth/register")
 async def register(body: RegisterBody):
     existing = sb.table("api_users").select("id").eq("email", body.email).execute()
@@ -533,9 +570,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
     async def _run():
         try:
             print(f"[connect-identityiq] Starting job={job_id} user={body.username}")
-            # Use Playwright (headless browser) to bypass Imperva WAF
             from identityiq_playwright import pull_and_parse as pw_pull_and_parse
-
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
