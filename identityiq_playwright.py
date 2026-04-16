@@ -163,17 +163,26 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
             print(f"[PW] After login URL: {page.url}")
             print(f"[PW] Page title: {page.title()}")
 
-            # ── Step 4: SSN verification (if required) ────────────────────
+            # ── Step 4: Handle post-login verification steps ─────────────
             current_url = page.url.lower()
             page_text   = page.content().lower()
-            print(f"[PW] Checking for SSN step... url={current_url[:80]}")
-            print(f"[PW] Page has 'ssn': {'ssn' in page_text}, 'last 4': {'last 4' in page_text}")
+            print(f"[PW] Post-login URL: {page.url}")
 
+            # Handle security-question page (new device/IP detection)
+            if "security-question" in current_url:
+                print("[PW] Security question page detected — this requires manual handling.")
+                raise ValueError(
+                    "IdentityIQ is asking a security question for this login. "
+                    "Please log in manually to identityiq.com once from a browser to "
+                    "trust this device, then try again."
+                )
+
+            # Handle SSN verification (last 4 digits)
             ssn_required = (
-                "ssn" in page_text or
-                "social security" in page_text or
                 "last 4" in page_text or
-                "verify" in current_url
+                "last four" in page_text or
+                (("ssn" in page_text or "social security" in page_text) 
+                 and "security-question" not in current_url)
             )
 
             if ssn_required and ssn_last4:
@@ -181,40 +190,42 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                 ssn_sel = (
                     "input[placeholder*='SSN']",
                     "input[placeholder*='last 4']",
+                    "input[placeholder*='Last 4']",
                     "input[name*='ssn']",
                     "input[maxlength='4']",
-                    "input[type='text']",
-                    "input[type='number']",
                 )
+                filled = False
                 for sel in ssn_sel:
                     try:
                         page.fill(sel, ssn_last4, timeout=3000)
                         print(f"[PW] Filled SSN with selector: {sel}")
+                        filled = True
                         break
                     except Exception:
                         continue
 
-                verify_sel = (
-                    "button:has-text('Verify')",
-                    "button:has-text('Continue')",
-                    "button:has-text('Submit')",
-                    "button[type='submit']",
-                )
-                for sel in verify_sel:
+                if filled:
+                    verify_sel = (
+                        "button:has-text('Verify')",
+                        "button:has-text('Continue')",
+                        "button:has-text('Submit')",
+                        "button[type='submit']",
+                    )
+                    for sel in verify_sel:
+                        try:
+                            page.click(sel, timeout=3000)
+                            print(f"[PW] Clicked verify with selector: {sel}")
+                            break
+                        except Exception:
+                            continue
+
                     try:
-                        page.click(sel, timeout=3000)
-                        print(f"[PW] Clicked verify with selector: {sel}")
-                        break
-                    except Exception:
-                        continue
-
-                try:
-                    page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception as e:
-                    print(f"[PW] SSN networkidle timeout (ok): {e}")
-                print(f"[PW] After SSN URL: {page.url}")
+                        page.wait_for_load_state("networkidle", timeout=20000)
+                    except Exception as e:
+                        print(f"[PW] SSN networkidle timeout (ok): {e}")
+                    print(f"[PW] After SSN URL: {page.url}")
             else:
-                print("[PW] No SSN step detected, proceeding...")
+                print("[PW] No additional verification needed, proceeding...")
 
             # ── Step 5: Verify we're logged in ────────────────────────────
             final_url = page.url.lower()
