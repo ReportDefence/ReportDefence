@@ -300,7 +300,6 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
         finally:
             browser.close()
 
-
 def pull_and_parse(username: str, password: str, ssn_last4: str) -> dict:
     """
     Full pipeline using Playwright:
