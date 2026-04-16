@@ -170,11 +170,15 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
 
             # Handle security-question page (new device/IP detection)
             if "security-question" in current_url:
-                print("[PW] Security question page detected — this requires manual handling.")
+                print("[PW] Security question page — attempting to handle...")
+                # Try to find and answer the security question field
+                # The page likely has a text input for the answer
+                page_html = page.content()
+                print(f"[PW] Security question page snippet: {page_html[page_html.find('question'):page_html.find('question')+500] if 'question' in page_html.lower() else 'not found'}")
                 raise ValueError(
-                    "IdentityIQ is asking a security question for this login. "
-                    "Please log in manually to identityiq.com once from a browser to "
-                    "trust this device, then try again."
+                    "IdentityIQ requires a security question answer. "
+                    "Please log in manually at member.identityiq.com from a browser, "
+                    "answer the security question once, then try again from the app."
                 )
 
             # Handle SSN verification (last 4 digits)
@@ -193,6 +197,9 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                     "input[placeholder*='Last 4']",
                     "input[name*='ssn']",
                     "input[maxlength='4']",
+                    "input[type='password']",
+                    "input[type='text']",
+                    "input[type='number']",
                 )
                 filled = False
                 for sel in ssn_sel:
@@ -258,7 +265,7 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                             return 'FETCH_ERROR: ' + e.toString();
                         }
                     }
-                """, timeout=60000)
+                """)
                 print(f"[PW] JSON response length: {len(json_text) if json_text else 0}")
                 print(f"[PW] JSON first 150 chars: {json_text[:150] if json_text else 'EMPTY'}")
             except Exception as e:
