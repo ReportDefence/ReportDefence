@@ -1,8 +1,5 @@
 [phases.setup]
-nixPkgs = ["tesseract", "poppler_utils"]
-
-[phases.setup]
-nixPkgs = ["chromium", "playwright-driver"]
+nixPkgs = ["tesseract", "poppler_utils", "chromium"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt", "playwright install chromium"]
+cmds = ["pip install -r requirements.txt", "playwright install chromium --with-deps"]
