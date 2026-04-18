@@ -693,35 +693,44 @@ def _parse_inquiries(merge: dict) -> list[dict]:
 
 
 def _parse_scores_from_components(data: dict) -> dict:
-    """Extract scores from VantageScore components."""
+    """Extract credit scores per bureau from VantageScore bundle components.
+
+    The JSON bundle always contains three VantageScore components in order:
+        TUCVantageScoreV6  → transunion
+        EQFVantageScoreV6  → equifax
+        EXPVantageScoreV6  → experian
+
+    We read the bureau directly from the component Type string instead of
+    relying on positional ordering, which is more robust and avoids the
+    previous bug where experian was missing from bureau_order and ended up
+    receiving the wrong fallback score.
+    """
     scores = {"transunion": None, "experian": None, "equifax": None}
     components = data.get("BundleComponents", {}).get("BundleComponent", [])
 
-    bureau_order = ["transunion", "equifax"]  # TUC first, then EQF in bundle
-    score_idx = 0
+    # Map component Type prefix → internal bureau key
+    _COMP_BUREAU = {
+        "TUC": "transunion",
+        "EQF": "equifax",
+        "EXP": "experian",
+    }
 
     for comp in components:
         comp_type = comp.get("Type", {}).get("$", "")
-        if "VantageScore" in comp_type:
-            score_obj = comp.get("CreditScoreType", {})
-            val = _safe(score_obj.get("@riskScore"))
-            if val and score_idx < len(bureau_order):
-                bureau = bureau_order[score_idx]
-                scores[bureau] = int(val) if val.isdigit() else None
-                score_idx += 1
-
-    # Experian score from Borrower if available
-    merge = _get_merge_report(data)
-    borrower = merge.get("Borrower", {})
-    credit_scores = borrower.get("CreditScore", [])
-    if isinstance(credit_scores, dict):
-        credit_scores = [credit_scores]
-    for s in credit_scores:
-        val = _safe(s.get("@riskScore"))
+        if "VantageScore" not in comp_type:
+            continue
+        # comp_type looks like "TUCVantageScoreV6", "EQFVantageScoreV6", etc.
+        bureau = None
+        for prefix, key in _COMP_BUREAU.items():
+            if comp_type.startswith(prefix):
+                bureau = key
+                break
+        if bureau is None:
+            continue
+        score_obj = comp.get("CreditScoreType", {})
+        val = _safe(score_obj.get("@riskScore"))
         if val and val.isdigit():
-            # If experian is missing, fill it
-            if scores["experian"] is None:
-                scores["experian"] = int(val)
+            scores[bureau] = int(val)
 
     return scores
 
