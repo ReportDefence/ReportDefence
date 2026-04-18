@@ -4990,16 +4990,21 @@ def build_dispute_letter_engine(
     bureau_seed_map = {"transunion": 1, "experian": 2, "equifax": 3}
 
     # Opening template assignment — unique per bureau+group+round combination.
-    # We use a deterministic hash so the same client always gets the same letter,
-    # and we spread evenly across the available templates.
+    # Bureau offset (stride=3) ensures TransUnion, Experian and Equifax always
+    # receive different templates for the same category and round — preventing
+    # the pattern-detection risk that arises when a client's three bureau letters
+    # open with identical language.
     def _tpl_idx(bureau: str, group: str, round_key: str, n_templates: int) -> int:
-        # Sequential assignment within each bureau: 3 groups × 2 rounds = 6 slots.
-        # With 6 R1 templates and 3 R2 templates this guarantees zero intra-bureau dups.
-        group_pos   = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}
-        round_pos   = 0 if round_key == "round_1" else 1
-        g           = group_pos.get(group, 0)
-        slot        = g * 2 + round_pos          # 0-5 for R1, 0-2 for R2
-        return slot % n_templates
+        # bureau_offset: TU=0, EXP=3, EQF=6 — stride of 3 spreads evenly across 8 slots
+        _bureau_offset = {"transunion": 0, "experian": 3, "equifax": 6}
+        group_pos      = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}
+        bureau_off = _bureau_offset.get(bureau, 0)
+        round_pos  = 0 if round_key == "round_1" else 1
+        g          = group_pos.get(group, 0)
+        # Combine bureau offset, group position and round so every
+        # (bureau x group x round) combination maps to a unique template slot.
+        slot = (bureau_off + g + round_pos * 4) % n_templates
+        return slot
 
     group_order = ["collections", "charge_offs", "late_payments", "other_derogatory"]
 
