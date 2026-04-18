@@ -471,6 +471,7 @@ async def upload_report(
                 "has_30_in_history":    a.get("has_30_in_history", False),
                 "has_60_in_history":    a.get("has_60_in_history", False),
                 "has_90_in_history":    a.get("has_90_in_history", False),
+                "has_co_in_history":    a.get("has_co_in_history", False),
                 "block_id":             a.get("block_id", ""),
                 "possible_duplicate_group": a.get("possible_duplicate_group", ""),
             }
@@ -622,6 +623,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
                         "has_30_in_history":    a.get("has_30_in_history", False),
                         "has_60_in_history":    a.get("has_60_in_history", False),
                         "has_90_in_history":    a.get("has_90_in_history", False),
+                        "has_co_in_history":    a.get("has_co_in_history", False),
                     }
                     for a in accts
                 ]
@@ -780,6 +782,7 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
                         "has_30_in_history":    a.get("has_30_in_history", False),
                         "has_60_in_history":    a.get("has_60_in_history", False),
                         "has_90_in_history":    a.get("has_90_in_history", False),
+                        "has_co_in_history":    a.get("has_co_in_history", False),
                     }
                     for a in accts
                 ]
