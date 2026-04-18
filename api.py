@@ -916,7 +916,23 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         Fallback: build a minimal letter_input_engine from negatives_by_bureau
         when the stored letter_input_engine is empty (happens when original_parser
         was unavailable during the job's analysis run).
+
+        Field names must match what build_dispute_letter_engine/_account_reason expect:
+          - furnisher_name  (not "name")
+          - account_number
+          - negative_type   singular: "collection", "charge_off", "late_payment"
+          - attack_type     use "requires_basic_verification" as safe default
+          - recommended_round
+          + all optional date/balance fields _account_reason uses
         """
+        # Map from category key → singular negative_type value the engine expects
+        _CAT_TO_NEG_TYPE = {
+            "collections":      "collection",
+            "charge_offs":      "charge_off",
+            "late_payments":    "late_payment",
+            "other_derogatory": "derogatory",
+        }
+
         result = {}
         for bureau, accounts in negatives_by_bureau.items():
             result[bureau] = {
@@ -926,17 +942,46 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
                 "other_derogatory": [],
             }
             for acc in accounts:
-                cat = _negative_type_from_account(acc)
+                cat      = _negative_type_from_account(acc)
+                neg_type = _CAT_TO_NEG_TYPE.get(cat, "derogatory")
+                acct_num = acc.get("account_number", "")
                 entry = {
-                    "name":              acc.get("name", ""),
-                    "account_number":    acc.get("account_number", ""),
-                    "negative_type":     cat.rstrip("s"),  # "collections" → "collection"
-                    "balance":           acc.get("balance", ""),
-                    "status":            acc.get("status", ""),
-                    "payment_status":    acc.get("payment_status", ""),
-                    "comments":          acc.get("comments", ""),
-                    "block_id":          acc.get("block_id", ""),
-                    "recommended_round": "round_1",
+                    # ── Required by _account_reason ───────────────────────────
+                    "furnisher_name":        acc.get("name", ""),
+                    "account_number":        acct_num,
+                    "masked_account_number": acct_num.replace("*", "X"),
+                    "negative_type":         neg_type,
+                    "attack_type":           "requires_basic_verification",
+                    "laws":                  ["15 USC 1681i(a)", "15 USC 1681e(b)"],
+                    "recommended_round":     "round_1",
+                    "recommended_methods":   ["bureau_dispute"],
+                    "secondary_flags":       [],
+                    # ── Date / balance fields ─────────────────────────────────
+                    "balance":               acc.get("balance", ""),
+                    "past_due":              acc.get("past_due", ""),
+                    "payment_status":        acc.get("payment_status", ""),
+                    "status":                acc.get("status", ""),
+                    "high_credit":           acc.get("high_credit", ""),
+                    "credit_limit":          acc.get("credit_limit", ""),
+                    "monthly_payment":       acc.get("monthly_payment", ""),
+                    "late_payment_codes":    acc.get("late_payment_codes", []),
+                    "date_opened":           acc.get("date_opened", ""),
+                    "date_last_active":      acc.get("date_last_active", ""),
+                    "date_of_last_payment":  acc.get("date_of_last_payment", ""),
+                    "last_reported":         acc.get("last_reported", ""),
+                    # ── DOFD fields (empty — not computed in fallback) ────────
+                    "dofd_estimated":            None,
+                    "dofd_confidence":           "unknown",
+                    "fcra_expiration":           None,
+                    "days_until_expiration":     None,
+                    "is_obsolete":               False,
+                    "re_aging_flag":             False,
+                    "re_aging_gap_days":         None,
+                    "dofd_verification_required": False,
+                    "dla_suspected_refresh":     False,
+                    # ── Extra context ─────────────────────────────────────────
+                    "comments":              acc.get("comments", ""),
+                    "block_id":              acc.get("block_id", ""),
                 }
                 result[bureau][cat].append(entry)
         return result
