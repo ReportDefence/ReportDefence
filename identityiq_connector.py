@@ -1016,7 +1016,6 @@ def pull_and_parse(username: str, password: str, ssn_last4: str) -> dict:
     client.close()
     return result
 
-
 def parse_from_json_file(path: str) -> dict:
     """
     Parse a locally saved JSON/JSONP file (for testing without login).
