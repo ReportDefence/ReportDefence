@@ -311,114 +311,351 @@ def _parse_open_closed(t: dict) -> str:
     return _safe(obj)
 
 
+# ─────────────────────────────────────────────
+# MAPPING CONSTANTS (derived from IdentityIQ HTML report ground truth)
+# ─────────────────────────────────────────────
+
+# AccountCondition.@abbreviation → display status
+# (The JSON uses "Derog" but IdentityIQ's HTML shows "Derogatory")
+_ACCOUNT_STATUS_MAP = {
+    "Open":       "Open",
+    "Closed":     "Closed",
+    "Paid":       "Paid",
+    "Derog":      "Derogatory",
+    "Derogatory": "Derogatory",
+}
+
+# PayStatusHistory.@status char → payment_history value
+# C = Current (OK)
+# 1/2/3/4/5/6 = 30/60/90/120/150/180 days late
+# 7/8/9 = collection/chargeoff (CO)
+# U / N = unknown / no data (ND)
+_PAY_HISTORY_CHAR_MAP = {
+    "C": "OK",
+    "0": "OK",
+    "1": "30",
+    "2": "60",
+    "3": "90",
+    "4": "120",
+    "5": "150",
+    "6": "180",
+    "7": "CO",
+    "8": "CO",
+    "9": "CO",
+    "U": "ND",
+    "N": "ND",
+    "-": "--",
+}
+
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _iso_to_display(iso_date: str) -> str:
+    """Convert '2024-02-25' → '02/25/2024'. Returns '' on bad input."""
+    if not iso_date:
+        return ""
+    try:
+        y, m, d = iso_date.split("-")
+        return f"{m}/{d}/{y}"
+    except Exception:
+        return ""
+
+
+def _concat_remarks(tl: dict) -> str:
+    """
+    Extract Comments by concatenating ALL Remark entries on the tradeline.
+
+    Each Remark may have:
+      - RemarkCode.@description  (the standard remark text)
+      - @customRemark            (free-text, used for Consumer Statements like
+                                  '**CONSUMER STATEMENT** ITEM IN DISPUTE BY CONSUMER')
+
+    Returns concatenated string (matches IdentityIQ HTML which concatenates
+    without separator). Returns '' if there are no remarks.
+    """
+    remarks = tl.get("Remark") or []
+    if isinstance(remarks, dict):
+        remarks = [remarks]
+    if not isinstance(remarks, list):
+        return ""
+
+    parts = []
+    for r in remarks:
+        if not isinstance(r, dict):
+            continue
+        rc = r.get("RemarkCode") or {}
+        desc = ""
+        if isinstance(rc, dict):
+            desc = _safe(rc.get("@description"))
+        # Fall back to @customRemark when RemarkCode has no description.
+        # This is how Consumer Statements arrive (Experian's
+        # "**CONSUMER STATEMENT** ITEM IN DISPUTE BY CONSUMER").
+        if not desc:
+            desc = _safe(r.get("@customRemark"))
+        if desc:
+            parts.append(desc)
+    return "".join(parts)
+
+
+def _parse_credit_limit(gt: dict) -> str:
+    """
+    CreditLimit lives in GrantedTrade as a nested object: {"$": "850"}.
+    Returns the numeric string ('850') or '' if absent.
+    """
+    if not isinstance(gt, dict):
+        return ""
+    cl = gt.get("CreditLimit")
+    if isinstance(cl, dict):
+        return _safe(cl.get("$"))
+    if isinstance(cl, str):
+        return _safe(cl)
+    return ""
+
+
+def _parse_account_type_detail(gt: dict) -> str:
+    """
+    'Account Type - Detail' (e.g. 'Credit Card', 'Auto Loan', 'Unsecured loan',
+    'Installment sales contract') comes from GrantedTrade.AccountType.@description
+    — NOT from GrantedTrade.CreditType (which gives us the top-level Account Type).
+    """
+    if not isinstance(gt, dict):
+        return ""
+    at = gt.get("AccountType")
+    if isinstance(at, dict):
+        return _safe(at.get("@description"))
+    return ""
+
+
+def _parse_bureau_code(t: dict) -> str:
+    """
+    Bureau Code = AccountDesignator.@description
+    ('Individual', 'Joint', 'Authorized User', 'Co-Signer', etc.)
+    Defaults to 'Individual' if absent.
+    """
+    ad = t.get("AccountDesignator")
+    if isinstance(ad, dict):
+        desc = _safe(ad.get("@description"))
+        if desc:
+            return desc
+    return "Individual"
+
+
+def _parse_pay_status_history(gt: dict) -> tuple[list[dict], list[str]]:
+    """
+    Parse the Two-Year (or longer) payment history grid.
+
+    Returns (payment_history, late_payment_codes):
+
+      payment_history: list of {"month": "Jan", "year": "2024", "value": "OK",
+                                "date": "2024-01-07"} in chronological order
+                      (oldest → newest).
+                      IdentityIQ JSON gives MonthlyPayStatus newest-first,
+                      we flip it so the UI can show oldest-first (matching
+                      the PDF pipeline and the HTML Two-Year grid).
+
+      late_payment_codes: list of "<CODE>:<Mon>/<YYYY>" strings
+                          (e.g. ["30:Dec/2025", "60:Jan/2026", "CO:Mar/2026"])
+                          — same format as original_parser.py so the existing
+                          FCRA attack pipeline consumes it transparently.
+
+    Contains the FULL history available in JSON (up to ~48 months observed),
+    NOT just the first 24. Frontend paginates with a "View More" control.
+    """
+    if not isinstance(gt, dict):
+        return [], []
+    psh = gt.get("PayStatusHistory")
+    if not isinstance(psh, dict):
+        return [], []
+
+    mps = psh.get("MonthlyPayStatus") or []
+    if isinstance(mps, dict):
+        mps = [mps]
+    if not isinstance(mps, list) or not mps:
+        return [], []
+
+    # IdentityIQ returns newest-first; reverse to chronological order.
+    entries_newest_first = [e for e in mps if isinstance(e, dict)]
+    entries_chronological = list(reversed(entries_newest_first))
+
+    payment_history: list[dict] = []
+    late_codes: list[str] = []
+
+    for entry in entries_chronological:
+        date_iso = _safe(entry.get("@date"))
+        status_char = _safe(entry.get("@status"))
+        value = _PAY_HISTORY_CHAR_MAP.get(status_char, status_char or "--")
+
+        month_abbr = ""
+        year_str = ""
+        if date_iso:
+            try:
+                y, m, _ = date_iso.split("-")
+                year_str = y
+                mi = int(m)
+                if 1 <= mi <= 12:
+                    month_abbr = _MONTH_ABBR[mi - 1]
+            except Exception:
+                pass
+
+        payment_history.append({
+            "month": month_abbr,
+            "year":  year_str,
+            "value": value,
+            "date":  date_iso,
+        })
+
+        if value not in ("OK", "ND", "--", ""):
+            if month_abbr and year_str:
+                late_codes.append(f"{value}:{month_abbr}/{year_str}")
+
+    return payment_history, late_codes
+
+
 def _parse_tradelines(merge: dict) -> list[dict]:
     """
     Parse all TradeLinePartitions into raw account blocks.
-    Each partition can have multiple Tradeline entries (one per bureau).
-    We preserve them as separate entries with block_id.
+
+    CRITICAL GROUPING RULE:
+        One TradeLinePartition = ONE tradeline (one real-world account).
+        Its child Tradeline entries are the per-bureau versions of that
+        same account. IdentityIQ does the tri-merge correlation for us —
+        we MUST respect the partition as the unit of grouping and MUST
+        NOT re-group by @creditorName or @accountNumber, because bureaus
+        report the same account with different creditor aliases
+        (CREDITONEBNK / CRDTONEBNK / CREDIT ONE BANK NA) and different
+        account-number truncations (406095**** / 13** / 406095XXXXXX****).
+
+    All field mappings below are derived from the IdentityIQ HTML report
+    ('tradeLinePartitionBasic' template) ground truth, which is what the
+    consumer is legally entitled to see under the FCRA.
     """
     raw_accounts = []
     partitions = merge.get("TradeLinePartition", [])
     if isinstance(partitions, dict):
         partitions = [partitions]
 
-    acct_type_desc = ""
     for pidx, partition in enumerate(partitions):
-        acct_type_desc = _safe(partition.get("@accountTypeDescription"))
+        # Top-level Account Type (Revolving / Installment / Open / Collection / Mortgage)
+        # HTML uses @accountTypeAbbreviation ("Revolving"), NOT @accountTypeDescription.
+        acct_type_abbr = _safe(partition.get("@accountTypeAbbreviation"))
+
         tradelines = partition.get("Tradeline", [])
         if isinstance(tradelines, dict):
             tradelines = [tradelines]
+        if not isinstance(tradelines, list) or not tradelines:
+            continue
 
-        # Group tradelines in this partition by account number
-        # (same account reported by multiple bureaus)
-        by_acct: dict[str, list] = {}
+        # One block per partition — deterministic block_id from partition index.
+        # Keeping it stable across pulls is important for downstream dedup.
+        block_key = f"partition:{pidx}"
+        block_id  = "BLK-" + hashlib.md5(block_key.encode()).hexdigest()[:8].upper()
+
+        bureau_data: dict[str, dict] = {}
+        creditor_name = ""
+        original_creditor = ""
+
         for t in tradelines:
-            acct_num = _safe(t.get("@accountNumber"))
-            by_acct.setdefault(acct_num, []).append(t)
-
-        for acct_num, tlines in by_acct.items():
-            # Build a block_id from partition index + account number
-            block_key = f"{pidx}:{acct_num}"
-            block_id  = "BLK-" + hashlib.md5(block_key.encode()).hexdigest()[:8].upper()
-
-            # Gather per-bureau data
-            bureau_data: dict[str, dict] = {}
-            creditor_name = ""
-
-            for t in tlines:
-                bureau = _bureau_from_tradeline(t)
-                if not bureau:
-                    continue
-
-                creditor_name = creditor_name or _safe(t.get("@creditorName"))
-                gt = t.get("GrantedTrade", {}) or {}
-                if isinstance(gt, list):
-                    gt = gt[0] if gt else {}
-                collection = t.get("CollectionTrade", {}) or {}
-                if isinstance(collection, list):
-                    collection = collection[0] if collection else {}
-
-                # Payment history lates
-                late_30 = int(_safe(gt.get("@late30Count", "0")) or 0)
-                late_60 = int(_safe(gt.get("@late60Count", "0")) or 0)
-                late_90 = int(_safe(gt.get("@late90Count", "0")) or 0)
-
-                # Original creditor for collections
-                orig_creditor = _safe(collection.get("@originalCreditor"))
-
-                # Remark — can be dict or list
-                remark_obj = t.get("Remark", {}) or {}
-                if isinstance(remark_obj, list):
-                    remark_obj = remark_obj[0] if remark_obj else {}
-                remark_code = remark_obj.get("RemarkCode", {}) or {} if isinstance(remark_obj, dict) else {}
-                if isinstance(remark_code, list):
-                    remark_code = remark_code[0] if remark_code else {}
-                comments = _safe(remark_code.get("@description")) if isinstance(remark_code, dict) else ""
-
-                bureau_data[bureau] = {
-                    "account_number":    acct_num,
-                    "status":            _parse_account_condition(t),
-                    "payment_status":    _parse_pay_status(t),
-                    "balance":           _safe(t.get("@currentBalance")),
-                    "high_credit":       _safe(t.get("@highBalance")),
-                    "credit_limit":      _safe(gt.get("@creditLimit") or t.get("@creditLimit")),
-                    "monthly_payment":   _safe(gt.get("@monthlyPayment")),
-                    "past_due":          _safe(gt.get("@amountPastDue")),
-                    "date_opened":       _safe(t.get("@dateOpened")),
-                    "date_last_active":  _safe(t.get("@dateVerified") or t.get("@dateReported")),
-                    "date_of_last_payment": _safe(gt.get("@dateLastPayment") or t.get("@dateLastPayment")),
-                    "last_reported":     _safe(t.get("@dateReported")),
-                    "no_of_months":      _safe(gt.get("@termMonths") or gt.get("@monthsReviewed")),
-                    "account_type":      acct_type_desc,
-                    "account_type_detail": _safe(
-                        collection.get("creditType", {}).get("@description", "") if isinstance(collection.get("creditType"), dict)
-                        else ""
-                    ) or acct_type_desc,
-                    "bureau_code":       "Individual",
-                    "comments":          comments,
-                    "late_30":           late_30,
-                    "late_60":           late_60,
-                    "late_90":           late_90,
-                    "original_creditor": orig_creditor,
-                    "open_closed":       _parse_open_closed(t),
-                }
-
-            if not bureau_data:
+            bureau = _bureau_from_tradeline(t)
+            if not bureau:
                 continue
 
-            # Add original creditor to name if present
-            display_name = creditor_name
-            for bd in bureau_data.values():
-                if bd.get("original_creditor"):
-                    display_name = f"{creditor_name} (Original Creditor: {bd['original_creditor']})"
-                    break
+            # Preserve the first non-empty creditor name for display
+            # (bureaus vary; any of their aliases works as the row title).
+            if not creditor_name:
+                creditor_name = _safe(t.get("@creditorName"))
 
-            raw_accounts.append({
-                "block_id":    block_id,
-                "name":        display_name,
-                "bureau_data": bureau_data,
-                "partition_idx": pidx,
-            })
+            gt = t.get("GrantedTrade", {}) or {}
+            if isinstance(gt, list):
+                gt = gt[0] if gt else {}
+            collection = t.get("CollectionTrade", {}) or {}
+            if isinstance(collection, list):
+                collection = collection[0] if collection else {}
+
+            # Late counts (still used for quick flags even though the authoritative
+            # has_X_in_history values come from the parsed payment history below).
+            late_30 = int(_safe(gt.get("@late30Count", "0")) or 0)
+            late_60 = int(_safe(gt.get("@late60Count", "0")) or 0)
+            late_90 = int(_safe(gt.get("@late90Count", "0")) or 0)
+
+            # Original creditor (collections / debt buyers)
+            orig_here = _safe(collection.get("@originalCreditor"))
+            if orig_here and not original_creditor:
+                original_creditor = orig_here
+
+            # Account status: map "Derog" → "Derogatory" to match HTML display.
+            cond_abbr = _safe((t.get("AccountCondition") or {}).get("@abbreviation"))
+            account_status = _ACCOUNT_STATUS_MAP.get(cond_abbr, cond_abbr)
+
+            # Account Type - Detail: GrantedTrade.AccountType.@description.
+            # For Collection Accounts the partition itself carries "Collection".
+            acct_type_detail = _parse_account_type_detail(gt)
+            if not acct_type_detail and acct_type_abbr == "Collection":
+                acct_type_detail = "Collection"
+
+            # Comments: concatenation of ALL Remarks (including @customRemark,
+            # which is how Experian's Consumer Statement arrives).
+            comments = _concat_remarks(t)
+
+            # Full payment history + late code list (feeds the FCRA engine
+            # and the frontend Two-Year grid + View More control).
+            payment_history, late_codes = _parse_pay_status_history(gt)
+
+            # Authoritative has_X_in_history flags derived from the parsed grid.
+            has_30 = any(c.startswith("30:") for c in late_codes) or late_30 > 0
+            has_60 = any(c.startswith("60:") for c in late_codes) or late_60 > 0
+            has_90 = any(c.startswith("90:") for c in late_codes) or late_90 > 0
+            has_co = any(c.startswith("CO:") for c in late_codes)
+
+            bureau_data[bureau] = {
+                "account_number":    _safe(t.get("@accountNumber")),
+                "status":            account_status,
+                "payment_status":    _parse_pay_status(t),  # Tradeline.PayStatus.@description
+                "balance":           _safe(t.get("@currentBalance")),
+                "high_credit":       _safe(t.get("@highBalance")),
+                "credit_limit":      _parse_credit_limit(gt),
+                "monthly_payment":   _safe(gt.get("@monthlyPayment")),
+                "past_due":          _safe(gt.get("@amountPastDue")),
+                "date_opened":       _safe(t.get("@dateOpened")),
+                # Date Last Active = @dateAccountStatus (NOT @dateReported).
+                # The HTML and PDF both show dateAccountStatus here; dateReported
+                # was the bug that made us show the wrong date for closed accounts.
+                "date_last_active":  _safe(t.get("@dateAccountStatus")),
+                "date_of_last_payment": _safe(gt.get("@dateLastPayment")),
+                "last_reported":     _safe(t.get("@dateReported")),
+                "no_of_months":      _safe(gt.get("@termMonths")),
+                "account_type":      acct_type_abbr,
+                "account_type_detail": acct_type_detail,
+                "bureau_code":       _parse_bureau_code(t),
+                "comments":          comments,
+                "late_30":           late_30,
+                "late_60":           late_60,
+                "late_90":           late_90,
+                "original_creditor": orig_here,
+                "open_closed":       _parse_open_closed(t),
+                # New fields — full history and late codes for FCRA + UI
+                "payment_history":   payment_history,
+                "late_payment_codes": late_codes,
+                "has_30_in_history": has_30,
+                "has_60_in_history": has_60,
+                "has_90_in_history": has_90,
+                "has_co_in_history": has_co,
+            }
+
+        if not bureau_data:
+            continue
+
+        # Display name with original creditor suffix (matches HTML/PDF convention)
+        display_name = creditor_name
+        if original_creditor:
+            display_name = f"{creditor_name} (Original Creditor: {original_creditor})"
+
+        raw_accounts.append({
+            "block_id":      block_id,
+            "name":          display_name,
+            "bureau_data":   bureau_data,
+            "partition_idx": pidx,
+        })
 
     return raw_accounts
 
@@ -501,6 +738,8 @@ def _build_inventory(raw_accounts: list[dict]) -> dict[str, list[dict]]:
             if bureau not in BUREAUS:
                 continue
 
+            # has_X_in_history: prefer the authoritative flags computed from the
+            # parsed payment history; fall back to late counts for legacy safety.
             late_30 = data.get("late_30", 0)
             late_60 = data.get("late_60", 0)
             late_90 = data.get("late_90", 0)
@@ -525,11 +764,14 @@ def _build_inventory(raw_accounts: list[dict]) -> dict[str, list[dict]]:
                 "date_of_last_payment": data["date_of_last_payment"],
                 "last_reported":        data["last_reported"],
                 "comments":             data["comments"],
-                "has_30_in_history":    late_30 > 0,
-                "has_60_in_history":    late_60 > 0,
-                "has_90_in_history":    late_90 > 0,
-                "late_payment_codes":   [],
-                "payment_history":      [],
+                # Full payment history (every month available in JSON, not just
+                # the first 24) — frontend shows 24 by default + "View More".
+                "payment_history":      data.get("payment_history", []),
+                "late_payment_codes":   data.get("late_payment_codes", []),
+                "has_30_in_history":    data.get("has_30_in_history", late_30 > 0),
+                "has_60_in_history":    data.get("has_60_in_history", late_60 > 0),
+                "has_90_in_history":    data.get("has_90_in_history", late_90 > 0),
+                "has_co_in_history":    data.get("has_co_in_history", False),
                 "possible_duplicate_group": "",
                 "raw_lines":            [],
             })
