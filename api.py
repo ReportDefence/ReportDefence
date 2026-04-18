@@ -874,38 +874,117 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
                 else:
                     _groups["collections"].append(_item)
 
-    # Filter by bureau/category/selected_accounts if provided
+    # ── Helpers ──────────────────────────────────────────────────────────────
+    import re as _re
+
+    def _norm_acct(s: str) -> str:
+        """Normalize account number: lowercase, collapse any run of X/x/* into *."""
+        return _re.sub(r"[xX*]+", "*", (s or "").strip().lower())
+
+    cat_map = {
+        "Collections":               "collections",
+        "Charge Offs":               "charge_offs",
+        "Late Payments":             "late_payments",
+        "Other Derogatory":          "other_derogatory",
+        # Legacy labels kept for backward compatibility
+        "Collections & Chargeoffs":  "collections",
+        "Collections & Charge Offs": "collections",
+    }
+
+    def _negative_type_from_account(acc: dict) -> str:
+        """Classify a negative account into a letter-engine category key."""
+        status  = acc.get("status", "").lower()
+        payment = acc.get("payment_status", "").lower()
+        name    = acc.get("name", "").lower()
+        debt_buyers = ["lvnv", "midland", "portfolio", "cavalry", "resurgent",
+                       "aldous", "jefferson", "asset acceptance", "springoak",
+                       "jeffcapsys", "jeffersncp"]
+        if any(k in name for k in debt_buyers):
+            return "collections"
+        if "collection" in payment or "chargeoff" in payment or "charge off" in payment:
+            return "collections"
+        if "late" in payment and any(str(n) in payment for n in [30,60,90,120,150,180]):
+            return "late_payments"
+        if acc.get("has_30_in_history") or acc.get("has_60_in_history") or acc.get("has_90_in_history"):
+            return "late_payments"
+        if "derogatory" in status:
+            return "charge_offs"
+        return "other_derogatory"
+
+    def _build_letter_input_from_negatives(negatives_by_bureau: dict) -> dict:
+        """
+        Fallback: build a minimal letter_input_engine from negatives_by_bureau
+        when the stored letter_input_engine is empty (happens when original_parser
+        was unavailable during the job's analysis run).
+        """
+        result = {}
+        for bureau, accounts in negatives_by_bureau.items():
+            result[bureau] = {
+                "collections":      [],
+                "charge_offs":      [],
+                "late_payments":    [],
+                "other_derogatory": [],
+            }
+            for acc in accounts:
+                cat = _negative_type_from_account(acc)
+                entry = {
+                    "name":              acc.get("name", ""),
+                    "account_number":    acc.get("account_number", ""),
+                    "negative_type":     cat.rstrip("s"),  # "collections" → "collection"
+                    "balance":           acc.get("balance", ""),
+                    "status":            acc.get("status", ""),
+                    "payment_status":    acc.get("payment_status", ""),
+                    "comments":          acc.get("comments", ""),
+                    "block_id":          acc.get("block_id", ""),
+                    "recommended_round": "round_1",
+                }
+                result[bureau][cat].append(entry)
+        return result
+
+    # ── Check if letter_input_engine is usable ────────────────────────────────
+    # It's empty when original_parser was unavailable during analysis.
+    # In that case, rebuild it on-the-fly from negatives_by_bureau.
+    _lie_has_data = any(
+        any(len(items) > 0 for items in groups.values())
+        for groups in letter_input.values()
+    )
+    if not _lie_has_data:
+        print(f"[generate-letters] letter_input_engine empty for job={body.job_id}, "
+              f"rebuilding from negatives_by_bureau")
+        negatives_stored = job.get("negatives_by_bureau", {})
+        letter_input = _build_letter_input_from_negatives(negatives_stored)
+
+    # ── Filter by bureau/category/selected_accounts if provided ──────────────
     if body.bureau and body.category and body.selected_accounts:
-        bureau = body.bureau.lower()
-        cat_map = {
-            # New group names (current standard)
-            "Collections":      "collections",
-            "Charge Offs":      "charge_offs",
-            "Late Payments":    "late_payments",
-            "Other Derogatory": "other_derogatory",
-            # Legacy display names — kept for backward compatibility
-            "Collections & Chargeoffs": "collections",
-            "Collections & Charge Offs": "collections",
-        }
+        bureau   = body.bureau.lower()
         category = cat_map.get(body.category, body.category.lower().replace(" ", "_"))
 
-        def _norm_acct(s: str) -> str:
-            """Normalize account number for comparison: lowercase, replace X/x/* with *."""
-            import re as _re
-            return _re.sub(r"[xX*]+", "*", (s or "").strip().lower())
-
-        # Build a set of normalized selected account numbers for fuzzy matching
-        selected_nums_raw = {a.get("account_number", "") for a in body.selected_accounts}
+        # Build normalized sets for fuzzy account-number matching
+        selected_nums_raw  = {a.get("account_number", "") for a in body.selected_accounts}
         selected_nums_norm = {_norm_acct(n) for n in selected_nums_raw}
 
         filtered_input = {bureau: {category: []}}
         items = letter_input.get(bureau, {}).get(category, [])
         for item in items:
             item_acct = item.get("account_number", "")
-            # Match exact OR normalized (handles **** vs XXXX masking differences)
             if item_acct in selected_nums_raw or _norm_acct(item_acct) in selected_nums_norm:
                 item["recommended_round"] = body.round or "round_1"
                 filtered_input[bureau][category].append(item)
+
+        # If still empty after filtering, it means the UI sent accounts that are
+        # categorized differently in the engine (e.g. charge_off vs collection).
+        # Try all categories for that bureau and pick the ones that match by acct#.
+        if not filtered_input[bureau][category]:
+            print(f"[generate-letters] No items matched in {bureau}/{category}, "
+                  f"trying cross-category match")
+            for cat_key, cat_items in letter_input.get(bureau, {}).items():
+                for item in cat_items:
+                    item_acct = item.get("account_number", "")
+                    if item_acct in selected_nums_raw or _norm_acct(item_acct) in selected_nums_norm:
+                        item["recommended_round"] = body.round or "round_1"
+                        # Put them in the requested category (user's intent wins)
+                        filtered_input[bureau][category].append(item)
+
         letter_input_to_use = filtered_input
     else:
         letter_input_to_use = letter_input
