@@ -177,14 +177,16 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                         except Exception:
                             pass
 
-                    # Fill the SSN input — try specific selectors first, then any input
+                    # Fill the SSN input
                     filled = False
                     for sel in (
+                        "input[name='userSecurityAnswer']",  # confirmed selector
                         "input[placeholder*='four']",
                         "input[placeholder*='SSN']",
                         "input[placeholder*='last 4']",
                         "input[name*='ssn']",
                         "input[name*='answer']",
+                        "input[name*='Security']",
                         "input[maxlength='4']",
                     ):
                         try:
@@ -192,21 +194,21 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                             if el:
                                 el.triple_click()
                                 el.type(ssn_last4)
-                                print(f"[PW] Filled SSN with: {sel}")
+                                print(f"[PW] Filled SSN with: {sel} value={ssn_last4}")
                                 filled = True
                                 break
-                        except Exception as e:
+                        except Exception:
                             continue
 
                     if not filled and all_inputs:
-                        # Use the first non-hidden input
+                        # Fallback: first input with type=None or type=text (not checkbox/hidden)
                         for inp in all_inputs:
                             try:
-                                itype = inp.get_attribute('type') or 'text'
-                                if itype not in ('hidden', 'submit', 'button', 'checkbox', 'radio'):
+                                itype = inp.get_attribute('type') or ''
+                                if itype not in ('hidden', 'submit', 'button', 'checkbox', 'radio', 'text', 'search'):
                                     inp.triple_click()
                                     inp.type(ssn_last4)
-                                    print(f"[PW] Filled SSN into first available input (type={itype})")
+                                    print(f"[PW] Filled SSN fallback input (type={itype})")
                                     filled = True
                                     break
                             except Exception:
@@ -307,7 +309,6 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
             raise ValueError(f"IdentityIQ connection error: {e}")
         finally:
             browser.close()
-
 
 
 def pull_and_parse(username: str, password: str, ssn_last4: str) -> dict:
