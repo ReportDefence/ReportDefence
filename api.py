@@ -988,17 +988,35 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         return result
 
     # ── Check if letter_input_engine is usable ────────────────────────────────
-    # It's empty when original_parser was unavailable during analysis.
-    # In that case, rebuild it on-the-fly from negatives_by_bureau.
+    # Case 1: completely empty (original_parser failed during analysis)
+    #   → rebuild everything from negatives_by_bureau
+    # Case 2: partially populated — some bureaus missing (common with PDF uploads
+    #   where the parser couldn't detect Equifax columns from the PDF layout)
+    #   → merge in the missing bureaus from negatives_by_bureau
+    negatives_stored = job.get("negatives_by_bureau", {})
+
     _lie_has_data = any(
         any(len(items) > 0 for items in groups.values())
         for groups in letter_input.values()
     )
     if not _lie_has_data:
+        # Completely empty — rebuild everything
         print(f"[generate-letters] letter_input_engine empty for job={body.job_id}, "
               f"rebuilding from negatives_by_bureau")
-        negatives_stored = job.get("negatives_by_bureau", {})
         letter_input = _build_letter_input_from_negatives(negatives_stored)
+    else:
+        # Partially populated — check if any bureau has negatives but no letter_input
+        # This happens when the PDF parser missed bureau columns during parsing.
+        for _bureau, _neg_accts in negatives_stored.items():
+            if not _neg_accts:
+                continue
+            _lie_bureau = letter_input.get(_bureau, {})
+            _lie_bureau_has_data = any(len(v) > 0 for v in _lie_bureau.values()) if _lie_bureau else False
+            if not _lie_bureau_has_data:
+                print(f"[generate-letters] bureau={_bureau} missing from letter_input_engine "
+                      f"for job={body.job_id}, merging from negatives_by_bureau")
+                _bureau_input = _build_letter_input_from_negatives({_bureau: _neg_accts})
+                letter_input[_bureau] = _bureau_input.get(_bureau, {})
 
     # ── Filter by bureau/category/selected_accounts if provided ──────────────
     if body.bureau and body.category and body.selected_accounts:
