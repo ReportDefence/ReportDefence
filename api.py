@@ -845,6 +845,7 @@ class GenerateLettersBody(BaseModel):
     category: Optional[str] = None
     round: Optional[str] = "round_1"
     selected_accounts: Optional[list] = None
+    variation_seed: Optional[int] = 0  # increment on each Regenerate press
 
 @app.post("/generate-letters")
 async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_user)):
@@ -1038,6 +1039,7 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         letter_input_to_use,
         consumer_name=consumer_name,
         report_date=report_date,
+        variation_seed=body.variation_seed or 0,
     )
 
     # Flatten letters for response
