@@ -4959,6 +4959,7 @@ def build_dispute_letter_engine(
     report_date: str = "",
     personal_info: dict[str, Any] | None = None,
     personal_info_issues: list[dict[str, Any]] | None = None,
+    variation_seed: int = 0,
 ) -> dict[str, dict[str, dict[str, str]]]:
     """
     Generate dispute letters — ONE LETTER PER ACCOUNT-TYPE GROUP PER ROUND PER BUREAU.
@@ -5001,9 +5002,10 @@ def build_dispute_letter_engine(
         bureau_off = _bureau_offset.get(bureau, 0)
         round_pos  = 0 if round_key == "round_1" else 1
         g          = group_pos.get(group, 0)
-        # Combine bureau offset, group position and round so every
-        # (bureau x group x round) combination maps to a unique template slot.
-        slot = (bureau_off + g + round_pos * 4) % n_templates
+        # variation_seed shifts the slot on each Regenerate press,
+        # cycling through all available templates while keeping
+        # inter-bureau uniqueness intact.
+        slot = (bureau_off + g + round_pos * 4 + variation_seed) % n_templates
         return slot
 
     group_order = ["collections", "charge_offs", "late_payments", "other_derogatory"]
@@ -5095,7 +5097,9 @@ def build_dispute_letter_engine(
                     at     = item.get("attack_type", "")
                     base_vi   = idx - 1
                     acct_hash = abs(hash(facct + fname + at)) % 89
-                    variation_idx = base_vi + acct_hash
+                    # variation_seed shifts the reason variant on each Regenerate,
+                    # so the same account gets a different reason phrasing each time.
+                    variation_idx = base_vi + acct_hash + variation_seed * 7
                     reason = ""
                     for attempt in range(20):
                         reason = _account_reason(item, variation_idx=variation_idx + attempt)
