@@ -1001,6 +1001,7 @@ def parse_identityiq_json(data: dict) -> dict:
 # MAIN ENTRY POINT
 # ─────────────────────────────────────────────
 
+
 def pull_and_parse(username: str, password: str, ssn_last4: str) -> dict:
     """
     Full pipeline:
