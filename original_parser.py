@@ -3838,6 +3838,74 @@ _OPENING_TEMPLATES_R2 = [
 ]
 
 
+
+_OPENING_TEMPLATES_R3 = [
+    # R3 Template 1 — Final escalation, legal consequences explicit
+    (
+        "To Whom It May Concern,\n\n"
+        "I have now submitted two prior disputes regarding {count} "
+        "on my credit report and I have not received a response that "
+        "reflects a genuine reinvestigation. I am writing a third time "
+        "as a final attempt to resolve this before I pursue my rights "
+        "under federal law."
+        "\n\n"
+        "{bureau_response_summary}"
+        "I want to be direct: the Fair Credit Reporting Act at "
+        "15 U.S.C. \u00a71681i(a) requires a reasonable reinvestigation "
+        "of every properly submitted dispute. I have submitted mine in writing, "
+        "identified the accounts, and explained why I believe they are inaccurate. "
+        "What I have received back does not constitute a reasonable reinvestigation "
+        "under that standard. Under 15 U.S.C. \u00a71681n, willful noncompliance "
+        "with the FCRA exposes the reporting agency to actual damages, statutory "
+        "damages up to $1,000 per violation, punitive damages, and attorney fees. "
+        "I am keeping a complete record of all correspondence. If these accounts "
+        "are not corrected or deleted, I will pursue every remedy available to me."
+    ),
+    # R3 Template 2 — Demand for method of verification + legal escalation
+    (
+        "To Whom It May Concern,\n\n"
+        "This is my third and final dispute letter regarding "
+        "{count} that remain on my credit report. After two prior disputes "
+        "that were not resolved to my satisfaction, I am putting you on notice "
+        "that I intend to pursue my legal rights if these issues are not "
+        "corrected immediately."
+        "\n\n"
+        "{bureau_response_summary}"
+        "Under 15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am demanding a written "
+        "description of the method of verification used for each account "
+        "including the name and contact information of everyone contacted "
+        "and the documentation reviewed. A form letter stating the information "
+        "was verified does not satisfy this requirement. Under 15 U.S.C. "
+        "\u00a71681i(a)(5)(A), any account that cannot be verified must be "
+        "deleted promptly. I have documented all prior correspondence. "
+        "Failure to comply will leave me no choice but to file a complaint "
+        "with the Consumer Financial Protection Bureau and pursue civil "
+        "remedies under 15 U.S.C. \u00a71681n and \u00a71681o."
+    ),
+    # R3 Template 3 — Exhausted patience, CFPB and legal action imminent
+    (
+        "To Whom It May Concern,\n\n"
+        "I have submitted disputes regarding {count} "
+        "on two prior occasions. Both times, the accounts remained on my "
+        "report without a satisfactory explanation of how they were verified. "
+        "I am writing one final time before taking further action."
+        "\n\n"
+        "{bureau_response_summary}"
+        "The FCRA does not permit a credit reporting agency to simply "
+        "confirm information from a furnisher and call it a reinvestigation. "
+        "15 U.S.C. \u00a71681i(a) requires actual, reasonable investigation "
+        "of disputed information. I have met my obligations under the law. "
+        "You have not met yours. I am placing you on formal written notice "
+        "that if {these_items} {they_verb} not corrected or deleted, "
+        "I will file a complaint with the Consumer Financial Protection Bureau, "
+        "the Federal Trade Commission, and my state attorney general, "
+        "and I will seek all available remedies under 15 U.S.C. \u00a71681n "
+        "including statutory damages, punitive damages, and attorney fees. "
+        "I am retaining copies of all correspondence."
+    ),
+]
+
+
 # Fixed template index per bureau+round — guarantees no two letters share an opening.
 _TEMPLATE_INDEX = {
     ("transunion", "round_1"): 0,
@@ -4953,6 +5021,174 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     return reason + flags_para + " DELETE OFF MY CREDIT REPORT."
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  BUREAU RESPONSE PARSER
+#  Parses the bureau's written investigation response and classifies
+#  each account outcome to power targeted R2/R3 dispute letters.
+# ═══════════════════════════════════════════════════════════════════════
+
+def parse_bureau_response(response_text: str) -> dict:
+    """
+    Parse a bureau investigation response letter into structured outcomes.
+
+    Handles all standard bureau response patterns:
+      - DELETED              → account removed, no further dispute needed
+      - VERIFIED_UNCHANGED   → bureau claims accurate, no modifications
+      - VERIFIED_MODIFIED    → bureau "verified" but modified fields (admission)
+      - BELONGS_TO_YOU       → bureau says account is yours (not real verification)
+      - OTHER                → catch-all for non-standard language
+
+    Returns:
+        {
+          "accounts": {
+            "CREDITOR NAME": {
+              "outcome":         "deleted" | "verified_modified" | "verified_unchanged"
+                                 | "belongs_to_you" | "other",
+              "modified_fields": ["BALANCE", "DATE OF LAST PAYMENT", ...],
+              "response_text":   "raw text for this account"
+            }
+          },
+          "outcome_summary": {
+            "deleted":            [...],
+            "verified_modified":  [...],
+            "verified_unchanged": [...],
+            "belongs_to_you":     [...],
+            "other":              [...]
+          }
+        }
+    """
+    import re as _re
+
+    outcome_summary: dict[str, list[str]] = {
+        "deleted":            [],
+        "verified_modified":  [],
+        "verified_unchanged": [],
+        "belongs_to_you":     [],
+        "other":              [],
+    }
+    accounts: dict[str, dict] = {}
+
+    # Split on "Trade:" boundaries — handles multi-line results per account
+    # Pattern: "Trade: CREDITOR NAME - RESULT TEXT"
+    trade_blocks = _re.split(r"(?i)(?:^|\n)\s*Trade:\s*", "\n" + response_text)
+
+    for block in trade_blocks:
+        block = block.strip()
+        if not block:
+            continue
+        # Split creditor name from result on " - "
+        sep = block.find(" - ")
+        if sep == -1:
+            continue
+        creditor   = block[:sep].strip().upper()
+        result_raw = block[sep+3:].strip().replace("\n", " ")
+        result_up  = result_raw.upper()
+
+        # Extract modified fields if present
+        mf_match = _re.search(
+            r"FOLLOWING FIELDS HAVE BEEN MODIFIED:\s*([^.]+?)(?:\s{2,}|Trade:|$)",
+            result_up
+        )
+        modified_fields = []
+        if mf_match:
+            modified_fields = [f.strip() for f in mf_match.group(1).split(",") if f.strip()]
+
+        # Classify outcome
+        if "HAS BEEN DELETED" in result_up:
+            outcome = "deleted"
+        elif "BELONGS TO YOU" in result_up:
+            outcome = "belongs_to_you"
+        elif modified_fields:
+            outcome = "verified_modified"
+        elif "VERIFIED" in result_up:
+            outcome = "verified_unchanged"
+        else:
+            outcome = "other"
+
+        outcome_summary[outcome].append(creditor)
+        accounts[creditor] = {
+            "outcome":         outcome,
+            "modified_fields": modified_fields,
+            "response_text":   result_raw[:400],
+        }
+
+    return {"accounts": accounts, "outcome_summary": outcome_summary}
+
+
+def _build_account_context_from_response(
+    item: dict,
+    bureau_response_parsed: dict,
+) -> str:
+    """
+    Given a letter_input item and the parsed bureau response,
+    return a context string that explains what the bureau said
+    about this specific account — used to craft targeted R2/R3 reasons.
+    """
+    if not bureau_response_parsed:
+        return ""
+
+    furnisher = (item.get("furnisher_name") or "").upper()
+    accounts  = bureau_response_parsed.get("accounts", {})
+
+    # Fuzzy match: find the response entry for this account
+    matched = None
+    for key in accounts:
+        if furnisher in key or key in furnisher:
+            matched = accounts[key]
+            break
+    if not matched:
+        return ""
+
+    outcome         = matched.get("outcome", "")
+    modified_fields = matched.get("modified_fields", [])
+    response_text   = matched.get("response_text", "")
+
+    if outcome == "deleted":
+        return ""  # deleted = success, no R2 needed
+
+    if outcome == "verified_modified":
+        fields_str = ", ".join(modified_fields) if modified_fields else "certain fields"
+        return (
+            f"In response to my prior dispute, the bureau modified the following fields "
+            f"on this account: {fields_str}. The fact that modifications were made confirms "
+            f"that the information was not being reported accurately before my dispute. "
+            f"Despite these corrections, the account remains on my report as derogatory. "
+            f"I need the bureau to explain why, if the data required modification, "
+            f"the account status and overall reporting have not also been corrected."
+        )
+
+    if outcome == "belongs_to_you":
+        return (
+            f"In response to my prior dispute, the bureau stated that this account "
+            f"\"belongs to me.\" That is not a reinvestigation of accuracy. "
+            f"Whether an account belongs to me is a separate question from whether "
+            f"the balance, status, dates, and payment history being reported are correct. "
+            f"15 U.S.C. §1681e(b) requires maximum possible accuracy — not just ownership "
+            f"confirmation. The bureau has not addressed the accuracy of what is being reported."
+        )
+
+    if outcome == "verified_unchanged":
+        return (
+            f"In response to my prior dispute, the bureau stated that the information "
+            f"was verified. However, the response did not explain the method of verification "
+            f"or identify what documentation was reviewed. Under 15 U.S.C. "
+            f"§1681i(a)(6)(B)(iii), I have the right to know the business name, address, "
+            f"and telephone number of the furnisher contacted, and a description of the "
+            f"procedure used to determine the accuracy of the disputed information. "
+            f"A bare statement that information was \"verified\" does not satisfy this requirement."
+        )
+
+    # other / fallback
+    if response_text:
+        return (
+            f"In response to my prior dispute, the bureau provided the following: "
+            f"\"{response_text[:200]}\". I do not believe this response constitutes a "
+            f"reasonable reinvestigation as required by 15 U.S.C. §1681i(a)."
+        )
+    return ""
+
+
 def build_dispute_letter_engine(
     letter_input_engine: dict[str, dict[str, list[dict[str, Any]]]],
     consumer_name: str = "[CLIENT NAME]",
@@ -4960,6 +5196,8 @@ def build_dispute_letter_engine(
     personal_info: dict[str, Any] | None = None,
     personal_info_issues: list[dict[str, Any]] | None = None,
     variation_seed: int = 0,
+    target_round: str = "round_1",
+    bureau_response_parsed: dict | None = None,
 ) -> dict[str, dict[str, dict[str, str]]]:
     """
     Generate dispute letters — ONE LETTER PER ACCOUNT-TYPE GROUP PER ROUND PER BUREAU.
@@ -5026,17 +5264,22 @@ def build_dispute_letter_engine(
             # Split by round
             # All items go to round_1. Round 2 is only generated after a bureau
             # response has been recorded. Escalation is handled by compare_rounds().
-            round_1_items = items_in_group
-            round_2_items: list = []
-
+            # Generate letter for the requested target_round only.
+            # R1=first dispute, R2=follow-up, R3=final escalation with §1681n notice.
             group_letters: dict[str, str] = {}
 
-            for round_key, items in [("round_1", round_1_items), ("round_2", round_2_items)]:
+            for round_key, items in [(target_round, items_in_group)]:
                 if not items:
                     continue
 
                 is_r2     = round_key == "round_2"
-                templates = _OPENING_TEMPLATES_R2 if is_r2 else _OPENING_TEMPLATES_R1
+                is_r3     = round_key == "round_3"
+                if is_r3:
+                    templates = _OPENING_TEMPLATES_R3
+                elif is_r2:
+                    templates = _OPENING_TEMPLATES_R2
+                else:
+                    templates = _OPENING_TEMPLATES_R1
                 tpl_idx   = _tpl_idx(bureau, group_key, round_key, len(templates))
                 tpl       = templates[tpl_idx]
                 # Substitute placeholders
@@ -5046,11 +5289,17 @@ def build_dispute_letter_engine(
                 count_str    = f"{n} account{'s' if n != 1 else ''}"
                 # bureau_response_summary: incluir respuesta previa del bureau si existe
                 prev_response = item_meta.get("bureau_response", "") if (item_meta := locals().get("item_meta", {})) else ""
-                if is_r2 and prev_response:
+                if (is_r2 or is_r3) and prev_response:
                     bureau_resp_block = (
                         f"In my previous dispute, the response I received stated: "
                         f'"{prev_response}" — I do not believe that constitutes a '
                         f"reasonable reinvestigation under federal law.\n\n"
+                    )
+                elif is_r3:
+                    bureau_resp_block = (
+                        "I have submitted two prior disputes and received responses "
+                        "that did not reflect a genuine reinvestigation. The accounts "
+                        "listed below remain on my report without adequate verification.\n\n"
                     )
                 elif is_r2:
                     bureau_resp_block = (
@@ -5083,7 +5332,7 @@ def build_dispute_letter_engine(
 
                 # Personal information section (Round 1 only, first group only)
                 pi_section = ""
-                if not is_r2 and group_key == "collections" and personal_info and personal_info_issues:
+                if not is_r2 and not is_r3 and group_key == "collections" and personal_info and personal_info_issues:
                     pi_section = build_personal_info_section(
                         personal_info, personal_info_issues, bureau
                     )
@@ -5108,6 +5357,14 @@ def build_dispute_letter_engine(
                     if reason in used_reasons:
                         reason = reason + f" (Account #{facct}.)"
                     used_reasons.add(reason)
+                    # For R2/R3: prepend what the bureau said about this specific account
+                    # so the dispute reason directly attacks the bureau's prior response.
+                    if (is_r2 or is_r3) and bureau_response_parsed:
+                        bureau_ctx = _build_account_context_from_response(
+                            item, bureau_response_parsed
+                        )
+                        if bureau_ctx:
+                            reason = bureau_ctx + "\n\n" + reason
                     account_lines.append(
                         f"{idx}. {fname} \u2014 Account #: {facct}\n"
                         f"{reason}\n"
