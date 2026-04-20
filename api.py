@@ -21,6 +21,61 @@ from pydantic import BaseModel
 import jwt as pyjwt
 from supabase import create_client, Client
 
+# ─── Rate Limiting ────────────────────────────────────────────
+# In-memory store — resets on deploy, sufficient for brute force protection.
+# Key: sha256(endpoint:ip:email) → list of Unix timestamps
+_rl_store: dict[str, list[float]] = {}
+
+def _rl_key(endpoint: str, ip: str, email: str) -> str:
+    """Deterministic key combining endpoint + IP + email."""
+    raw = f"{endpoint}:{ip}:{email.lower().strip()}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+def _get_client_ip(request: Request) -> str:
+    """Extract real client IP, handling Railway/proxy X-Forwarded-For."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def check_rate_limit(
+    request: Request,
+    endpoint: str,
+    email: str = "",
+    max_requests: int = 5,
+    window_seconds: int = 900,  # 15 minutes default
+) -> None:
+    """
+    Raise HTTP 429 if the (endpoint, ip, email) key exceeds max_requests
+    within the rolling window_seconds window.
+
+    Fails open: if anything goes wrong internally, the request is allowed.
+    """
+    try:
+        ip  = _get_client_ip(request)
+        key = _rl_key(endpoint, ip, email) if email else _rl_key(endpoint, ip, ip)
+        now = time.time()
+
+        hits = _rl_store.get(key, [])
+        # Evict hits outside the rolling window
+        hits = [t for t in hits if now - t < window_seconds]
+
+        if len(hits) >= max_requests:
+            retry_after = int(window_seconds - (now - hits[0]))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many requests. Please wait {retry_after // 60 + 1} minute(s) before trying again.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        hits.append(now)
+        _rl_store[key] = hits
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # fail open — never block legitimate users due to internal errors
+
+
 # ─── Environment ──────────────────────────────────────────────
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -176,7 +231,9 @@ async def debug_chromium():
     return results
 
 @app.post("/auth/register")
-async def register(body: RegisterBody):
+async def register(body: RegisterBody, request: Request):
+    # Rate limit: 5 attempts per 15 minutes per (IP + email)
+    check_rate_limit(request, "auth/register", email=body.email, max_requests=5, window_seconds=900)
     existing = sb.table("api_users").select("id").eq("email", body.email).execute()
     if existing.data and len(existing.data) > 0:
         raise HTTPException(409, "Email already registered")
@@ -198,7 +255,9 @@ async def register(body: RegisterBody):
     return {"access_token": create_token(u["id"], u["role"]), "user": user_response(u)}
 
 @app.post("/auth/login")
-async def login(body: LoginBody):
+async def login(body: LoginBody, request: Request):
+    # Rate limit: 5 attempts per 15 minutes per (IP + email)
+    check_rate_limit(request, "auth/login", email=body.email, max_requests=5, window_seconds=900)
     res = sb.table("api_users").select("*").eq("email", body.email).execute()
     if not res.data or len(res.data) == 0 or not verify_password(body.password, res.data[0]["hashed_password"]):
         raise HTTPException(401, "Invalid credentials")
