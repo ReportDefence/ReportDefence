@@ -846,6 +846,7 @@ class GenerateLettersBody(BaseModel):
     round: Optional[str] = "round_1"
     selected_accounts: Optional[list] = None
     variation_seed: Optional[int] = 0  # increment on each Regenerate press
+    bureau_response_text: Optional[str] = None  # paste bureau's investigation response for R2/R3
 
 @app.post("/generate-letters")
 async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_user)):
@@ -1053,11 +1054,24 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
     else:
         letter_input_to_use = letter_input
 
+    # Parse bureau response if provided (R2/R3 targeted letters)
+    bureau_response_parsed = None
+    if body.bureau_response_text and body.bureau_response_text.strip():
+        try:
+            from original_parser import parse_bureau_response
+            bureau_response_parsed = parse_bureau_response(body.bureau_response_text)
+            print(f"[generate-letters] Parsed bureau response: "
+                  f"{bureau_response_parsed.get('outcome_summary', {})}")
+        except Exception as _e:
+            print(f"[generate-letters] Failed to parse bureau response: {_e}")
+
     dispute_letters = build_dispute_letter_engine(
         letter_input_to_use,
         consumer_name=consumer_name,
         report_date=report_date,
         variation_seed=body.variation_seed or 0,
+        target_round=body.round or "round_1",
+        bureau_response_parsed=bureau_response_parsed,
     )
 
     # Flatten letters for response
