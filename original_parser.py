@@ -5485,83 +5485,166 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         else:
             detail_str = f" The account shows {', and '.join([', '.join(detail_parts[:-1]), detail_parts[-1]]) if len(detail_parts) > 2 else ' and '.join(detail_parts)}."
 
-        # 8 fundamentally different openings and argument structures.
-        # Each treats the dispute from a different angle — not sinónimos cosméticos.
+        # 8 openings base × 2 sub-variantes = 16 openings efectivos.
+        # La sub-variante se selecciona por pool_idx (independiente de v8),
+        # asi que dos cuentas con el mismo v8 pero distinto pool_idx reciben
+        # openings DIFERENTES. Esto elimina colisiones intra-carta cuando
+        # dos cuentas con datos similares caen en el mismo v8 slot.
+        sub_variant = pool_idx % 2  # 0 o 1
+
         if v8 == 0:
-            reason = (
-                f"I pulled my credit report recently and this account caught my attention "
-                f"because the reporting does not feel right to me.{detail_str} Before I accept "
-                f"this as accurate, I need the creditor to show the original signed agreement, "
-                f"the full transaction history from day one, and how they arrived at the current "
-                f"numbers. If they cannot produce those basics, I do not see how this can stay "
-                f"as it is."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"I pulled my credit report recently and this account caught my attention "
+                    f"because the reporting does not feel right to me.{detail_str} Before I accept "
+                    f"this as accurate, I need the creditor to show the original signed agreement, "
+                    f"the full transaction history from day one, and how they arrived at the current "
+                    f"numbers. If they cannot produce those basics, I do not see how this can stay "
+                    f"as it is."
+                )
+            else:
+                reason = (
+                    f"When I went through my credit report this account stood out because "
+                    f"something about the reporting seems off.{detail_str} I want the creditor "
+                    f"to produce the actual paperwork — the signed agreement, the full transaction "
+                    f"log, and a clear explanation of how the numbers got to where they are. "
+                    f"Without that, I cannot accept this as accurate."
+                )
         elif v8 == 1:
-            reason = (
-                f"Something about this entry does not match what I remember, and I need it looked "
-                f"into.{detail_str} I am asking that the company reporting it be required to "
-                f"back up every number and date with actual records — the original contract, the "
-                f"payment ledger, and a clear breakdown of what I supposedly owe. An item on my "
-                f"credit file has to be provable, and right now I do not see proof."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"Something about this entry does not match what I remember, and I need it looked "
+                    f"into.{detail_str} I am asking that the company reporting it be required to "
+                    f"back up every number and date with actual records — the original contract, the "
+                    f"payment ledger, and a clear breakdown of what I supposedly owe. An item on my "
+                    f"credit file has to be provable, and right now I do not see proof."
+                )
+            else:
+                reason = (
+                    f"This account does not look right to me based on what I remember, so I want "
+                    f"the details checked.{detail_str} The reporting company should be able to "
+                    f"back up the information with primary records: the signed contract, a "
+                    f"transaction-by-transaction history, and documentation of how the balance "
+                    f"was calculated. Those are the basics — and they need to be produced."
+                )
         elif v8 == 2:
-            reason = (
-                f"I am writing about this account because the details being reported do not line "
-                f"up.{detail_str} Under the accuracy standard in 15 U.S.C. §1681e(b), every "
-                f"field reported about me has to be verifiable with real documentation. I need "
-                f"the original agreement, a complete payment record, and an explanation of how "
-                f"the current figures were calculated."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"I am writing about this account because the details being reported do not line "
+                    f"up.{detail_str} Under the accuracy standard in 15 U.S.C. §1681e(b), every "
+                    f"field reported about me has to be verifiable with real documentation. I need "
+                    f"the original agreement, a complete payment record, and an explanation of how "
+                    f"the current figures were calculated."
+                )
+            else:
+                reason = (
+                    f"The reporting on this account does not hold together when I look at the "
+                    f"fields.{detail_str} Federal law under 15 U.S.C. §1681e(b) requires that "
+                    f"every piece of information reported about me be backed by real records. "
+                    f"Please have the creditor produce the contract, the full payment history, "
+                    f"and a breakdown of how each figure was derived."
+                )
         elif v8 == 3:
-            reason = (
-                f"This one needs a closer look.{detail_str} I am not asking for a summary — I "
-                f"am asking for the underlying records the creditor should have on file: the "
-                f"signed agreement, the itemized payment history, and documentation supporting "
-                f"the status they are reporting. If those records do not exist or do not match, "
-                f"this entry should not be here."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"This one needs a closer look.{detail_str} I am not asking for a summary — I "
+                    f"am asking for the underlying records the creditor should have on file: the "
+                    f"signed agreement, the itemized payment history, and documentation supporting "
+                    f"the status they are reporting. If those records do not exist or do not match, "
+                    f"this entry should not be here."
+                )
+            else:
+                reason = (
+                    f"I want this one examined more carefully than a quick check.{detail_str} "
+                    f"What I am looking for is the actual paper trail — the signed contract, the "
+                    f"detailed payment ledger, and records that support the status being reported. "
+                    f"If any of that is missing or does not add up, the account has no business "
+                    f"staying on my file."
+                )
         elif v8 == 4:
-            reason = (
-                f"I want this account reviewed carefully.{detail_str} I have reason to believe "
-                f"the information being furnished is either incomplete or out of step with what "
-                f"actually happened. Please have the creditor produce the underlying documentation "
-                f"— contract, payment history, balance breakdown — so the accuracy can be confirmed "
-                f"or the account can be corrected."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"I want this account reviewed carefully.{detail_str} I have reason to believe "
+                    f"the information being furnished is either incomplete or out of step with what "
+                    f"actually happened. Please have the creditor produce the underlying documentation "
+                    f"— contract, payment history, balance breakdown — so the accuracy can be confirmed "
+                    f"or the account can be corrected."
+                )
+            else:
+                reason = (
+                    f"Please give this account a careful review.{detail_str} Based on what I know, "
+                    f"the information being reported is incomplete or does not reflect what "
+                    f"actually happened. I am asking for the underlying documentation — the "
+                    f"contract, a full payment record, and a balance breakdown — so the accuracy "
+                    f"can be verified or the entry corrected."
+                )
         elif v8 == 5:
-            reason = (
-                f"I flagged this account while going through my file.{detail_str} My concern "
-                f"is simple: the information as reported cannot be taken at face value without "
-                f"supporting records. I am requesting the original contract, a full account "
-                f"history, and verification of the current status. If any of that is missing, "
-                f"the account has not been properly verified."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"I flagged this account while going through my file.{detail_str} My concern "
+                    f"is simple: the information as reported cannot be taken at face value without "
+                    f"supporting records. I am requesting the original contract, a full account "
+                    f"history, and verification of the current status. If any of that is missing, "
+                    f"the account has not been properly verified."
+                )
+            else:
+                reason = (
+                    f"While reviewing my file I flagged this account for a closer look.{detail_str} "
+                    f"The reporting as it stands needs to be backed up by primary records before "
+                    f"I accept it. That means the contract I signed, the full account history "
+                    f"from origination, and verification that the current status is what the "
+                    f"records actually support. Without those, nothing here has been properly verified."
+                )
         elif v8 == 6:
-            reason = (
-                f"I need to dispute what is being reported on this account.{detail_str} The "
-                f"creditor needs to show the paperwork behind this entry — not just repeat "
-                f"the same figures back. That means the original agreement with my signature, "
-                f"the detailed transaction history, and the actual basis for the status being "
-                f"reported. Without those, I do not consider this verified."
-            )
-        else:
-            reason = (
-                f"This account is on my dispute list for a reason.{detail_str} I am not "
-                f"willing to leave an entry on my credit file that the creditor cannot fully "
-                f"document. Please require them to send over the contract, the full payment "
-                f"record, and documentation of how the current balance and status were "
-                f"determined. Anything they cannot support with records needs to come off."
-            )
+            if sub_variant == 0:
+                reason = (
+                    f"I need to dispute what is being reported on this account.{detail_str} The "
+                    f"creditor needs to show the paperwork behind this entry — not just repeat "
+                    f"the same figures back. That means the original agreement with my signature, "
+                    f"the detailed transaction history, and the actual basis for the status being "
+                    f"reported. Without those, I do not consider this verified."
+                )
+            else:
+                reason = (
+                    f"I am disputing how this account is being reported.{detail_str} Confirming "
+                    f"what is already on the report is not verification — the creditor has to "
+                    f"produce the paperwork itself: my signed agreement, the full transaction "
+                    f"ledger, and the records that justify the status being reported. Anything "
+                    f"short of that leaves this account unverified."
+                )
+        else:  # v8 == 7
+            if sub_variant == 0:
+                reason = (
+                    f"This account is on my dispute list for a reason.{detail_str} I am not "
+                    f"willing to leave an entry on my credit file that the creditor cannot fully "
+                    f"document. Please require them to send over the contract, the full payment "
+                    f"record, and documentation of how the current balance and status were "
+                    f"determined. Anything they cannot support with records needs to come off."
+                )
+            else:
+                reason = (
+                    f"I put this account on my dispute list because the reporting does not hold "
+                    f"up.{detail_str} I am not leaving an item on my credit file that cannot be "
+                    f"fully documented. The creditor needs to send the contract, the transaction "
+                    f"history, and documentation that explains how the current balance and status "
+                    f"were determined. Whatever they cannot support with records has to come off."
+                )
 
     # Append secondary flags paragraph if any additional issues were detected
     # The secondary flags paragraph now ALSO rotates, so cross-bureau letters
     # for the same account get different secondary-flag phrasings.
+    # We add a bureau-specific offset to variation_idx here so that the
+    # secondary-flags pool (which rotates on %6 and %4 internally) lands
+    # on different slots for each bureau for the same account.
+    _SECONDARY_BUREAU_OFFSET = {"transunion": 0, "experian": 2, "equifax": 4}
+    secondary_variation = variation_idx + _SECONDARY_BUREAU_OFFSET.get(bureau, 0)
     secondary_flags = item.get("secondary_flags", [])
-    flags_para = _build_secondary_flags_paragraph(secondary_flags, variation_idx=variation_idx)
+    flags_para = _build_secondary_flags_paragraph(secondary_flags, variation_idx=secondary_variation)
 
     # Closer rotation — NEVER emit "DELETE OFF MY CREDIT REPORT" in caps again.
     # Pool of 12 closers; 2 are intentionally empty (trailing word from the body
     # is enough — no need for a mechanical deletion demand on every item).
+    # Also bureau-shifted so the same account gets different closers per bureau.
     _CLOSER_POOL = [
         " Please delete this item from my file.",
         " This tradeline should be removed from my report.",
@@ -5576,7 +5659,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         "",  # empty — body carries the demand
         "",  # empty — body carries the demand
     ]
-    closer = _CLOSER_POOL[variation_idx % len(_CLOSER_POOL)]
+    _CLOSER_BUREAU_OFFSET = {"transunion": 0, "experian": 4, "equifax": 7}
+    closer_idx = (variation_idx + _CLOSER_BUREAU_OFFSET.get(bureau, 0)) % len(_CLOSER_POOL)
+    closer = _CLOSER_POOL[closer_idx]
     return reason + flags_para + closer
 
 
@@ -5926,8 +6011,25 @@ def build_dispute_letter_engine(
                     facct  = item.get("account_number", "")
                     at     = item.get("attack_type", "")
                     # Account fingerprint — ESTABLE cross-bureau.
-                    # No incluye idx ni bureau. Mismo valor en las 3 cartas.
-                    account_fingerprint = abs(hash(facct + fname + at))
+                    # Incluye múltiples campos para evitar colisiones en accounts
+                    # con números cortos (ej: "33460****" de MIDLAND). Los
+                    # campos adicionales (balance, date_opened, payment_status,
+                    # negative_type) son todos ESTABLES cross-bureau para el
+                    # mismo tradeline, así que el fingerprint sigue siendo el
+                    # mismo en TU/EXP/EQF para una misma cuenta, pero distinto
+                    # entre cuentas con idénticos fname+acct pero diferentes
+                    # attributos (lo cual nunca debería pasar dentro del mismo
+                    # cliente, pero defensa en profundidad).
+                    fingerprint_basis = (
+                        facct + "|" +
+                        fname + "|" +
+                        at + "|" +
+                        str(item.get("balance", "")) + "|" +
+                        str(item.get("date_opened", "")) + "|" +
+                        str(item.get("payment_status", "")) + "|" +
+                        str(item.get("negative_type", ""))
+                    )
+                    account_fingerprint = abs(hash(fingerprint_basis))
                     # variation_seed lo rota on Regenerate; idx solo sirve
                     # como disambiguator intra-carta si dos cuentas tienen
                     # fingerprints que colisionan en módulo pequeño.
