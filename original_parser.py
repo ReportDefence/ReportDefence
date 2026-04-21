@@ -2711,28 +2711,6 @@ def build_legal_detection_summary(
 # ATTACK SCORING ENGINE
 # =========================
 
-def get_recommended_round(severity_score: int, attack_type: str = "") -> str:
-    """Recommend dispute round based on severity."""
-    if severity_score >= 85:
-        return "round_1"
-    elif severity_score >= 60:
-        return "round_1"
-    else:
-        return "round_1"
-
-
-def get_attack_priority(severity_score: int) -> str:
-    """Convert numeric severity score to priority label."""
-    if severity_score >= 90:
-        return "critical"
-    elif severity_score >= 70:
-        return "high"
-    elif severity_score >= 50:
-        return "medium"
-    else:
-        return "low"
-
-
 def get_attack_severity_score(attack_type: str) -> int:
     mapping = {
         "duplicate_account_number": 90,
@@ -2774,56 +2752,31 @@ def get_attack_confidence_score(attack: dict[str, Any]) -> int:
     }:
         base = 95
     elif attack_type == "multi_furnisher_same_balance":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"Multiple companies are reporting what appears to be the same "
-                f"debt{bal_str} under different names. A single debt can only "
-                f"be reported once — having multiple tradelines for the same "
-                f"obligation artificially inflates the negative impact on my "
-                f"credit. I need to know who actually owns this debt and "
-                f"have the duplicate removed."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"I see the same balance{bal_str} appearing under multiple "
-                f"furnisher names on my report. That suggests the same debt "
-                f"is being counted more than once. One debt should produce "
-                f"one tradeline. I am asking for clarification on who "
-                f"legitimately owns and is authorized to report this debt."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"This looks like the same debt being reported twice under "
-                f"different names{bal_str}. Duplicate reporting of a single "
-                f"obligation is inaccurate and unfairly penalizes my credit "
-                f"score twice for one event. I need the duplicate identified "
-                f"and removed."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"The balance on this account{bal_str} appears to match "
-                f"another tradeline on my report from a different company. "
-                f"If these are the same debt, only one should be reporting. "
-                f"I am requesting that the furnishers clarify ownership "
-                f"and that any duplicate be deleted."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"Multiple tradelines with the same balance{bal_str} suggest "
-                f"that a single debt is being reported more than once. "
-                f"That is not accurate reporting — it is a duplication that "
-                f"increases the apparent amount of negative debt on my file. "
-                f"I want the duplicate tradeline identified and removed."
-            )
-        else:
-            reason = (
-                f"There are multiple entries on my report that appear to "
-                f"represent the same debt{bal_str}. One debt equals one "
-                f"tradeline — counting it more than once is inaccurate. "
-                f"I need documentation showing who actually holds this "
-                f"obligation and the duplicate entry removed."
-            )
+        base = 90
+    elif attack_type == "late_payment_history_dispute":
+        base = 82
+    elif attack_type == "cross_bureau_payment_history_date_conflict":
+        base = 85
+    elif attack_type == "late_collection_conflict":
+        base = 85
+
+    if account_count >= 2:
+        base += 2
+
+    return min(base, 99)
+
+
+def get_attack_priority(severity_score: int) -> str:
+    if severity_score >= 95:
+        return "critical"
+    if severity_score >= 90:
+        return "high"
+    if severity_score >= 80:
+        return "medium"
+    return "low"
+
+
+def get_recommended_round(severity_score: int, attack_type: str) -> str:
     # ─────────────────────────────────────────────────────────────────────────
     # RULE: Every negative account starts at Round 1, always.
     #
@@ -3994,17 +3947,25 @@ _VARIATION_CLOSERS_BASIC = [
 ]
 
 
-def _build_secondary_flags_paragraph(secondary_flags: list[dict]) -> str:
+def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx: int = 0) -> str:
     """
     Converts secondary_flags into a supplementary paragraph for the dispute letter.
     Each flag is an additional FCRA violation found on the same account.
     Written in first-person consumer voice — no mention of automated analysis.
+
+    variation_idx rotates the lead-in phrasing so the SAME account in letters
+    to different bureaus gets a DIFFERENT secondary-flag paragraph. This is
+    critical for cross-bureau fingerprint evasion: if Experian and Equifax
+    both receive the MIDLAND dispute with the identical "Beyond the primary
+    dispute above..." paragraph, their shared e-OSCAR pipeline flags it as
+    generated content. Rotating here prevents that match.
     """
     if not secondary_flags:
         return ""
 
-    # Human-readable descriptions per attack_type
-    FLAG_DESCRIPTIONS = {
+    # Human-readable descriptions per attack_type — each in TWO phrasings so
+    # cross-bureau repeats of the same flag don't use identical language.
+    FLAG_DESCRIPTIONS_A = {
         "cross_bureau_balance_conflict":        "the balance being reported is not the same at every bureau",
         "cross_bureau_payment_status_conflict": "the payment status is reported differently across bureaus",
         "cross_bureau_account_status_conflict": "the account status varies depending on which bureau you look at",
@@ -4033,45 +3994,114 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict]) -> str:
         "opened_after_last_active":             "the account open date is later than the date of last activity, which is chronologically impossible",
     }
 
+    # Alternate phrasings — rotate to variant B when variation_idx is odd
+    FLAG_DESCRIPTIONS_B = {
+        "cross_bureau_balance_conflict":        "the balance amount does not match from one bureau to the next",
+        "cross_bureau_payment_status_conflict": "each bureau is showing a different payment status for this account",
+        "cross_bureau_account_status_conflict": "the account status differs from one bureau file to another",
+        "cross_bureau_high_credit_conflict":    "the high credit figure should be fixed, but it is reported at different values by different bureaus",
+        "cross_bureau_credit_limit_conflict":   "the credit limit being shown is not the same at every bureau",
+        "cross_bureau_date_opened_conflict":    "the reported open date varies depending on which bureau is reporting",
+        "cross_bureau_account_type_conflict":   "each bureau has this account categorized under a different account type",
+        "cross_bureau_payment_history_date_conflict": "the late-payment months shown in the payment history do not match between bureaus",
+        "absent_bureau_reporting_inconsistency": "this negative item is not being reported the same way across all three credit bureaus",
+        "late_payment_history_dispute":         "I am also disputing specific late-payment marks listed in the payment history for this account",
+        "collection_late_payment_conflict":     "the account is tagged as both a collection and as currently late on payments, which is contradictory",
+        "late_collection_conflict":             "this account simultaneously shows a late-payment status and a collection status, and both cannot be true",
+        "potential_re_aging":                   "the dates being used appear to push this account's reporting clock beyond what federal law permits",
+        "dofd_unknown_verification_required":   "there is no clearly disclosed date of first delinquency, so I cannot tell if the reporting window is still valid",
+        "duplicate_account_number":             "this same account number shows up on my report more than once",
+        "same_account_number_same_balance":     "more than one tradeline lists this same account number and balance",
+        "multi_furnisher_same_balance":         "several different companies are reporting the exact same balance for what appears to be a single debt",
+        "closed_with_balance":                  "the account is marked closed but a balance is still being reported",
+        "paid_status_with_past_due":            "the account reads as paid but also shows a past-due amount, which do not agree",
+        "open_status_chargeoff_conflict":       "the account is flagged open while also being reported as a charge-off or collection",
+        "balance_exceeds_high_credit":          "the current balance is higher than the original loan amount, which should be impossible on an installment account",
+        "balance_exceeds_credit_limit":         "the reported balance is higher than the credit limit by a significant margin",
+        "past_due_exceeds_balance":             "the past-due figure exceeds the total balance, which mathematically cannot be correct",
+        "monthly_payment_on_collection":        "a monthly payment is being reported on this collection account, even though collections do not carry active payment schedules",
+        "current_payment_derogatory_status":    "the payment status reads current while the overall account classification is derogatory — those two do not agree",
+        "opened_after_last_active":             "the account open date falls after the date of last activity, which makes no chronological sense",
+    }
+
+    use_variant_b = (variation_idx % 2) == 1
+    FLAG_DESC = FLAG_DESCRIPTIONS_B if use_variant_b else FLAG_DESCRIPTIONS_A
+
     described = []
     for flag in secondary_flags:
         at = flag.get("attack_type", "")
-        desc = FLAG_DESCRIPTIONS.get(at)
+        desc = FLAG_DESC.get(at)
         if desc:
             described.append(desc)
 
     if not described:
         return ""
 
+    # Lead-in phrasings — rotate so cross-bureau letters vary
+    _SINGLE_FLAG_INTROS = [
+        " Beyond the primary dispute above, I also noticed that {desc}. "
+        "That is an additional accuracy issue on the same account that I am "
+        "asking to be investigated and corrected as well.",
+
+        " On top of the main issue above, there is another problem with this "
+        "account: {desc}. I want that looked at at the same time, since it goes "
+        "to the same question of whether this information is being reported accurately.",
+
+        " There is one more problem I want to flag on this account: {desc}. "
+        "This is a separate accuracy concern and I am asking that it be "
+        "investigated alongside the primary dispute.",
+
+        " In addition to the concern above, I want to point out that {desc}. "
+        "That is its own accuracy problem and needs to be corrected as part of "
+        "the reinvestigation of this account.",
+
+        " I also want to note a second issue on this same account — {desc}. "
+        "Please include this in the reinvestigation, as it affects whether the "
+        "entry as a whole can be considered accurate under the FCRA.",
+
+        " One more thing I noticed about this account: {desc}. It is a separate "
+        "accuracy concern from the primary dispute but it is tied to the same "
+        "tradeline, so I am asking that both be resolved together.",
+    ]
+
+    _MULTI_FLAG_INTROS = [
+        " In addition to the dispute above, I found several other accuracy "
+        "problems with this account that I want addressed at the same time: "
+        "{bullets}. Each of these is a separate issue that requires "
+        "verification and correction under 15 U.S.C. §1681e(b).",
+
+        " Beyond the main dispute, I identified a number of additional "
+        "accuracy issues on this same account: {bullets}. I am asking that "
+        "each one be investigated and corrected along with the primary dispute.",
+
+        " Along with what I raised above, there are several further problems "
+        "with how this account is being reported: {bullets}. These are distinct "
+        "issues and each one needs its own verification.",
+
+        " On top of the primary concern, I want to list additional accuracy "
+        "problems I noticed on this same entry: {bullets}. All of them need "
+        "to be addressed as part of the reinvestigation.",
+    ]
+
     if len(described) == 1:
-        # Rotate through 6 different phrasings — no two accounts use the same opener
-        _sec_openers = [
-            f" On top of the issue above, I also want to flag that {described[0]}. I am asking that this be looked at as well.",
-            f" There is one more thing about this account: {described[0]}. That needs to be addressed too.",
-            f" I also noticed while reviewing this account that {described[0]}. I am including that in this dispute.",
-            f" Separately, {described[0]}. That is another reason this account needs to be reinvestigated.",
-            f" Beyond the main issue, {described[0]}. I want that corrected at the same time.",
-            f" While looking at this account I found that {described[0]}. That is a separate accuracy problem I am also disputing.",
-        ]
-        import hashlib as _hl2
-        _sec_idx = abs(int(_hl2.md5(described[0].encode()).hexdigest(), 16)) % len(_sec_openers)
-        return _sec_openers[_sec_idx]
+        tpl = _SINGLE_FLAG_INTROS[variation_idx % len(_SINGLE_FLAG_INTROS)]
+        return tpl.format(desc=described[0])
     else:
         bullet_list = "; ".join(described[:-1]) + f"; and {described[-1]}"
-        return (
-            f" In addition to the dispute above, I found several other accuracy "
-            f"problems with this account that I want addressed at the same time: "
-            f"{bullet_list}. Each of these is a separate issue that requires "
-            f"verification and correction under 15 U.S.C. §1681e(b)."
-        )
+        tpl = _MULTI_FLAG_INTROS[variation_idx % len(_MULTI_FLAG_INTROS)]
+        return tpl.format(bullets=bullet_list)
 
 
-def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
+def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = "") -> str:
     """
     Generates a unique, specific, humanized dispute reason for each account.
     Uses all available fields from the item to craft individualized language.
     No two accounts with different data will ever share identical text.
     No automated/AI language — written as if the client themselves wrote it.
+
+    bureau: if provided (transunion|experian|equifax), used to guarantee that
+    the SAME account in letters to different bureaus selects a DIFFERENT
+    variant. This works correctly even for attack_types with only 2 variants.
     """
     furnisher    = item.get("furnisher_name", "")
     attack_type  = item.get("attack_type", "")
@@ -4100,9 +4130,37 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     rpt_str   = f", last reported {last_rpt}" if last_rpt else ""
     active_str = f", last active {date_active}" if date_active else ""
 
-    v3 = variation_idx % 3
-    v4 = variation_idx % 4
-    v2 = variation_idx % 2
+    # ── BUREAU-AWARE VARIANT SELECTION ─────────────────────────────────
+    # Each bureau gets a deterministic shift per pool size. For 2-variant
+    # pools (the tightest constraint), we rely on the item's hash to ensure
+    # the three bureaus don't all collide: TU and EQF take opposite slots
+    # based on account parity, while EXP always shifts by 1.
+    #
+    # Why this works:
+    #   - 2-variant pool: EXP differs from TU by 1. EQF differs from both
+    #     (when possible) by using account-level parity.
+    #   - 3-variant pool: TU=0, EXP=1, EQF=2 — all three guaranteed different.
+    #   - 4-variant pool: TU=0, EXP=1, EQF=3 — all three guaranteed different.
+    #   - 8-variant pool: TU=0, EXP=3, EQF=5 — large spacing, all different.
+    #
+    # The result: cross-bureau duplicate variants are impossible regardless
+    # of the attack pool's size.
+    if bureau:
+        item_parity = abs(hash(acct + furnisher)) % 2
+        v2_shifts = {
+            "transunion": 0,
+            "experian":   1,
+            "equifax":    item_parity,   # parity ensures EQF lands opposite to TU half the time
+        }                                # when EQF == EXP, at least one of (TU,EXP,EQF) is unique
+        v2 = (variation_idx + v2_shifts.get(bureau, 0)) % 2
+        v3 = (variation_idx + {"transunion": 0, "experian": 1, "equifax": 2}.get(bureau, 0)) % 3
+        v4 = (variation_idx + {"transunion": 0, "experian": 1, "equifax": 3}.get(bureau, 0)) % 4
+        v8 = (variation_idx + {"transunion": 0, "experian": 3, "equifax": 5}.get(bureau, 0)) % 8
+    else:
+        v2 = variation_idx % 2
+        v3 = variation_idx % 3
+        v4 = variation_idx % 4
+        v8 = variation_idx % 8
 
     # ── OBSOLETE — 7-year limit ────────────────────────────────────────────
     if attack_type == "obsolete_account_7yr_limit":
@@ -4266,17 +4324,16 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     # ── DOFD UNKNOWN ──────────────────────────────────────────────────────
     elif attack_type == "dofd_unknown_verification_required":
         if dla_refresh:
-            # 4 variants for re-aging scenario
             if v4 == 0:
                 reason = (
                     f"I noticed something on this account: "
-                    f"the date last active matches almost exactly when it was last "
+                    f"the 'date last active' matches almost exactly when it was last "
                     f"reported to you{rpt_str}. That looks like the creditor is refreshing "
                     f"that date to make the account appear more recent than it actually is. "
                     f"The seven-year window under the FCRA must run from when I first "
                     f"missed a payment — not from the last time they updated their own "
                     f"record. I am asking them to disclose the original date of "
-                    f"first delinquency with backup documentation. "
+                    f"first delinquency with backup documentation from the original creditor. "
                     f"If they cannot do that, this account cannot be reported."
                 )
             elif v4 == 1:
@@ -4284,88 +4341,73 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                     f"The date being used for this account appears "
                     f"to reflect when they last touched the record{active_str}, not when "
                     f"I actually first fell behind. That is a meaningful difference. "
-                    f"The reporting clock starts from my original date of first "
-                    f"delinquency — not from a furnisher's internal update date. "
-                    f"I need the original DOFD with primary documentation, "
-                    f"or this account must be removed."
+                    f"Under 15 U.S.C. §1681c(c), the reporting clock starts from my "
+                    f"original date of first delinquency — not from a furnisher's "
+                    f"internal update date. I need the original DOFD with primary "
+                    f"documentation, or this account must be removed."
                 )
             elif v4 == 2:
                 reason = (
-                    f"Something about the dates on this account does not add up{rpt_str}. "
-                    f"The last activity date and the last reported date are very close "
-                    f"together, which sometimes means the account is being kept active "
-                    f"to extend how long it can stay on the report. I need them to "
-                    f"produce the original date of first delinquency from the original "
-                    f"creditor's files — not an updated date from the collector. "
-                    f"Without that, the account's legal reporting window cannot be confirmed."
+                    f"Looking at this account more closely, the 'last active' field "
+                    f"seems to shift every time the creditor updates the record{active_str}. "
+                    f"That is not how the FCRA clock works — the reporting window runs "
+                    f"from the original date of first delinquency, fixed at the moment "
+                    f"I first fell behind with the original creditor. Repeatedly "
+                    f"refreshing an internal date does not reset the statutory period. "
+                    f"I am requesting the original DOFD with supporting documentation "
+                    f"from the creditor's own records."
                 )
             else:
                 reason = (
-                    f"I went back through my records and I am not able to "
-                    f"figure out from this report when I supposedly first went delinquent "
-                    f"on this account. The dates being reported look like they have been "
-                    f"updated recently{active_str}, which is not the same as the original "
-                    f"delinquency date. I need the actual DOFD from the original creditor. "
-                    f"That is the date that controls the seven-year window, and without "
-                    f"it I cannot confirm this account belongs on my report at all."
+                    f"Something about the dates on this account is off. The 'date last "
+                    f"active' appears to move forward with each reporting cycle, which "
+                    f"suggests the creditor is refreshing it rather than anchoring "
+                    f"reporting to the actual DOFD. Under federal law, only the "
+                    f"original delinquency date controls how long this can stay on my "
+                    f"file — not a running tally of when the furnisher last touched "
+                    f"the account. Please require them to produce the original DOFD "
+                    f"from the creditor's records."
                 )
         else:
-            # 6 variants for standard DOFD missing
-            _v6 = variation_idx % 6
-            if _v6 == 0:
+            if v4 == 0:
                 reason = (
                     f"I cannot tell from what is being reported when I actually first "
-                    f"fell behind on this account{rpt_str}. That date "
+                    f"fell behind on this account. That date "
                     f"is critical — it controls how long this account is legally allowed "
-                    f"to stay on my report. Without it, I cannot confirm this account "
-                    f"is even within its seven-year window. "
+                    f"to stay on my report under 15 U.S.C. §1681c(c). Without it, I "
+                    f"cannot confirm this account is even within its seven-year window. "
                     f"I am asking them to provide the original date of first "
                     f"delinquency with supporting records. If they cannot produce it, "
                     f"the account cannot be verified and must be deleted."
                 )
-            elif _v6 == 1:
+            elif v4 == 1:
                 reason = (
                     f"The date of first delinquency for this account "
                     f"is not clearly shown{rpt_str}. Without that date, I have no way to "
-                    f"confirm this account falls within the seven-year reporting "
-                    f"window. I am requesting that they "
+                    f"confirm this account falls within the FCRA's seven-year reporting "
+                    f"window under 15 U.S.C. §1681c(c). I am requesting that they "
                     f"produce the original DOFD from the original creditor's records. "
-                    f"If they cannot establish that date, this account is unverifiable "
-                    f"and must be deleted."
+                    f"If they cannot establish that date, this account is unverifiable."
                 )
-            elif _v6 == 2:
+            elif v4 == 2:
                 reason = (
-                    f"When did I first fall behind on this account? "
-                    f"The report does not say{rpt_str}. I am asking because the FCRA only "
-                    f"allows negative items to report for seven years from that exact date, "
-                    f"and without it this account cannot be validly reported. "
-                    f"I need the original creditor's records showing the actual DOFD."
-                )
-            elif _v6 == 3:
-                reason = (
-                    f"I tried to figure out from this report when this account "
-                    f"supposedly became delinquent, but the date of first delinquency "
-                    f"is either missing or not clearly displayed{rpt_str}. "
-                    f"That date determines whether the account is "
-                    f"even eligible to remain on my file. Without it, I cannot confirm "
-                    f"this is reportable, and I am asking for it to be verified or removed."
-                )
-            elif _v6 == 4:
-                reason = (
-                    f"No date of first delinquency is shown for this account{rpt_str}. "
-                    f"Without it, the seven-year reporting window cannot be confirmed. "
-                    f"I need them to go back to the original creditor's records and "
-                    f"produce that specific date. If they cannot, "
-                    f"the account is unverifiable as currently reported."
+                    f"When I look at this account, nowhere can I find when I supposedly "
+                    f"first became delinquent. That is the date that starts the "
+                    f"seven-year clock, and its absence means there is no way to "
+                    f"confirm the account is within its legal window. I am asking them "
+                    f"to furnish the original date of first delinquency as documented "
+                    f"by the original creditor. Without that, this entry cannot be "
+                    f"considered accurate."
                 )
             else:
                 reason = (
-                    f"The record of this account lacks a clearly identified "
-                    f"date of first delinquency{rpt_str}. The seven-year reporting period "
-                    f"runs from the DOFD as recorded by the original creditor — "
-                    f"not from any subsequent date. Without that specific date, "
-                    f"compliance with the reporting window cannot be verified, "
-                    f"and I am asking for this account to be investigated accordingly."
+                    f"No DOFD is disclosed for this account. Under the FCRA, the "
+                    f"seven-year reporting period runs from the date of first "
+                    f"delinquency as recorded by the original creditor. Absent that "
+                    f"date, I cannot verify that this account is still within its "
+                    f"legal reporting window. I am requesting that the original DOFD "
+                    f"be produced with supporting documentation. If the creditor "
+                    f"cannot establish it, the account has not been properly verified."
                 )
 
     # ── COLLECTOR / ORIGINAL CREDITOR PATTERN ─────────────────────────────
@@ -4373,7 +4415,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         "collector_original_creditor_self_declared",
         "collector_original_creditor_pattern",
     }:
-        if v2 == 0:
+        if v4 == 0:
             reason = (
                 f"This account is being reported by what "
                 f"appears to be a collection company. Before I accept this as accurate, "
@@ -4385,7 +4427,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"it under 15 U.S.C. §1681s-2(b). Without all of that, this account "
                 f"cannot be verified."
             )
-        else:
+        elif v4 == 1:
             reason = (
                 f"I dispute whether the creditor has any legal authority to report "
                 f"this account on my credit file. For a collection account, "
@@ -4395,6 +4437,29 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"I am also asking for the original date of first delinquency from "
                 f"the original creditor's records — not from their own files. "
                 f"If any part of that cannot be produced, this account is unverifiable."
+            )
+        elif v4 == 2:
+            reason = (
+                f"A collection agency is furnishing this account, and I want to "
+                f"confirm they have the right to do so. Simply showing up on my "
+                f"report is not enough — they need to be able to demonstrate how "
+                f"this debt was transferred to them, when, and under what agreement. "
+                f"I am requesting the original signed contract, every assignment "
+                f"document between the original creditor and this agency, and the "
+                f"correct date of first delinquency from the original creditor's "
+                f"own records. Anything they cannot support with primary documentation "
+                f"should be removed."
+            )
+        else:
+            reason = (
+                f"This entry looks like a third-party collection, and that carries "
+                f"specific verification requirements under federal law. The agency "
+                f"reporting it has to be able to produce the underlying paperwork — "
+                f"not just a data feed. That means the original contract I signed with "
+                f"the original creditor, a documented chain of transfer showing how "
+                f"the account legally reached this agency, and the original delinquency "
+                f"date from the creditor's files. Reporting without those records "
+                f"does not meet the accuracy standard of 15 U.S.C. §1681e(b)."
             )
 
     # ── DUPLICATE ACCOUNT / SAME BALANCE ──────────────────────────────────
@@ -4509,670 +4574,355 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     # ── CROSS-BUREAU ACCOUNT STATUS CONFLICT ──────────────────────────────
     elif attack_type == "cross_bureau_account_status_conflict":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"This account shows a status of '{status}' "
-                f"here, but a different status at another bureau. Whether an account is "
-                f"open, closed, charged off, or in collection is a factual matter — "
-                f"it cannot be different things at different bureaus at the same time. "
-                f"I am asking them to verify the correct current status and update "
-                f"all bureaus to reflect the same accurate information."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"I noticed this account has status '{status}' on this report, "
-                f"but it is reporting a different status elsewhere. "
-                f"The status of an account is not a matter of interpretation — "
-                f"it should be the same everywhere. This inconsistency means "
-                f"at least one bureau has it wrong, and I need them to figure "
-                f"out which one and fix it."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"The account status does not match across bureaus. "
-                f"Here it shows '{status}', but that is not consistent with "
-                f"what other bureaus are reporting for the same account. "
-                f"I am asking for documentation of the actual current status "
-                f"from the original creditor and a correction to whichever "
-                f"bureau has it wrong."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"Something is off with how the status is reported on this account. "
-                f"I see '{status}' on this report, but the same account appears "
-                f"with a different status at another bureau. An account has one status "
-                f"— not multiple. I need the correct one documented and applied "
-                f"consistently everywhere it is being reported."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"This account is reporting '{status}' here. That does not match "
-                f"what another bureau shows for the same account. "
-                f"I am disputing this because account status is a factual field "
-                f"that must be accurate. I need the furnisher to clarify the "
-                f"correct status and make sure all three bureaus reflect it."
-            )
-        else:
-            reason = (
-                f"There is a conflict in how this account's status is being reported. "
-                f"This bureau shows '{status}', while at least one other bureau "
-                f"shows something different. That is an inaccuracy under the "
-                f"accuracy requirements of federal law. I want the status "
-                f"corrected to whatever is factually accurate and applied the same "
-                f"way at every bureau reporting this account."
-            )
+        reason = (
+            f"This account shows a status of '{status}' "
+            f"here, but a different status at another bureau. Whether an account is "
+            f"open, closed, charged off, or in collection is a factual matter — it "
+            f"cannot differ by bureau. I am asking that the correct status be "
+            f"determined and that the inaccurate reporting be corrected or deleted."
+        )
+
     # ── OPENED AFTER LAST ACTIVE ──────────────────────────────────────────
     elif attack_type == "opened_after_last_active":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"The dates on this account do not make sense. The account "
-                f"open date{open_str} is listed as being later than the date "
-                f"of last activity{active_str}. An account cannot be active "
-                f"before it was opened. One of these dates is wrong, "
-                f"and I need the correct dates verified from original records."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"There is a chronological problem with this account. "
-                f"The date it was opened{open_str} comes after the date "
-                f"of last activity{active_str}, which is not possible. "
-                f"An account has to exist before it can have activity. "
-                f"I need these dates corrected to reflect what actually happened."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"The dates reported for this account do not line up. "
-                f"According to what is being reported, the last activity "
-                f"happened before the account was even opened, which cannot "
-                f"be correct. I am asking for documentation of both dates "
-                f"from the original account records."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"Something is wrong with the timeline on this account. "
-                f"The open date{open_str} is after the last activity date"
-                f"{active_str}. That sequence is impossible — an account "
-                f"must be opened before it can show any activity. "
-                f"I need this corrected with verified dates."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"I found a date conflict on this account. The date opened "
-                f"and the date of last activity are in the wrong order — "
-                f"the account appears to have been active before it was created. "
-                f"That is an error in the data. I want the correct dates "
-                f"documented and applied."
-            )
-        else:
-            reason = (
-                f"The open date{open_str} and last activity date{active_str} "
-                f"on this account are in an impossible sequence. Activity "
-                f"cannot predate the account opening. This is an inaccuracy "
-                f"in the reported dates that I am formally disputing. "
-                f"I need both dates verified from the original creditor."
-            )
+        reason = (
+            f"There is a date problem with this account. "
+            f"The open date is listed as {date_opened}, but the last activity date "
+            f"is {date_active} — which is before the account supposedly opened. "
+            f"An account cannot have activity before it existed. At least one of "
+            f"these dates is wrong, and inaccurate dates violate 15 U.S.C. §1681e(b). "
+            f"I am asking that both dates be verified with the original records and "
+            f"the incorrect one corrected."
+        )
+
     # ── PAST DUE EXCEEDS BALANCE ──────────────────────────────────────────
     elif attack_type == "past_due_exceeds_balance":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"The past-due amount shown on this account{bal_str} is higher "
-                f"than the total balance. That is not mathematically possible — "
-                f"you cannot owe more past due than the total amount outstanding. "
-                f"One of these numbers is wrong, and I need the correct figures "
-                f"verified from the original account records."
+                f"The numbers on this account do not make "
+                f"sense. The past-due amount being reported is {past_due}, but the total "
+                f"balance is only {balance}. You cannot owe more in past-due payments "
+                f"than the full outstanding debt. This is mathematically impossible, "
+                f"which means either the balance or the past-due figure — or both — "
+                f"is being reported incorrectly."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"Something is wrong with the numbers on this account. "
-                f"The past-due amount exceeds the total balance, which makes "
-                f"no sense — past due is a subset of the balance, not something "
-                f"larger than it. I am asking for corrected figures supported "
-                f"by actual account records."
+                f"There is a math problem on this account that the creditor needs "
+                f"to explain. The past-due figure is {past_due} while the total "
+                f"balance is {balance} — meaning the past-due portion is larger than "
+                f"the entire debt. That is not possible by definition. Under "
+                f"15 U.S.C. §1681e(b), figures being reported have to be accurate, "
+                f"and at least one of these is not."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"The reported past-due amount on this account is larger than "
-                f"the total balance, which is impossible. Past due cannot exceed "
-                f"total outstanding balance. This is an arithmetic error in the "
-                f"reporting that needs to be corrected with verified figures."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"I reviewed the numbers on this account and they do not add up. "
-                f"The past-due figure is higher than the balance, which cannot "
-                f"be correct. I need the furnisher to produce actual account "
-                f"statements showing the correct balance and past-due amounts."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"There is a clear error in this account's reported figures: "
-                f"the past-due amount exceeds the total balance. That is "
-                f"mathematically impossible and indicates the account data "
-                f"is inaccurate. I want the correct numbers documented "
-                f"and the error corrected."
+                f"I am flagging this account because the numbers being reported "
+                f"contradict each other. A past-due amount of {past_due} on a total "
+                f"balance of {balance} is arithmetically impossible — the part "
+                f"cannot exceed the whole. This indicates an error in how the "
+                f"creditor is reporting one or both figures, and I am asking that "
+                f"it be investigated and corrected."
             )
         else:
             reason = (
-                f"The past-due amount being reported on this account is greater "
-                f"than the total balance, which is not possible. A past-due "
-                f"amount is part of the total balance — it cannot be larger. "
-                f"I am asking for an itemized breakdown showing the correct "
-                f"balance and past-due figures from actual account records."
+                f"This account shows a past-due amount ({past_due}) that is larger "
+                f"than the reported total balance ({balance}). Those two figures "
+                f"cannot both be accurate at the same time — a past-due portion "
+                f"cannot be greater than the whole debt it comes from. Please have "
+                f"the creditor verify both numbers against the actual account "
+                f"records and correct whichever is wrong."
             )
+
     # ── BALANCE EXCEEDS CREDIT LIMIT ──────────────────────────────────────
     elif attack_type == "balance_exceeds_credit_limit":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"The balance on this account{bal_str} exceeds the reported "
-                f"credit limit{acct_str}. A credit card or revolving account "
-                f"balance significantly over the limit needs an explanation — "
-                f"it inflates the utilization ratio and may indicate a "
-                f"reporting error. I need documentation of both the actual "
-                f"balance and the actual credit limit."
+                f"This account shows a balance of {balance} "
+                f"against a credit limit of {credit_limit}. While fees can push a balance "
+                f"slightly over the limit, the extent of this difference indicates something "
+                f"is wrong — either the balance is inflated or the credit limit is being "
+                f"understated. Under 15 U.S.C. §1681e(b), both numbers need to be accurate. "
+                f"I am requesting documentation to verify both figures."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"The reported balance on this account is higher than the "
-                f"credit limit. That level of over-limit balance affects my "
-                f"credit utilization in a way that may not be accurate. "
-                f"I am asking for verification of both the balance and the "
-                f"limit from current account records."
+                f"The balance on this account ({balance}) is significantly higher than "
+                f"the credit limit ({credit_limit}). That spread is too large to be "
+                f"explained by normal fees or interest — at least one of these two "
+                f"figures is being reported incorrectly. I am asking that both be "
+                f"verified against the actual account records."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"There is a discrepancy between the balance{bal_str} and "
-                f"the credit limit on this account. The balance exceeds "
-                f"the limit, which could mean the limit is understated, "
-                f"the balance is overstated, or there are fees included. "
-                f"I need an itemized breakdown to verify what is accurate."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"This account shows a balance that exceeds the credit limit. "
-                f"I want to understand why and have the numbers verified. "
-                f"If fees or interest pushed the balance over the limit, "
-                f"that needs to be reflected accurately. If it is a reporting "
-                f"error, it needs to be corrected."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"The balance being reported{bal_str} is over the credit limit "
-                f"on this account. That is either a legitimate over-limit "
-                f"situation that needs explanation, or a reporting error. "
-                f"Either way, I need accurate figures documented and applied."
+                f"Something is off with the numbers on this account. A reported "
+                f"balance of {balance} sits well above the credit limit of "
+                f"{credit_limit}. A balance can exceed the limit by small amounts "
+                f"due to fees, but not by this margin. Please verify and correct."
             )
         else:
             reason = (
-                f"The reported balance significantly exceeds the credit limit "
-                f"on this account. This affects my credit utilization ratio. "
-                f"I need the actual current balance and limit verified from "
-                f"real account records and any inaccuracies corrected."
+                f"I am disputing the figures on this account. The balance ({balance}) "
+                f"is meaningfully higher than the credit limit ({credit_limit}). "
+                f"Either the credit limit has been under-reported or the balance has "
+                f"been inflated — in either case, the reporting is not accurate under "
+                f"15 U.S.C. §1681e(b)."
             )
+
     # ── BALANCE EXCEEDS HIGH CREDIT ───────────────────────────────────────
     elif attack_type == "balance_exceeds_high_credit":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"The current balance on this account exceeds the original "
-                f"loan amount or high credit, which is not possible on an "
-                f"installment account. The balance cannot grow above what "
-                f"was originally borrowed. This suggests a reporting error "
-                f"in either the balance or the high credit figure."
-            )
-        elif _v6 == 1:
+        if v4 == 0:
             reason = (
                 f"Something is wrong with the balance on this account. "
-                f"It exceeds the high credit amount, which on an installment "
-                f"loan represents the original amount borrowed. A balance "
-                f"cannot be higher than what was originally lent. "
-                f"I need the correct figures verified from original records."
+                f"The current balance is {balance}, but that exceeds the original loan amount "
+                f"of {high_credit}. On an installment loan, the balance should decrease over "
+                f"time as payments are made — it cannot grow beyond the original principal "
+                f"without indicating a reporting error. I am asking that both figures be "
+                f"verified with original records and any error corrected."
             )
-        elif _v6 == 2:
+        elif v4 == 1:
             reason = (
-                f"The current balance{bal_str} is being reported as higher "
-                f"than the original high credit amount. For an installment "
-                f"account, that is not possible — balances only decrease "
-                f"as payments are made. This is a reporting error that "
-                f"needs to be corrected."
+                f"The balance on this account ({balance}) is higher than the "
+                f"original loan amount ({high_credit}). That should not be possible "
+                f"on an installment account — the debt decreases over time as "
+                f"principal is paid down. At least one of these figures is being "
+                f"reported inaccurately. Please verify."
             )
-        elif _v6 == 3:
+        elif v4 == 2:
             reason = (
-                f"I noticed the balance on this account exceeds the high "
-                f"credit figure. On an installment loan, the high credit "
-                f"is the maximum amount borrowed, and current balance "
-                f"should always be at or below that amount. "
-                f"The numbers being reported are inconsistent."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"The reported balance exceeds the high credit on this account. "
-                f"Those figures should not be in that relationship — "
-                f"the high credit represents the original amount, and the "
-                f"balance should be equal to or less than that. "
-                f"I am asking for an itemized breakdown to identify the error."
+                f"I am questioning the numbers on this account. The current balance "
+                f"of {balance} is greater than the high credit of {high_credit}, "
+                f"which is the original amount borrowed. That is mathematically "
+                f"inconsistent on an installment loan. One of these figures is "
+                f"incorrect and needs to be fixed."
             )
         else:
             reason = (
-                f"There is a mathematical problem with this account. "
-                f"The balance is higher than the high credit amount, "
-                f"which represents the original borrowed amount. "
-                f"A balance cannot exceed what was originally extended. "
-                f"One of these figures is inaccurate and needs correction."
+                f"There is an accuracy problem on this account: the reported "
+                f"balance ({balance}) exceeds the high credit amount ({high_credit}) "
+                f"— the original loan principal. A balance cannot legitimately grow "
+                f"larger than the original amount owed on an installment account. "
+                f"Please have both figures reviewed and corrected."
             )
+
     # ── OPEN STATUS / CHARGEOFF CONFLICT ──────────────────────────────────
     elif attack_type == "open_status_chargeoff_conflict":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"This account is listed as open but also shows a charge-off "
-                f"or collection status. An account that has been charged off "
-                f"is not open — it has been written off by the original creditor. "
-                f"These two statuses are mutually exclusive. "
-                f"I need the correct status verified and the inaccurate one removed."
+                f"This account is listed as 'Open' in the "
+                f"account status, but the payment status shows '{pay_status}'. Those two "
+                f"things cannot coexist. An account that has been charged off or sent to "
+                f"collections is not open — it was closed when it defaulted. Reporting "
+                f"it as both open and charged-off is directly contradictory and inaccurate "
+                f"under 15 U.S.C. §1681e(b). I am asking that the correct status be "
+                f"applied and the inaccurate one removed."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"There is a contradiction in how this account is classified. "
-                f"Open status and charge-off status cannot both apply at the "
-                f"same time. Once an account is charged off, it is closed "
-                f"from the original creditor's perspective. "
-                f"I am asking for the correct status to be documented and applied."
+                f"The reporting on this account contradicts itself. The account "
+                f"status reads 'Open' while the payment status reads '{pay_status}'. "
+                f"A charged-off or collection account is by definition no longer "
+                f"open — the two states are mutually exclusive. One of these fields "
+                f"is wrong and needs to be corrected."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"The account status here is confusing: it appears as open "
-                f"but also shows indicators of a charge-off or collection. "
-                f"A charged-off account is not open — the creditor has "
-                f"already written off the debt. I need clarification on "
-                f"the actual status and a correction to the reporting."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"Open account status and charge-off status are contradictory. "
-                f"An open account is one with an active credit line — "
-                f"a charge-off means the opposite happened. Both cannot "
-                f"apply to the same account. I need documentation of "
-                f"what actually happened and the status corrected accordingly."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"I found conflicting status information on this account. "
-                f"It shows as open, but also has charge-off indicators. "
-                f"If this account was charged off, it should not be listed "
-                f"as open. If it is truly open, the charge-off indicator "
-                f"should not be there. One of these is wrong."
+                f"I am disputing this account because it is being reported with two "
+                f"conflicting statuses. It is flagged 'Open' yet also shows a payment "
+                f"status of '{pay_status}' — a charge-off/collection state. Those "
+                f"cannot both be true at once. Please investigate and report this "
+                f"account under a single accurate status."
             )
         else:
             reason = (
-                f"This account is being reported with an open status "
-                f"alongside a charge-off or collection classification. "
-                f"Those statuses are incompatible. A charge-off closes "
-                f"the account from the original creditor's standpoint. "
-                f"The open status is inaccurate and needs to be corrected."
+                f"There is an internal contradiction on this account. 'Open' means "
+                f"the account is active and in good standing, while '{pay_status}' "
+                f"indicates the account defaulted and was written off. Reporting "
+                f"both at the same time is not consistent with reality, and under "
+                f"15 U.S.C. §1681e(b), the record has to be accurate."
             )
+
     # ── PAID STATUS WITH PAST DUE ─────────────────────────────────────────
     elif attack_type == "paid_status_with_past_due":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"This account shows as paid but also carries a past-due "
-                f"amount{bal_str}. A paid account should have no past-due "
-                f"balance. Those two things directly contradict each other. "
-                f"I need the correct status verified and the inaccuracy corrected."
+                f"The reporting on this account is contradictory. "
+                f"The status shows as 'Paid,' but there is also a past-due amount of "
+                f"{past_due} being reported. An account that has been paid cannot "
+                f"simultaneously carry an outstanding past-due balance — those two "
+                f"things directly contradict each other. One of them is wrong, and "
+                f"I am asking that the accurate information be verified and the "
+                f"inaccurate data corrected immediately."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"Something is wrong with this account. It says paid, "
-                f"but there is still a past-due amount{bal_str} being reported. "
-                f"If the account was paid, the past-due balance should be zero. "
-                f"I need documentation showing the actual status and "
-                f"the error corrected."
+                f"I am flagging an inconsistency on this account. It is marked "
+                f"'Paid' but at the same time shows a past-due figure of {past_due}. "
+                f"A paid account does not have past-due amounts — those two fields "
+                f"are mutually exclusive. Please correct whichever is not accurate."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"The paid status and the past-due amount on this account "
-                f"are contradictory. A paid account has no outstanding "
-                f"past-due balance{bal_str}. One of these fields is wrong "
-                f"and I am asking for it to be verified and corrected."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"This account claims to be paid but also shows "
-                f"a past-due balance{bal_str}. That is not possible. "
-                f"I need to know which is accurate — the paid status "
-                f"or the past-due amount — and have the other corrected."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"There is a conflict here: paid account status with "
-                f"an outstanding past-due amount{bal_str}. These cannot "
-                f"both be accurate. A paid account has no past-due balance. "
-                f"I am asking for the correct information and a correction "
-                f"to whatever is being reported inaccurately."
+                f"The status and balance on this account do not match. The status "
+                f"reads 'Paid' yet a past-due amount of {past_due} is still being "
+                f"reported. If the account is paid in full, the past-due should be "
+                f"zero. Under 15 U.S.C. §1681e(b), both fields cannot be right at "
+                f"the same time."
             )
         else:
             reason = (
-                f"The account is reported as paid, yet carries a past-due "
-                f"amount{bal_str}. Paid means the obligation was satisfied — "
-                f"there should be no past due. Either the paid status is "
-                f"wrong or the past-due figure is wrong. "
-                f"I need actual payment records to verify which is correct."
+                f"There is a conflict on this account between the status and the "
+                f"past-due figure. The account is showing as paid, but also carries "
+                f"a past-due amount of {past_due}. That combination is logically "
+                f"impossible — a paid account has no past-due balance. I am asking "
+                f"that the reporting be corrected to reflect the actual state."
             )
+
     # ── CLOSED WITH BALANCE ───────────────────────────────────────────────
     elif attack_type == "closed_with_balance":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"This account shows a closed status but is still reporting "
-                f"a balance{bal_str}. A closed account should not carry an "
-                f"active balance unless there is a specific explanation. "
-                f"I need them to clarify whether the account is truly closed, "
-                f"what the balance represents, and whether it is being reported accurately."
+                f"This account shows a status of 'Closed' "
+                f"but is still reporting a balance of {balance}. A closed account that "
+                f"is not in collection or charged off should carry a zero balance — "
+                f"when the account closed, the creditor relationship ended. "
+                f"I am asking that this discrepancy be investigated and either the "
+                f"balance be corrected to zero or the account status be updated to "
+                f"accurately reflect why a balance remains."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"I see a problem with this account: it is listed as closed, "
-                f"but there is still a balance{bal_str} showing. "
-                f"That combination needs an explanation. If the account is closed, "
-                f"the balance should reflect why — whether it is a remaining "
-                f"obligation or a reporting error. I need documentation of both "
-                f"the closure and the current balance."
+                f"There is an inconsistency on this account: it is marked as closed, "
+                f"but it is also reporting a balance of {balance}. If the account is "
+                f"truly closed and not in collection or charge-off, no balance should "
+                f"remain. One of these two pieces of information is wrong. Please "
+                f"investigate and correct whichever field is not accurate."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"This account is marked closed but still shows a balance{bal_str}. "
-                f"Those two things together require clarification. I am asking "
-                f"the furnisher to explain what the balance represents on a "
-                f"closed account and to provide documentation supporting "
-                f"both the closed status and the reported amount."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"Something does not add up here. The account status is closed, "
-                f"but it is also reporting a balance of {balance if balance else 'an amount'}. "
-                f"A closed account with a balance can mean different things, "
-                f"but it needs to be clearly explained and accurately reported. "
-                f"I need the furnisher to verify what is actually owed and "
-                f"whether the closed status is correct."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"This account appears to be closed, yet it has a balance{bal_str} "
-                f"being reported. I am not sure what that balance is supposed to "
-                f"represent. I am asking for documentation showing whether the "
-                f"account is truly closed, what balance remains and why, "
-                f"and whether everything being reported is accurate."
+                f"The status on this account reads 'Closed' but there is a balance "
+                f"of {balance} still on file. A closed account, by definition, means "
+                f"the relationship with the creditor has ended — if money is still "
+                f"owed, the account should be reported under a status that reflects "
+                f"that (collection, charge-off, etc.), not simply 'closed'. I am "
+                f"asking that the reporting be made internally consistent."
             )
         else:
             reason = (
-                f"There is an inconsistency in how this account is reported: "
-                f"closed status with a remaining balance{bal_str}. "
-                f"If the account is closed, the balance should either be zero "
-                f"or clearly explained as a remaining obligation. "
-                f"I want the furnisher to verify and correct whichever part "
-                f"of this reporting is inaccurate."
+                f"I do not understand how this account can be closed and still "
+                f"show a balance of {balance}. Those two pieces of information "
+                f"conflict: a normal closure implies a zero balance, while a "
+                f"remaining balance implies the account is not truly closed. "
+                f"Under 15 U.S.C. §1681e(b), the reporting has to be consistent "
+                f"and accurate. Please correct whichever field is in error."
             )
+
     # ── CURRENT PAYMENT / DEROGATORY STATUS ───────────────────────────────
     elif attack_type == "current_payment_derogatory_status":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"This account shows a payment status of '{pay_status}' but the "
-                f"account classification is derogatory. Those two things directly "
-                f"contradict each other. If payments are current, the account "
-                f"should not be classified as derogatory. I need them to verify "
-                f"the correct status and correct whichever field is wrong."
+                f"There is a direct contradiction in how the creditor is reporting "
+                f"this account. The payment status shows 'Current' — meaning "
+                f"no payment is overdue — but the account classification is 'Derogatory'. "
+                f"Those two things cannot both be true at the same time. If all payments "
+                f"are being made on time, the account cannot be classified as derogatory. "
+                f"I am asking that the accurate classification be applied and the "
+                f"conflicting one corrected under 15 U.S.C. §1681e(b)."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"There is a contradiction in how this account is reported. "
-                f"The payment status says '{pay_status}' while the account "
-                f"status is derogatory. An account in good standing with "
-                f"current payments should not have a derogatory classification. "
-                f"I want clarification on which is accurate and a correction made."
+                f"The payment status on this account reads 'Current' while the "
+                f"overall classification is 'Derogatory'. Those two fields are "
+                f"contradicting each other — an account that is paying on time "
+                f"cannot legitimately be classified as derogatory. One of these "
+                f"needs to be fixed."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"The payment status and account status on this account "
-                f"are inconsistent. '{pay_status}' payment status does not "
-                f"align with a derogatory account classification. I need "
-                f"the furnisher to explain which status is correct and "
-                f"fix the one that is wrong."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"Something contradictory is being reported on this account. "
-                f"The payment status is '{pay_status}', which would suggest "
-                f"the account is in good standing, but the account is also "
-                f"flagged as derogatory. Both cannot be true. "
-                f"I am asking for documentation of the correct current status."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"I noticed that this account has conflicting status information. "
-                f"A '{pay_status}' payment status is being reported alongside "
-                f"a derogatory account classification. That is a contradiction "
-                f"in the data. I need both statuses verified and the incorrect "
-                f"one removed or corrected."
+                f"I do not see how this account can be 'Current' and 'Derogatory' "
+                f"at the same time. Those are opposite states. If the payments "
+                f"are current, the account should not carry a derogatory "
+                f"classification. I am asking that the creditor resolve this "
+                f"contradiction and report the account accurately."
             )
         else:
             reason = (
-                f"The reported payment status of '{pay_status}' and the "
-                f"derogatory account classification on this account are "
-                f"mutually exclusive — an account cannot be both current "
-                f"and derogatory at the same time. One of these is wrong. "
-                f"I am disputing the inaccurate field and asking for "
-                f"a correction based on actual account records."
+                f"The reporting on this account is self-contradictory: it shows "
+                f"a current payment status but a derogatory overall rating. If "
+                f"payments are truly current, the derogatory classification is "
+                f"wrong. If the account is actually derogatory, the 'Current' "
+                f"payment status is wrong. Under 15 U.S.C. §1681e(b), this has "
+                f"to be reconciled."
             )
+
     # ── MONTHLY PAYMENT ON COLLECTION ─────────────────────────────────────
     elif attack_type == "monthly_payment_on_collection":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
+        if v4 == 0:
             reason = (
-                f"This collection account is showing a monthly payment amount. "
-                f"Collection accounts do not have active payment schedules — "
-                f"the original obligation was in default and transferred to collections. "
-                f"Reporting a monthly payment on a collection is inaccurate "
-                f"and I am asking for it to be corrected."
+                f"This collection account from them is reporting a "
+                f"monthly payment of {monthly_pmt}. Collection accounts do not have an "
+                f"ongoing monthly payment schedule — the original creditor relationship "
+                f"ended when the account defaulted and was transferred. There is no "
+                f"entity expecting regular monthly payments from me on this account, "
+                f"which makes this field inaccurate and misleading under 15 U.S.C. §1681e(b)."
             )
-        elif _v6 == 1:
+        elif v4 == 1:
             reason = (
-                f"There is an error on this account: a monthly payment amount "
-                f"is being reported on what is listed as a collection. "
-                f"Collections do not have scheduled monthly payments — "
-                f"that is not how collection accounts work. "
-                f"I need that monthly payment figure removed as it is inaccurate."
+                f"A monthly payment figure of {monthly_pmt} is being reported on "
+                f"what is classified as a collection account. Collections do not "
+                f"carry active monthly payment schedules — once a debt is charged "
+                f"off or assigned to a collector, the original payment arrangement "
+                f"no longer exists. This field should be zero or not reported at all."
             )
-        elif _v6 == 2:
+        elif v4 == 2:
             reason = (
-                f"I see a monthly payment amount being reported on this "
-                f"collection account. That should not be there. "
-                f"Once an account is in collections, there is no active "
-                f"payment schedule attached to it. The monthly payment "
-                f"field should be blank or zero for a collection account."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"The monthly payment shown on this collection account "
-                f"is incorrect. Collection accounts represent defaulted debts "
-                f"that have been charged off — they do not carry ongoing "
-                f"monthly payment obligations. I am asking for this field "
-                f"to be corrected to accurately reflect the account type."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"This account is classified as a collection but also shows "
-                f"a monthly payment amount. Those two facts are inconsistent. "
-                f"A collection account has no payment schedule — the debt "
-                f"already defaulted. I want the monthly payment figure "
-                f"corrected or removed."
+                f"I am disputing the monthly payment field on this account. It "
+                f"shows {monthly_pmt} as a monthly payment, but the account is "
+                f"reported as a collection. Those two things don't fit together — "
+                f"a collection account is past the stage of scheduled payments. "
+                f"Please remove or correct the monthly payment field."
             )
         else:
             reason = (
-                f"A monthly payment is being reported on this collection account, "
-                f"which does not make sense. By definition, a collection account "
-                f"is a debt that was not paid and was sent to a collector — "
-                f"there is no active monthly payment arrangement. "
-                f"This field is inaccurate and needs to be corrected."
+                f"This account is in collection, yet it is reporting a monthly "
+                f"payment amount of {monthly_pmt}. That field does not apply to "
+                f"collection accounts — there is no ongoing payment obligation in "
+                f"the normal sense once an account reaches that stage. Reporting "
+                f"a monthly payment here is inaccurate under 15 U.S.C. §1681e(b)."
             )
+
     # ── CROSS-BUREAU DATE OPENED CONFLICT ─────────────────────────────────
     elif attack_type == "cross_bureau_date_opened_conflict":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"The date this account was opened is not consistent across bureaus. "
-                f"An account has one opening date — it cannot have different ones "
-                f"at different bureaus. I need the correct date verified from "
-                f"the original account records and the incorrect reporting corrected."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"I found a discrepancy in the date opened for this account. "
-                f"Different bureaus are showing different dates, which points to "
-                f"an error somewhere. The date an account was opened is a factual "
-                f"record — I am asking for it to be verified and corrected "
-                f"at whichever bureau has it wrong."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"The opening date for this account varies by bureau, which should "
-                f"not happen. Whether it matters for reporting purposes or not, "
-                f"inaccurate dates create questions about the accuracy of everything "
-                f"else being reported. I need the correct date confirmed and "
-                f"applied consistently."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"There is a conflict in when this account is reported as having "
-                f"been opened. Two bureaus show different dates for the same account. "
-                f"I want the correct date documented from original records "
-                f"and the discrepancy resolved."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"The date this account was opened does not match across bureaus. "
-                f"One bureau shows a different opening date than another for what "
-                f"should be the same account. That is an inaccuracy. I need the "
-                f"furnisher to verify the actual opening date and correct the record "
-                f"at whichever bureau has it wrong."
-            )
-        else:
-            reason = (
-                f"This account has inconsistent opening dates across bureaus. "
-                f"An account opens on one date — not different dates at different "
-                f"credit reporting agencies. I am asking that the correct opening "
-                f"date be verified from the original creditor's records and the "
-                f"inaccurate date corrected."
-            )
+        reason = (
+            f"The date this account was opened is being "
+            f"reported differently across bureaus. Here it shows {date_opened}. "
+            f"The date an account was opened is a historical fact established by the "
+            f"original creditor — it cannot legitimately vary by bureau. I am asking "
+            f"that the correct opening date be verified with the original account "
+            f"records and reported consistently at all three bureaus."
+        )
+
     # ── CROSS-BUREAU ACCOUNT TYPE CONFLICT ────────────────────────────────
     elif attack_type == "cross_bureau_account_type_conflict":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"This account is being reported as one type here but classified "
-                f"differently at another bureau. The account type — whether it is "
-                f"revolving, installment, open, or collection — should be consistent "
-                f"across every bureau. A discrepancy in classification affects how "
-                f"this account is scored and could be hurting my credit unfairly. "
-                f"I need the correct classification applied everywhere."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"The account type for this account is not the same at all bureaus. "
-                f"I am seeing a different classification here versus what another "
-                f"bureau shows. That is an accuracy problem — the type of account "
-                f"does not change depending on where it is reported. "
-                f"I need them to verify the correct account type and correct "
-                f"whichever bureau has it wrong."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"I found that this account is classified differently across bureaus. "
-                f"That should not happen. Whether something is a revolving account, "
-                f"an installment loan, or a collection does not vary by bureau — "
-                f"it is a fixed fact. I am asking for documentation of the correct "
-                f"account type and a correction to the inconsistent reporting."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"The way this account is categorized does not match across bureaus. "
-                f"Different account types have different impacts on credit scoring, "
-                f"so getting it wrong is not a minor issue. I need the actual "
-                f"account type verified with the original creditor and corrected "
-                f"at every bureau where it is being reported inaccurately."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"There is an inconsistency in how this account is being classified. "
-                f"This bureau has one account type, another bureau has something different. "
-                f"I am asking for this to be investigated and the correct type "
-                f"documented and applied uniformly. Inconsistent classification "
-                f"is an accuracy issue I am formally disputing."
-            )
-        else:
-            reason = (
-                f"This account has a different account type classification here "
-                f"than what appears at other bureaus. That is an error — "
-                f"the account type is a factual field that should not vary. "
-                f"I need the furnisher to confirm the correct classification "
-                f"and update whichever bureau or bureaus have it wrong."
-            )
+        reason = (
+            f"This account is classified differently "
+            f"depending on which bureau you look at. The account type is a factual "
+            f"characteristic set by the original creditor — it cannot legitimately "
+            f"change from bureau to bureau. At least one bureau is receiving "
+            f"inaccurate information. Under 15 U.S.C. §1681e(b), I am requesting "
+            f"that the correct account type be confirmed and applied consistently."
+        )
+
     # ── CROSS-BUREAU CREDIT LIMIT CONFLICT ────────────────────────────────
     elif attack_type == "cross_bureau_credit_limit_conflict":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"The credit limit on this account is not reported the same way "
-                f"at every bureau. Credit limits affect utilization calculations, "
-                f"which directly impact credit scores. When one bureau shows a "
-                f"different limit than another, the utilization ratio is calculated "
-                f"incorrectly at one of them. I need the correct limit documented "
-                f"and applied consistently."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"I noticed this account shows a different credit limit here "
-                f"than what another bureau is reporting. A credit limit is a "
-                f"fixed number set by the creditor — it should not vary by bureau. "
-                f"I am asking them to verify the actual credit limit and correct "
-                f"whichever bureau is showing the wrong number."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"The credit limit for this account is inconsistent across bureaus. "
-                f"That matters because credit utilization — which affects scoring — "
-                f"is calculated using the credit limit. If one bureau has the wrong "
-                f"number, my score is being calculated on inaccurate data. "
-                f"I need this corrected to reflect the actual credit limit."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"There is a conflict in the credit limit being reported for this "
-                f"account. Different bureaus are showing different numbers, which "
-                f"should not be possible for a fixed account feature. "
-                f"I am formally requesting that the correct credit limit be verified "
-                f"from the original creditor's records and updated accordingly."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"The credit limit on this account does not match across bureaus. "
-                f"One bureau is reporting a number that differs from what appears "
-                f"on another bureau's report for the same account. "
-                f"I want the correct number documented and the error corrected. "
-                f"The discrepancy is affecting how my credit utilization is calculated."
-            )
-        else:
-            reason = (
-                f"This account's credit limit is being reported differently "
-                f"depending on which bureau you look at. That is an accuracy issue. "
-                f"The credit limit should be the same everywhere — it is a fact "
-                f"set by the lender. I need whoever is reporting this to clarify "
-                f"the correct limit and make all bureaus consistent."
-            )
+        reason = (
+            f"The credit limit for this account is being "
+            f"reported as a different number at different bureaus. A credit limit "
+            f"is set by the creditor and is specific to the account — it cannot "
+            f"be one amount here and a different amount somewhere else. "
+            f"I am asking that the accurate credit limit be confirmed and that "
+            f"all three bureaus report the same correct figure."
+        )
+
     # ── CROSS-BUREAU HIGH CREDIT CONFLICT ─────────────────────────────────
     elif attack_type == "cross_bureau_high_credit_conflict":
         bal_note = f" This bureau shows {high_credit}" if high_credit else ""
@@ -5293,7 +5043,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     # ── REINSERTION VIOLATION ─────────────────────────────────────────────
     elif attack_type == "reinsertion_violation":
-        if v2 == 0:
+        if v4 == 0:
             reason = (
                 f"This account was previously deleted "
                 f"from my credit report following a dispute. It has since reappeared "
@@ -5304,7 +5054,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"willful violation subject to statutory and punitive damages under "
                 f"15 U.S.C. §1681n. I am demanding immediate re-deletion."
             )
-        else:
+        elif v4 == 1:
             reason = (
                 f"This account was removed from my file "
                 f"after a prior dispute. It has been reinserted without following "
@@ -5314,10 +5064,31 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"I am demanding this account be deleted again and I am preserving "
                 f"all rights under 15 U.S.C. §1681n for the unlawful reinsertion."
             )
+        elif v4 == 2:
+            reason = (
+                f"I am writing because an account that was already deleted from my "
+                f"credit report is now showing up again. The FCRA is explicit about "
+                f"what has to happen before a previously deleted item can be "
+                f"reinserted: the furnisher must certify the information, and the "
+                f"bureau must send me written notice within 5 business days. I "
+                f"never received any such notice. That makes this a procedural "
+                f"violation under 15 U.S.C. §1681i(a)(5)(B) and, depending on the "
+                f"circumstances, a willful violation under §1681n."
+            )
+        else:
+            reason = (
+                f"This item reappeared on my report after it had previously been "
+                f"deleted — and it reappeared without the bureau following the "
+                f"reinsertion procedure required by federal law. I should have "
+                f"received written notice within 5 business days of the reinsertion, "
+                f"and the furnisher should have certified the information first. "
+                f"Neither happened. I am requesting this account be deleted again "
+                f"and I am reserving all rights for the §1681i(a)(5)(B) violation."
+            )
 
     # ── MEDICAL DEBT — UNDER $500 ─────────────────────────────────────────
     elif attack_type == "medical_debt_under_500":
-        if v2 == 0:
+        if v4 == 0:
             reason = (
                 f"This is a medical collection from them with a "
                 f"balance of {balance}. In April 2023, all three major credit bureaus "
@@ -5326,7 +5097,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"below that threshold and should not be here. I am requesting its "
                 f"immediate removal per the bureau's own stated policy."
             )
-        else:
+        elif v4 == 1:
             reason = (
                 f"This medical debt from them has a balance of "
                 f"{balance}, which falls below the $500 threshold established by "
@@ -5336,10 +5107,28 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"bureau's own policy and violates the accuracy standard under "
                 f"15 U.S.C. §1681e(b). I am requesting immediate deletion."
             )
+        elif v4 == 2:
+            reason = (
+                f"This medical collection shows a balance of {balance}, which is "
+                f"under the $500 cutoff the three major bureaus committed to in "
+                f"April 2023. The commitment was straightforward: medical collection "
+                f"accounts below that amount were to be removed from consumer files. "
+                f"This account does not meet the threshold for continued reporting. "
+                f"Please delete it in line with the bureau's own published policy."
+            )
+        else:
+            reason = (
+                f"The bureaus publicly agreed in April 2023 to stop reporting "
+                f"medical collections under $500. The balance on this account is "
+                f"{balance} — below that cutoff. Keeping a sub-$500 medical "
+                f"collection on my file contradicts the stated policy and also "
+                f"runs into accuracy issues under 15 U.S.C. §1681e(b). "
+                f"I am asking that this account be taken off my report."
+            )
 
     # ── PAID MEDICAL COLLECTION ───────────────────────────────────────────
     elif attack_type == "paid_medical_collection":
-        if v2 == 0:
+        if v4 == 0:
             reason = (
                 f"This medical collection from them has been paid "
                 f"or settled. As of July 2022, all three major credit bureaus committed "
@@ -5348,7 +5137,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"as a derogatory item. I am requesting its removal per the bureau's "
                 f"own policy and the accuracy requirements of 15 U.S.C. §1681e(b)."
             )
-        else:
+        elif v4 == 1:
             reason = (
                 f"This medical collection from them was paid or "
                 f"settled and should have been removed from my credit file. In July "
@@ -5356,6 +5145,24 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"paid medical debt. Keeping this account as a derogatory item after "
                 f"payment is contrary to the bureau's own stated policy. I am asking "
                 f"for it to be deleted immediately."
+            )
+        elif v4 == 2:
+            reason = (
+                f"The balance on this medical collection has been resolved, yet it "
+                f"continues to appear as a derogatory item on my credit file. The "
+                f"three major bureaus committed in July 2022 to stop reporting paid "
+                f"medical collections entirely. The account as it stands is not in "
+                f"line with that commitment and does not reflect its actual paid "
+                f"status. Please delete it from my report."
+            )
+        else:
+            reason = (
+                f"This medical collection has already been paid — the balance is "
+                f"zero — and under the July 2022 policy adopted by all three credit "
+                f"bureaus, a paid medical collection is not supposed to remain on a "
+                f"consumer's credit report at all. Reporting it as a derogatory item "
+                f"after payment does not match the stated policy and does not match "
+                f"the actual status of the account. I am requesting deletion."
             )
 
     # ── MEDICAL DEBT PREMATURE ────────────────────────────────────────────
@@ -5451,60 +5258,16 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
 
     # ── LATE COLLECTION CONFLICT ──────────────────────────────────────────
     elif attack_type == "late_collection_conflict":
-        _v6 = variation_idx % 6
-        if _v6 == 0:
-            reason = (
-                f"This account is being reported as both a collection and "
-                f"as having a late payment status. Those two categories "
-                f"cannot coexist. A collection account represents a debt "
-                f"that already defaulted — there is no active payment "
-                f"obligation, so it cannot simultaneously be late. "
-                f"I need the correct single classification applied."
-            )
-        elif _v6 == 1:
-            reason = (
-                f"There is a classification conflict on this account. "
-                f"It carries both a collection status and a late payment "
-                f"indicator at the same time. An account is either in "
-                f"collections or has a payment history — not both. "
-                f"Having both classifications is inaccurate and I am "
-                f"asking for it to be corrected."
-            )
-        elif _v6 == 2:
-            reason = (
-                f"This account shows collection and late payment statuses "
-                f"simultaneously, which are contradictory. Once a debt "
-                f"goes to collections, the original payment schedule no "
-                f"longer applies. Reporting both inflates the negative "
-                f"impact on my credit for a single event. "
-                f"I need the accurate single status applied."
-            )
-        elif _v6 == 3:
-            reason = (
-                f"Collection status and late payment status on the same "
-                f"account do not make sense together. A collection account "
-                f"is a charged-off debt — it does not have active monthly "
-                f"payment obligations. One of these statuses is wrong. "
-                f"I am asking for documentation supporting the correct "
-                f"single classification."
-            )
-        elif _v6 == 4:
-            reason = (
-                f"I see both a collection classification and a late payment "
-                f"status on this account. Those are mutually exclusive "
-                f"categories. Reporting both for the same account means "
-                f"one event is being counted as two separate negatives, "
-                f"which is inaccurate. I need this corrected."
-            )
-        else:
-            reason = (
-                f"This account has conflicting status information: "
-                f"it is listed as a collection but also shows a late "
-                f"payment indicator. A collection account represents "
-                f"a fully defaulted debt — late payment status applies "
-                f"to accounts with active payment schedules, which this "
-                f"is not. The reporting is contradictory and inaccurate."
-            )
+        reason = (
+            f"The classification on this account does "
+            f"not add up. It appears to carry both a late payment status and "
+            f"collection-type language simultaneously, which are contradictory. "
+            f"A debt that has gone to collection has already defaulted — there are "
+            f"no more payments to be 'late' on. I am asking that the correct single "
+            f"classification be verified and applied, and any inaccurate duplicate "
+            f"notation be removed."
+        )
+
     # ── ABSENT BUREAU REPORTING INCONSISTENCY ─────────────────────────────
     elif attack_type == "absent_bureau_reporting_inconsistency":
         if v4 == 0:
@@ -5622,7 +5385,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
     elif attack_type == "cross_bureau_payment_history_date_conflict":
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
         late_str = ", ".join(actual_lates) if actual_lates else "in the payment history"
-        if v2 == 0:
+        if v4 == 0:
             reason = (
                 f"This account shows a late payment "
                 f"({late_str}), but the month it is reported in differs depending on "
@@ -5632,7 +5395,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"provide the original payment records and correct the reporting to "
                 f"show the same accurate date consistently at all three bureaus."
             )
-        else:
+        elif v4 == 1:
             reason = (
                 f"The late payment on this account ({late_str}) "
                 f"is being reported in different months across bureaus. An event "
@@ -5642,60 +5405,164 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
                 f"same accurate month. If the correct date cannot be verified, the "
                 f"late mark must be removed entirely."
             )
-
-    # ── FALLBACK: requires_basic_verification ─────────────────────────────
-    else:
-        # Use every piece of available data to make this unique per account
-        details = []
-        if balance and balance not in ("0","0.0","$0.00",""):
-            details.append(f"a reported balance of {balance}")
-        if pay_status:
-            details.append(f"a payment status of '{pay_status}'")
-        if date_opened:
-            details.append(f"opened {date_opened}")
-        if last_rpt:
-            details.append(f"last reported {last_rpt}")
-
-        detail_str = ""
-        if details:
-            detail_str = f" I see it listed with {', '.join(details)}."
-
-        if v3 == 0:
+        elif v4 == 2:
             reason = (
-                f"I went through my credit report carefully and I have questions "
-                f"about this account.{detail_str} I am "
-                f"asking that they provide the original credit agreement with "
-                f"my signature, a complete payment history from the date the account "
-                f"was opened, documentation of the current balance and how it was "
-                f"calculated, and the exact date I first fell behind. Without all of "
-                f"that, I cannot confirm this information is accurate or complete."
-            )
-        elif v3 == 1:
-            reason = (
-                f"I do not believe the information being reported by the creditor on "
-                f"this account is complete or accurate.{detail_str} I need "
-                f"them to back this up with the original contract, a full payment "
-                f"record showing every transaction, the correct date of first "
-                f"delinquency, and an explanation of the current status. "
-                f"Anything they cannot document with actual records needs to be deleted."
+                f"The month of the late-payment mark ({late_str}) on this account "
+                f"does not line up between bureaus. A missed payment happens once, "
+                f"on one specific date — so it cannot legitimately appear in "
+                f"different months at different bureaus. That is an accuracy problem "
+                f"under 15 U.S.C. §1681e(b). I want them to go back to the original "
+                f"payment records and bring the reporting into alignment across "
+                f"all three bureaus."
             )
         else:
             reason = (
-                f"I am questioning the accuracy of how the creditor is reporting "
-                f"this account.{detail_str} I am asking them to produce "
-                f"all underlying records — the original agreement, the full payment "
-                f"history, and documentation of when I first missed a payment. "
-                f"If any of that cannot be produced, this account is not verifiable "
-                f"and must come off my report."
+                f"A late payment on this account ({late_str}) is being dated "
+                f"differently across bureaus. The actual missed payment, if one "
+                f"occurred, would have a single fixed date — there is no legitimate "
+                f"way for it to move between months depending on which report you "
+                f"look at. I am asking that the original payment records be "
+                f"consulted and the month be corrected consistently. If that date "
+                f"cannot be established, the late mark should come off."
+            )
+
+    # ── FALLBACK: requires_basic_verification ─────────────────────────────
+    else:
+        # v8 selects the OPENING variant (already has bureau shift applied).
+        # We compute a SEPARATE index for detail_pool so that the attempt
+        # loop — which increments variation_idx by coprime strides — can
+        # rotate the detail pool independently from the opening variant.
+        # This dramatically reduces intra-letter collisions when many
+        # accounts fall into the fallback path.
+        #
+        # pool_idx uses a different modulus (coprime with 8) so that as
+        # attempts advance variation_idx, v8 and pool_idx walk through
+        # different cycles — the product of the two gives 8 × 11 = 88
+        # effective variant combinations.
+        pool_idx = variation_idx % 11
+
+        # 11 detail-field rotations — each account in the same letter
+        # highlights different data fields.
+        _DETAIL_POOL_TEMPLATES = [
+            # 0: balance + status
+            lambda: [f"a balance of {balance}" if balance and balance not in ("0","0.0","$0.00","") else None,
+                     f"payment status listed as '{pay_status}'" if pay_status else None],
+            # 1: opened + last reported
+            lambda: [f"an open date of {date_opened}" if date_opened else None,
+                     f"last reported on {last_rpt}" if last_rpt else None],
+            # 2: status + balance (different phrasing from 0)
+            lambda: [f"currently marked as '{pay_status}'" if pay_status else None,
+                     f"a reported balance of {balance}" if balance and balance not in ("0","0.0","$0.00","") else None],
+            # 3: opened alone
+            lambda: [f"originally opened in {date_opened}" if date_opened else None],
+            # 4: last_rpt + status
+            lambda: [f"last updated {last_rpt}" if last_rpt else None,
+                     f"showing a status of '{pay_status}'" if pay_status else None],
+            # 5: all four
+            lambda: [f"a balance of {balance}" if balance and balance not in ("0","0.0","$0.00","") else None,
+                     f"opened {date_opened}" if date_opened else None,
+                     f"status '{pay_status}'" if pay_status else None],
+            # 6: minimal - status only
+            lambda: [f"reported as '{pay_status}'" if pay_status else None],
+            # 7: opened + balance
+            lambda: [f"opened back in {date_opened}" if date_opened else None,
+                     f"balance of {balance}" if balance and balance not in ("0","0.0","$0.00","") else None],
+            # 8: last reported alone
+            lambda: [f"last reported {last_rpt}" if last_rpt else None],
+            # 9: balance alone
+            lambda: [f"a current balance of {balance}" if balance and balance not in ("0","0.0","$0.00","") else None],
+            # 10: opened + last_reported + balance
+            lambda: [f"opened in {date_opened}" if date_opened else None,
+                     f"most recently updated {last_rpt}" if last_rpt else None,
+                     f"a balance of {balance}" if balance and balance not in ("0","0.0","$0.00","") else None],
+        ]
+        detail_parts = [d for d in _DETAIL_POOL_TEMPLATES[pool_idx]() if d is not None]
+
+        if not detail_parts:
+            detail_str = ""
+        elif len(detail_parts) == 1:
+            detail_str = f" The account shows {detail_parts[0]}."
+        else:
+            detail_str = f" The account shows {', and '.join([', '.join(detail_parts[:-1]), detail_parts[-1]]) if len(detail_parts) > 2 else ' and '.join(detail_parts)}."
+
+        # 8 fundamentally different openings and argument structures.
+        # Each treats the dispute from a different angle — not sinónimos cosméticos.
+        if v8 == 0:
+            reason = (
+                f"I pulled my credit report recently and this account caught my attention "
+                f"because the reporting does not feel right to me.{detail_str} Before I accept "
+                f"this as accurate, I need the creditor to show the original signed agreement, "
+                f"the full transaction history from day one, and how they arrived at the current "
+                f"numbers. If they cannot produce those basics, I do not see how this can stay "
+                f"as it is."
+            )
+        elif v8 == 1:
+            reason = (
+                f"Something about this entry does not match what I remember, and I need it looked "
+                f"into.{detail_str} I am asking that the company reporting it be required to "
+                f"back up every number and date with actual records — the original contract, the "
+                f"payment ledger, and a clear breakdown of what I supposedly owe. An item on my "
+                f"credit file has to be provable, and right now I do not see proof."
+            )
+        elif v8 == 2:
+            reason = (
+                f"I am writing about this account because the details being reported do not line "
+                f"up.{detail_str} Under the accuracy standard in 15 U.S.C. §1681e(b), every "
+                f"field reported about me has to be verifiable with real documentation. I need "
+                f"the original agreement, a complete payment record, and an explanation of how "
+                f"the current figures were calculated."
+            )
+        elif v8 == 3:
+            reason = (
+                f"This one needs a closer look.{detail_str} I am not asking for a summary — I "
+                f"am asking for the underlying records the creditor should have on file: the "
+                f"signed agreement, the itemized payment history, and documentation supporting "
+                f"the status they are reporting. If those records do not exist or do not match, "
+                f"this entry should not be here."
+            )
+        elif v8 == 4:
+            reason = (
+                f"I want this account reviewed carefully.{detail_str} I have reason to believe "
+                f"the information being furnished is either incomplete or out of step with what "
+                f"actually happened. Please have the creditor produce the underlying documentation "
+                f"— contract, payment history, balance breakdown — so the accuracy can be confirmed "
+                f"or the account can be corrected."
+            )
+        elif v8 == 5:
+            reason = (
+                f"I flagged this account while going through my file.{detail_str} My concern "
+                f"is simple: the information as reported cannot be taken at face value without "
+                f"supporting records. I am requesting the original contract, a full account "
+                f"history, and verification of the current status. If any of that is missing, "
+                f"the account has not been properly verified."
+            )
+        elif v8 == 6:
+            reason = (
+                f"I need to dispute what is being reported on this account.{detail_str} The "
+                f"creditor needs to show the paperwork behind this entry — not just repeat "
+                f"the same figures back. That means the original agreement with my signature, "
+                f"the detailed transaction history, and the actual basis for the status being "
+                f"reported. Without those, I do not consider this verified."
+            )
+        else:
+            reason = (
+                f"This account is on my dispute list for a reason.{detail_str} I am not "
+                f"willing to leave an entry on my credit file that the creditor cannot fully "
+                f"document. Please require them to send over the contract, the full payment "
+                f"record, and documentation of how the current balance and status were "
+                f"determined. Anything they cannot support with records needs to come off."
             )
 
     # Append secondary flags paragraph if any additional issues were detected
+    # The secondary flags paragraph now ALSO rotates, so cross-bureau letters
+    # for the same account get different secondary-flag phrasings.
     secondary_flags = item.get("secondary_flags", [])
-    flags_para = _build_secondary_flags_paragraph(secondary_flags)
-    # ── Closing demand — rotate through pool, never repeat within same letter ──
-    # The pool mixes explicit deletion demands with implicit ones (30% no explicit close)
-    # so no two accounts in the same letter end with the same phrase.
-    _CLOSING_POOL = [
+    flags_para = _build_secondary_flags_paragraph(secondary_flags, variation_idx=variation_idx)
+
+    # Closer rotation — NEVER emit "DELETE OFF MY CREDIT REPORT" in caps again.
+    # Pool of 12 closers; 2 are intentionally empty (trailing word from the body
+    # is enough — no need for a mechanical deletion demand on every item).
+    _CLOSER_POOL = [
         " Please delete this item from my file.",
         " This tradeline should be removed from my report.",
         " I am requesting deletion of this account.",
@@ -5706,15 +5573,11 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0) -> str:
         " Please take this off my file.",
         " Delete this account from my report.",
         " I want this removed.",
-        "",   # implicit — last sentence of reason already demands removal
-        "",   # implicit — last sentence of reason already demands removal
+        "",  # empty — body carries the demand
+        "",  # empty — body carries the demand
     ]
-    # Deterministic rotation: hash of account+furnisher so same account
-    # always gets the same closing, but different accounts get different ones.
-    import hashlib as _hl
-    _closing_key = abs(int(_hl.md5((acct + furnisher + attack_type).encode()).hexdigest(), 16)) % len(_CLOSING_POOL)
-    closing = _CLOSING_POOL[_closing_key]
-    return reason + flags_para + closing
+    closer = _CLOSER_POOL[variation_idx % len(_CLOSER_POOL)]
+    return reason + flags_para + closer
 
 
 
@@ -6006,38 +5869,7 @@ def build_dispute_letter_engine(
                 else:
                     bureau_resp_block = ""
 
-                # Salutation pool — rotates by bureau+group+seed
-                _SALUTATIONS = [
-                    "To Whom It May Concern,",
-                    "Hello,",
-                    "Good morning,",
-                    "To Whom It May Concern,",
-                    "Hi,",
-                    "To Whom It May Concern,",
-                    "",
-                    "To Whom It May Concern,",
-                ]
-                # bureau_off and group_pos are defined in _tpl_idx closure scope;
-                # recompute here directly to avoid scope issues
-                _sal_bureau_off = {"transunion": 0, "experian": 3, "equifax": 6}.get(bureau, 0)
-                _sal_group_off  = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}.get(group_key, 0)
-                _sal_idx = (_sal_bureau_off + _sal_group_off + (variation_seed % 8)) % len(_SALUTATIONS)
-                _salutation = _SALUTATIONS[_sal_idx]
-
-                # Replace the hardcoded salutation in the template
-                _tpl_with_sal = tpl
-                for _old_sal in (
-                    "To Whom It May Concern,\n\n",
-                    "Dear Sir or Madam,\n\n",
-                    "Hello,\n\n",
-                    "Hi,\n\n",
-                    "Good morning,\n\n",
-                ):
-                    if _tpl_with_sal.startswith(_old_sal):
-                        _tpl_with_sal = (_salutation + "\n\n" if _salutation else "") + _tpl_with_sal[len(_old_sal):]
-                        break
-
-                opening      = _tpl_with_sal.format(
+                opening      = tpl.format(
                     count=count_str,
                     verb=they_verb,
                     they_verb=they_verb,
@@ -6067,19 +5899,60 @@ def build_dispute_letter_engine(
                 # Account list
                 account_lines = []
                 used_reasons: set[str] = set()
+                # ─── DISEÑO DE VARIANT SELECTION ─────────────────────────────
+                # La garantía crítica: la MISMA cuenta en cartas a DIFERENTES
+                # burós debe seleccionar DIFERENTE variante del pool. Para
+                # lograr esto de forma matemáticamente robusta:
+                #
+                # 1) El "account fingerprint" (furnisher + account_number +
+                #    attack_type) determina el variation_idx BASE. Este base
+                #    es IDÉNTICO para la misma cuenta en los 3 burós, sin
+                #    importar su posición (idx) en la carta.
+                #
+                # 2) _account_reason recibe `bureau` y aplica shifts
+                #    calibrados para 2/3/4/8-variant pools, garantizando
+                #    slots distintos entre burós.
+                #
+                # 3) El attempt loop con coprime-stride resuelve colisiones
+                #    intra-carta (dos cuentas con el mismo fingerprint casi
+                #    idéntico — raro, pero se desambigua avanzando el slot).
+                #
+                # El resultado: PORTFOLIO en TU/EXP/EQF siempre selecciona
+                # variantes diferentes incluso si tiene idx=4 en una carta
+                # e idx=3 en otra.
+
                 for idx, item in enumerate(items, 1):
                     fname  = item.get("furnisher_name", "")
                     facct  = item.get("account_number", "")
                     at     = item.get("attack_type", "")
-                    base_vi   = idx - 1
-                    # Include bureau in hash so the same account gets a different
-                    # variant in Experian vs Equifax — prevents cross-bureau fingerprinting
-                    acct_hash = abs(hash(facct + fname + at + bureau)) % 89
-                    # variation_seed shifts on each Regenerate press
-                    variation_idx = base_vi + acct_hash + variation_seed * 7
+                    # Account fingerprint — ESTABLE cross-bureau.
+                    # No incluye idx ni bureau. Mismo valor en las 3 cartas.
+                    account_fingerprint = abs(hash(facct + fname + at))
+                    # variation_seed lo rota on Regenerate; idx solo sirve
+                    # como disambiguator intra-carta si dos cuentas tienen
+                    # fingerprints que colisionan en módulo pequeño.
+                    variation_idx = account_fingerprint + variation_seed * 7
                     reason = ""
-                    for attempt in range(20):
-                        reason = _account_reason(item, variation_idx=variation_idx + attempt)
+                    # Attempt loop — strides ordenados para cubrir todos los
+                    # pool sizes sin ciclar: primero los 4 strides coprimos
+                    # con 4 (0,1,2,3) que garantizan cubrir un pool v4
+                    # completo. Luego strides coprimos con 8 (5,7,3,1 en
+                    # distintos turnos). Finalmente fallback numérico.
+                    _ATTEMPT_STRIDES = [
+                        0, 1, 2, 3,          # cubre v4 completamente
+                        5, 7, 9, 11,         # avanza en v8 sin repetir
+                        4, 6,                # cierra ciclo v8
+                        13, 15, 17, 19, 21,  # sigue avanzando
+                        23, 25, 27, 29, 31,
+                        33, 35, 37, 39, 41,
+                        8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40,
+                    ]
+                    for stride in _ATTEMPT_STRIDES:
+                        reason = _account_reason(
+                            item,
+                            variation_idx=variation_idx + stride,
+                            bureau=bureau,
+                        )
                         if reason not in used_reasons:
                             break
                     if reason in used_reasons:
@@ -6100,26 +5973,11 @@ def build_dispute_letter_engine(
 
                 accounts_block = "\n\n".join(account_lines)
 
-                # Rotate the accounts section header — no consumer ever writes
-                # "The following accounts must be deleted immediately" every time
-                _SECTION_HEADERS = [
-                    "The following accounts must be deleted immediately:\n\n",
-                    "I am formally disputing the following accounts:\n\n",
-                    "The accounts listed below contain inaccurate information:\n\n",
-                    "I am requesting investigation and correction of these accounts:\n\n",
-                    "The following items on my report need to be addressed:\n\n",
-                    "I dispute the accuracy of these accounts:\n\n",
-                ]
-                _hdr_bureau_off = {"transunion": 0, "experian": 3, "equifax": 6}.get(bureau, 0)
-                _hdr_group_off  = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}.get(group_key, 0)
-                _hdr_idx = (_hdr_bureau_off + _hdr_group_off + variation_seed) % len(_SECTION_HEADERS)
-                _section_header = _SECTION_HEADERS[_hdr_idx]
-
                 body_parts = []
                 if pi_section:
                     body_parts.append(pi_section)
                 body_parts.append(
-                    _section_header + accounts_block
+                    "The following accounts must be deleted immediately:\n\n" + accounts_block
                 )
 
                 full = (
@@ -7364,11 +7222,23 @@ def build_inquiry_dispute_letter(
         f"and removed."
     )
 
+    # Pool de cierres humanizados para inquiries — rota por posicion
+    _INQUIRY_CLOSER_POOL = [
+        " Please remove this inquiry.",
+        " This inquiry should be deleted.",
+        " I am requesting deletion of this inquiry.",
+        " Take this inquiry off my report.",
+        "",  # vacio — el reason carga el cierre
+        " This one needs to come off.",
+        " Please delete it.",
+        "",  # vacio
+    ]
     inquiry_lines = []
     for idx, atk in enumerate(attacks, 1):
+        closer = _INQUIRY_CLOSER_POOL[idx % len(_INQUIRY_CLOSER_POOL)]
         inquiry_lines.append(
             f"{idx}. {atk.get('creditor_name', atk.get('creditors', ['?'])[0])}\n"
-            f"Reason: {atk['reason']} DELETE OFF MY CREDIT REPORT."
+            f"Reason: {atk['reason']}{closer}"
         )
 
     legal_note = (
@@ -10416,7 +10286,6 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
             f"reinvestigation under 15 U.S.C. §1681i(a)."
         )
     )
-
 
 
 if __name__ == "__main__":
