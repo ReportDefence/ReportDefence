@@ -2711,6 +2711,28 @@ def build_legal_detection_summary(
 # ATTACK SCORING ENGINE
 # =========================
 
+def get_recommended_round(severity_score: int, attack_type: str = "") -> str:
+    """Recommend dispute round based on severity."""
+    if severity_score >= 85:
+        return "round_1"
+    elif severity_score >= 60:
+        return "round_1"
+    else:
+        return "round_1"
+
+
+def get_attack_priority(severity_score: int) -> str:
+    """Convert numeric severity score to priority label."""
+    if severity_score >= 90:
+        return "critical"
+    elif severity_score >= 70:
+        return "high"
+    elif severity_score >= 50:
+        return "medium"
+    else:
+        return "low"
+
+
 def get_attack_severity_score(attack_type: str) -> int:
     mapping = {
         "duplicate_account_number": 90,
@@ -5984,8 +6006,7 @@ def build_dispute_letter_engine(
                 else:
                     bureau_resp_block = ""
 
-                # Salutation pool — rotates by bureau+group+seed to avoid
-                # "To Whom It May Concern" on every single letter
+                # Salutation pool — rotates by bureau+group+seed
                 _SALUTATIONS = [
                     "To Whom It May Concern,",
                     "Hello,",
@@ -5993,10 +6014,14 @@ def build_dispute_letter_engine(
                     "To Whom It May Concern,",
                     "Hi,",
                     "To Whom It May Concern,",
-                    "",   # no salutation — start directly with body
+                    "",
                     "To Whom It May Concern,",
                 ]
-                _sal_idx = (bureau_off + g + (variation_seed % 8)) % len(_SALUTATIONS)
+                # bureau_off and group_pos are defined in _tpl_idx closure scope;
+                # recompute here directly to avoid scope issues
+                _sal_bureau_off = {"transunion": 0, "experian": 3, "equifax": 6}.get(bureau, 0)
+                _sal_group_off  = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}.get(group_key, 0)
+                _sal_idx = (_sal_bureau_off + _sal_group_off + (variation_seed % 8)) % len(_SALUTATIONS)
                 _salutation = _SALUTATIONS[_sal_idx]
 
                 # Replace the hardcoded salutation in the template
