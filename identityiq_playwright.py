@@ -178,44 +178,79 @@ def login_and_fetch_json(username: str, password: str, ssn_last4: str) -> dict:
                             pass
 
                     # Fill the SSN input
+                    # NOTE: IdentityIQ's SSN field has type=None (no type attribute) in the DOM.
+                    # CSS attribute selectors work on present attributes only — use JS evaluation
+                    # as primary method, CSS selectors as fallback.
                     filled = False
-                    for sel in (
-                        "input[name='userSecurityAnswer']",  # confirmed selector
-                        "input[placeholder*='four']",
-                        "input[placeholder*='SSN']",
-                        "input[placeholder*='last 4']",
-                        "input[name*='ssn']",
-                        "input[name*='answer']",
-                        "input[name*='Security']",
-                        "input[maxlength='4']",
-                    ):
-                        try:
-                            el = page.query_selector(sel)
-                            if el:
-                                el.triple_click()
-                                el.type(ssn_last4)
-                                print(f"[PW] Filled SSN with: {sel} value={ssn_last4}")
-                                filled = True
-                                break
-                        except Exception:
-                            continue
 
-                    if not filled and all_inputs:
-                        # Fallback: first input with type=None or type=text (not checkbox/hidden)
-                        for inp in all_inputs:
+                    # Primary: use JavaScript to find and fill by name attribute directly
+                    # This bypasses Playwright's CSS selector issues with type=None inputs
+                    try:
+                        filled_js = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector("input[name='userSecurityAnswer']");
+                                if (el) {{
+                                    el.focus();
+                                    el.value = '{ssn_last4}';
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                    return true;
+                                }}
+                                return false;
+                            }}
+                        """)
+                        if filled_js:
+                            print(f"[PW] Filled SSN via JS evaluation value={ssn_last4}")
+                            filled = True
+                    except Exception as e:
+                        print(f"[PW] JS fill failed: {{e}}")
+
+                    # Secondary: CSS selectors
+                    if not filled:
+                        for sel in (
+                            "input[name='userSecurityAnswer']",
+                            "input[placeholder*='four']",
+                            "input[placeholder*='SSN']",
+                            "input[placeholder*='last 4']",
+                            "input[name*='ssn']",
+                            "input[name*='answer']",
+                            "input[name*='Security']",
+                            "input[maxlength='4']",
+                        ):
                             try:
-                                itype = inp.get_attribute('type') or ''
-                                if itype not in ('hidden', 'submit', 'button', 'checkbox', 'radio', 'text', 'search'):
-                                    inp.triple_click()
-                                    inp.type(ssn_last4)
-                                    print(f"[PW] Filled SSN fallback input (type={itype})")
+                                el = page.query_selector(sel)
+                                if el:
+                                    el.triple_click()
+                                    el.type(ssn_last4)
+                                    print(f"[PW] Filled SSN with selector: {sel} value={ssn_last4}")
                                     filled = True
                                     break
                             except Exception:
                                 continue
 
+                    # Tertiary: iterate all inputs — include type=None (no type attr) explicitly
+                    if not filled and all_inputs:
+                        EXCLUDED = ('hidden', 'submit', 'button', 'checkbox', 'radio', 'search')
+                        for inp in all_inputs:
+                            try:
+                                itype = inp.get_attribute('type')  # None = no type attr = likely text input
+                                iname = inp.get_attribute('name') or ''
+                                # Skip clearly non-text inputs
+                                if itype in EXCLUDED:
+                                    continue
+                                # Skip vendor/search inputs by name
+                                if any(k in iname.lower() for k in ('search', 'vendor', 'group')):
+                                    continue
+                                inp.triple_click()
+                                inp.type(ssn_last4)
+                                print(f"[PW] Filled SSN tertiary fallback name={iname} type={itype}")
+                                filled = True
+                                break
+                            except Exception:
+                                continue
+
                     if not filled:
-                        print(f"[PW] Could not fill SSN input")
+                        print(f"[PW] Could not fill SSN input — manual intervention needed")
 
                     # Click submit button
                     for sel in (
