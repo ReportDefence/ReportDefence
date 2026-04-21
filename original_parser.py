@@ -6110,7 +6110,9 @@ def build_dispute_letter_engine(
                     "The following items on my report need to be addressed:\n\n",
                     "I dispute the accuracy of these accounts:\n\n",
                 ]
-                _hdr_idx = (bureau_off + g + variation_seed) % len(_SECTION_HEADERS)
+                _hdr_bureau_off = {"transunion": 0, "experian": 3, "equifax": 6}.get(bureau, 0)
+                _hdr_group_off  = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}.get(group_key, 0)
+                _hdr_idx = (_hdr_bureau_off + _hdr_group_off + variation_seed) % len(_SECTION_HEADERS)
                 _section_header = _SECTION_HEADERS[_hdr_idx]
 
                 body_parts = []
@@ -10414,6 +10416,7 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
             f"reinvestigation under 15 U.S.C. §1681i(a)."
         )
     )
+
 
 
 if __name__ == "__main__":
