@@ -2228,10 +2228,38 @@ def build_legal_attacks_from_account_number_groups(bureau: str, accounts: list[d
 
 
 def is_collector_name(name: str) -> bool:
-    """True if the furnisher name is a debt collector / debt buyer."""
-    markers = ["lvnv", "portfolio", "cavalry", "midland", "resurgent", "asset acceptance",
-                "unifin", "amsher", "convergent", "national credit", "enhanced recovery"]
+    """
+    True if the furnisher name is a debt collector / debt buyer.
+
+    Two detection strategies:
+    1. Name matches known-collector marker list (comprehensive)
+    2. Name contains "(Original Creditor: X)" label — this pattern by
+       itself IS definitive evidence of a collector, since original
+       creditors never declare themselves as "original creditor" in their
+       own name. Only collectors/debt-buyers add that label.
+    """
     n = safe_lower(name)
+
+    # Strategy 2 (covers edge cases like FCO, IC System, small agencies)
+    if "(original creditor:" in n:
+        return True
+
+    # Strategy 1 — comprehensive marker list
+    markers = [
+        # Major debt buyers
+        "lvnv", "portfolio", "cavalry", "midland", "resurgent", "asset acceptance",
+        # Collection agencies (common)
+        "unifin", "amsher", "convergent", "national credit", "enhanced recovery",
+        "receivable", "recovery", "credit management", "collection",
+        # Specific known collectors
+        "fco", "fcs", "ic system", "ars", "erc", "gc services",
+        "hunter warfield", "professional", "mediation", "financial asset",
+        "credit bureau", "debt collect", "debt buyer", "client services",
+        # Healthcare collectors
+        "ability recovery", "medical recovery", "healthcare collect",
+        # Common rent/housing collectors
+        "rent recovery", "tenant",
+    ]
     return any(m in n for m in markers)
 
 
@@ -4146,7 +4174,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     # The result: cross-bureau duplicate variants are impossible regardless
     # of the attack pool's size.
     if bureau:
-        item_parity = abs(hash(acct + furnisher)) % 2
+        # Use MD5 for deterministic parity across process runs.
+        import hashlib as _hl
+        _parity_hash = _hl.md5((acct + furnisher).encode("utf-8")).hexdigest()
+        item_parity = int(_parity_hash[:8], 16) % 2
         v2_shifts = {
             "transunion": 0,
             "experian":   1,
@@ -4415,7 +4446,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         "collector_original_creditor_self_declared",
         "collector_original_creditor_pattern",
     }:
-        if v4 == 0:
+        # 4 variantes base × 2 sub-variantes = 8 combinaciones efectivas.
+        # Sub-variante se selecciona con variation_idx % 7 (coprimo con 4)
+        # para garantizar que dos cuentas que caigan en el mismo v4 slot
+        # reciban sub-variantes distintas.
+        sub_variant = (variation_idx % 7) % 2
+
+        if v4 == 0 and sub_variant == 0:
             reason = (
                 f"This account is being reported by what "
                 f"appears to be a collection company. Before I accept this as accurate, "
@@ -4427,7 +4464,17 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"it under 15 U.S.C. §1681s-2(b). Without all of that, this account "
                 f"cannot be verified."
             )
-        elif v4 == 1:
+        elif v4 == 0 and sub_variant == 1:
+            reason = (
+                f"A collection company is reporting this account and I need them to "
+                f"prove they have the right to do so. What I am asking for is specific: "
+                f"the original agreement I signed with the original creditor, the full "
+                f"chain of assignment documenting how the debt reached this agency, and "
+                f"the legal basis for them reporting it under 15 U.S.C. §1681s-2(b). "
+                f"Those are the records they should have in hand — if they do not, "
+                f"this tradeline has not been verified."
+            )
+        elif v4 == 1 and sub_variant == 0:
             reason = (
                 f"I dispute whether the creditor has any legal authority to report "
                 f"this account on my credit file. For a collection account, "
@@ -4438,7 +4485,18 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"the original creditor's records — not from their own files. "
                 f"If any part of that cannot be produced, this account is unverifiable."
             )
-        elif v4 == 2:
+        elif v4 == 1 and sub_variant == 1:
+            reason = (
+                f"The right of this company to report the account on my file is in "
+                f"question, and I want that addressed. Since this is a collection, "
+                f"the burden is on them to produce the signed original contract, every "
+                f"step of the assignment chain from the original creditor, and "
+                f"documentation of their standing under federal law. I also want the "
+                f"original date of first delinquency — from the original creditor's "
+                f"records, not from theirs. Any gap in that proof leaves this account "
+                f"unverifiable."
+            )
+        elif v4 == 2 and sub_variant == 0:
             reason = (
                 f"A collection agency is furnishing this account, and I want to "
                 f"confirm they have the right to do so. Simply showing up on my "
@@ -4450,7 +4508,18 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"own records. Anything they cannot support with primary documentation "
                 f"should be removed."
             )
-        else:
+        elif v4 == 2 and sub_variant == 1:
+            reason = (
+                f"Because this is being reported by a collection agency, I want to "
+                f"see actual proof of their authority to report it. Appearing on my "
+                f"file is not verification in itself. They need to show how and when "
+                f"the debt was transferred to them, produce the original signed "
+                f"contract, and document each assignment step back to the original "
+                f"creditor. The original date of first delinquency also has to come "
+                f"from the original creditor's records. What they cannot back up "
+                f"with primary documents should be removed."
+            )
+        elif v4 == 3 and sub_variant == 0:
             reason = (
                 f"This entry looks like a third-party collection, and that carries "
                 f"specific verification requirements under federal law. The agency "
@@ -4460,6 +4529,17 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"the account legally reached this agency, and the original delinquency "
                 f"date from the creditor's files. Reporting without those records "
                 f"does not meet the accuracy standard of 15 U.S.C. §1681e(b)."
+            )
+        else:  # v4 == 3 and sub_variant == 1
+            reason = (
+                f"What is being reported here appears to be a third-party collection, "
+                f"which triggers heightened verification requirements. The agency "
+                f"cannot satisfy those by pointing back at its own data — it has to "
+                f"produce the original signed contract, a documented chain of transfer "
+                f"from the original creditor, and the actual date of first delinquency "
+                f"from the creditor's own files. Reporting without being able to "
+                f"produce those records does not meet the accuracy standard under "
+                f"15 U.S.C. §1681e(b)."
             )
 
     # ── DUPLICATE ACCOUNT / SAME BALANCE ──────────────────────────────────
@@ -6029,7 +6109,15 @@ def build_dispute_letter_engine(
                         str(item.get("payment_status", "")) + "|" +
                         str(item.get("negative_type", ""))
                     )
-                    account_fingerprint = abs(hash(fingerprint_basis))
+                    # Use MD5 instead of Python's built-in hash() because
+                    # hash() randomizes between processes (PYTHONHASHSEED)
+                    # which would cause non-deterministic variant selection
+                    # across different runs of the same generation. MD5 is
+                    # deterministic and produces identical output regardless
+                    # of Python process/version.
+                    import hashlib as _hl
+                    _h = _hl.md5(fingerprint_basis.encode("utf-8")).hexdigest()
+                    account_fingerprint = int(_h[:16], 16)  # 64-bit unsigned
                     # variation_seed lo rota on Regenerate; idx solo sirve
                     # como disambiguator intra-carta si dos cuentas tienen
                     # fingerprints que colisionan en módulo pequeño.
