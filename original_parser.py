@@ -31,7 +31,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     if full_text and len(full_text) > 200:
         return full_text
 
-    # ── Fallback: OCR ─────────────────────────────────────────────────────
+    # -- Fallback: OCR -----------------------------------------------------
     # PDF has no extractable text (Microsoft Print to PDF, scanned, etc.)
     # Rasterize each page and run pytesseract OCR.
     try:
@@ -97,6 +97,33 @@ def clean_name_key(name: str) -> str:
 
 def mask_stars_to_x(value: str) -> str:
     return value.replace("*", "X")
+
+
+def last_four_digits(value: str) -> str:
+    """
+    Extract the last 4 real digits of an account number, ignoring any
+    masking characters (asterisks, X, spaces, dashes).
+
+    Credit reports often show account numbers like:
+      '51780584****'     -> returns '0584'  (NOT 'XXXX')
+      '45531**'          -> returns '5531'  (NOT '31XX')
+      '444796257664****' -> returns '7664'
+      '****1234'         -> returns '1234'
+      '1234567890'       -> returns '7890'
+      '1234'             -> returns '1234'
+      ''                 -> returns ''
+
+    If fewer than 4 real digits exist, returns whatever digits are available.
+    This is what goes in the letter as 'account ending XXXX' so the bureau
+    can match the tradeline in e-OSCAR.
+    """
+    if not value:
+        return ""
+    # Keep only numeric digits, drop asterisks, X, dashes, spaces, etc.
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not digits:
+        return ""
+    return digits[-4:] if len(digits) >= 4 else digits
 
 
 def looks_like_header_or_noise(line: str) -> bool:
@@ -183,11 +210,11 @@ def split_multi_values(value: str) -> list[str]:
 
     KEY RULES (in priority order):
     1. Account numbers:  digits/letters/- followed immediately by *+ or X+
-       are ONE atomic token  →  "426937203396****"  is a single token.
+       are ONE atomic token  ->  "426937203396****"  is a single token.
     2. Payment status multi-word values:  "Late 120 Days", "Collection/Chargeoff"
        are ONE atomic token.
-    3. Dollar amounts, dates → atomic.
-    4. Single words (Open, Closed, Derogatory …) → atomic.
+    3. Dollar amounts, dates -> atomic.
+    4. Single words (Open, Closed, Derogatory ...) -> atomic.
     5. Cap at 3 tokens (one per bureau).
     """
     import re as _re
@@ -195,7 +222,7 @@ def split_multi_values(value: str) -> list[str]:
     if not value:
         return []
 
-    # Ordered patterns — tried LEFT to RIGHT, GREEDY
+    # Ordered patterns, tried LEFT to RIGHT, GREEDY
     atomic_patterns = [
         # account-number-style: alphanumeric prefix + mask suffix (****  XXXX  X***  etc.)
         r"[A-Za-z0-9\-/]+[X\*]{2,}",
@@ -288,27 +315,6 @@ def join_continuation_lines(lines: list[str], start_index: int, max_scan: int = 
 # =========================
 # ACCOUNT NAME DETECTION
 # =========================
-
-def normalize_furnisher_name(name: str) -> str:
-    """
-    Normalize furnisher names for matching/grouping purposes.
-    Strips common legal suffixes and whitespace so that
-    'LVNV FUNDING' and 'LVNV FUNDING LLC' resolve to the same key,
-    and 'LVNV FUNDING (Original Creditor: ...)' also matches.
-    """
-    import re as _re
-    n = name.upper().strip()
-    # Strip parenthetical annotations like "(Original Creditor: ...)"
-    n = _re.sub(r"\(.*?\)", "", n).strip()
-    # Strip common legal suffixes
-    for suffix in [" LLC", " INC", " CORP", " LTD", " NA", " N.A.", " N A",
-                   " CO", " LP", " PLC", " BANK", " FINANCIAL", " SERVICES"]:
-        if n.endswith(suffix):
-            n = n[:-len(suffix)].strip()
-    # Normalize spaces
-    n = _re.sub(r"\s+", " ", n).strip()
-    return n
-
 
 def find_account_name(lines: list[str], idx: int) -> str:
     candidates = []
@@ -509,7 +515,7 @@ def _detect_active_bureaus(raw_acc: dict[str, Any]) -> list[str] | None:
     use the payment history structure to determine WHICH bureau that is.
 
     The payment history table always labels rows as "TransUnion", "Experian",
-    "Equifax" — even if only one bureau has data. We use the bureau that
+    "Equifax", even if only one bureau has data. We use the bureau that
     actually has payment entries (or any non-empty row) as the anchor.
 
     Returns a list of active bureau display names in PDF column order,
@@ -534,7 +540,7 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
     balances  = split_multi_values(raw_acc["balance_raw"])
     past_dues = split_multi_values(raw_acc["past_due_raw"])
 
-    # New fields — split per bureau
+    # New fields, split per bureau
     bureau_codes    = split_multi_values(raw_acc.get("bureau_code_raw", ""))
     monthly_pays    = split_multi_values(raw_acc.get("monthly_payment_raw", ""))
     no_of_months    = split_multi_values(raw_acc.get("no_of_months_raw", ""))
@@ -569,24 +575,24 @@ def expand_raw_account_to_bureaus(raw_acc: dict[str, Any]) -> list[dict[str, Any
     late_summary      = raw_acc.get("late_payment_summary", {})
     ph_structured_raw = raw_acc.get("payment_history_structured", {})
 
-    # ── Bureau assignment fix ─────────────────────────────────────────────
-    # When a block has only 1 column of data, positional logic (idx=0→TU)
+    # -- Bureau assignment fix ---------------------------------------------
+    # When a block has only 1 column of data, positional logic (idx=0->TU)
     # is wrong if the data actually belongs to Experian or Equifax.
     # Use the payment history to detect the correct bureau(s).
     active_bureaus = _detect_active_bureaus(raw_acc)
 
     # Build the ordered list of bureau display names for this block
     if active_bureaus and len(active_bureaus) == max_len:
-        # Payment history confirms exactly which bureaus have data — use them
+        # Payment history confirms exactly which bureaus have data, use them
         ordered_displays = active_bureaus
     elif active_bureaus and max_len == 1 and len(active_bureaus) == 1:
         # Single-bureau block: payment history tells us which one
         ordered_displays = active_bureaus
     else:
-        # Multi-bureau block or no payment history — fall back to positional
+        # Multi-bureau block or no payment history, fall back to positional
         ordered_displays = _bureau_display
 
-    # Map display name → BUREAUS internal key
+    # Map display name -> BUREAUS internal key
     _display_to_key = {
         "TransUnion": "transunion",
         "Experian":   "experian",
@@ -753,37 +759,6 @@ def infer_missing_names(inventory: dict[str, list[dict[str, Any]]]) -> dict[str,
             elif acct in account_lookup:
                 acc["name"] = account_lookup[acct]
 
-    # ── Cross-name normalization pass ────────────────────────────────────
-    # If two entries share the same account number and normalized furnisher
-    # name key (e.g. "LVNV FUNDING" vs "LVNV FUNDING LLC"), unify the name
-    # to whichever has the most complete version (longest non-parenthetical).
-    norm_name_to_canonical: dict[tuple[str, str], str] = {}
-    for bureau_accounts in inventory.values():
-        for acc in bureau_accounts:
-            acct = normalize_spaces(acc.get("account_number", ""))
-            name = normalize_spaces(acc.get("name", ""))
-            if not acct or not name:
-                continue
-            # Strip parentheticals for the key but keep full name as value
-            import re as _re2
-            name_no_paren = _re2.sub(r"\(.*?\)", "", name).strip()
-            norm_key = (acct, normalize_furnisher_name(name))
-            existing = norm_name_to_canonical.get(norm_key, "")
-            # Prefer shorter name without parenthetical annotation as canonical
-            if not existing or len(name_no_paren) < len(_re2.sub(r"\(.*?\)", "", existing).strip()):
-                norm_name_to_canonical[norm_key] = name_no_paren if name_no_paren else name
-
-    for bureau_accounts in inventory.values():
-        for acc in bureau_accounts:
-            acct = normalize_spaces(acc.get("account_number", ""))
-            name = normalize_spaces(acc.get("name", ""))
-            if not acct or not name:
-                continue
-            norm_key = (acct, normalize_furnisher_name(name))
-            canonical = norm_name_to_canonical.get(norm_key)
-            if canonical and canonical != name:
-                acc["name"] = canonical
-
     return inventory
 
 
@@ -860,7 +835,7 @@ def normalize_inventory_final(inventory: dict[str, list[dict[str, Any]]]) -> dic
 
 
 # =========================
-# DOFD ENGINE — §1681c / §605
+# DOFD ENGINE, section 1681c / section 605
 # =========================
 
 def parse_date_field(value: str) -> "datetime | None":
@@ -886,14 +861,14 @@ def estimate_dofd(acc: dict[str, Any]) -> "datetime | None":
     """
     Estimate the Date of First Delinquency (DOFD) for a negative account.
 
-    Priority order (FCRA §1681c(c) logic):
-    1. Date of Last Payment (DOLP) + 30 days → first missed payment
-    2. Date Last Active — only if it predates Last Reported by 60+ days
+    Priority order (FCRA section 1681c(c) logic):
+    1. Date of Last Payment (DOLP) + 30 days -> first missed payment
+    2. Date Last Active, only if it predates Last Reported by 60+ days
        AND predates the collector's Date Opened (to reject collector-updated values)
-    3. None — cannot estimate, flag as dofd_unknown
+    3. None, cannot estimate, flag as dofd_unknown
 
     Critical rule for collectors:
-    When Date Last Active = Last Reported (±30 days), the collector is simply
+    When Date Last Active = Last Reported (+/-30 days), the collector is simply
     updating the "active" date to today to keep the tradeline alive. This is
     NOT the actual delinquency date. We must reject this value and flag the
     account for DOFD verification demand.
@@ -922,7 +897,7 @@ def estimate_dofd(acc: dict[str, Any]) -> "datetime | None":
         )
 
         if is_collector_refresh or is_after_collector_opened:
-            # DLA is unreliable — collector is manipulating it
+            # DLA is unreliable, collector is manipulating it
             # Return None so dofd_confidence = 'unknown'
             return None
 
@@ -933,7 +908,7 @@ def estimate_dofd(acc: dict[str, Any]) -> "datetime | None":
 
 def calculate_fcra_expiration(dofd: "datetime") -> "datetime":
     """
-    Calculate the FCRA §1681c(c) expiration date.
+    Calculate the FCRA section 1681c(c) expiration date.
     7-year clock starts 180 days after DOFD.
     """
     from datetime import timedelta
@@ -958,7 +933,7 @@ def build_dofd_engine(
     - is_obsolete: True if report_date >= fcra_expiration
     - dofd_confidence: 'high' (DOLP available) | 'medium' (DLA fallback) | 'unknown'
     - re_aging_flag: True if collector's Date Opened > DOFD estimate by > 90 days
-      (potential §1681c violation — collector is using its own open date as DOFD)
+      (potential section 1681c violation, collector is using its own open date as DOFD)
 
     Returns a dict of bureau -> list of enriched negative accounts.
     """
@@ -1058,7 +1033,7 @@ def detect_obsolete_account_attacks(
 ) -> list[dict[str, Any]]:
     """
     Detect accounts that have exceeded the FCRA 7-year reporting limit.
-    These must be removed under §1681c(a)(4) regardless of any other dispute.
+    These must be removed under section 1681c(a)(4) regardless of any other dispute.
     """
     attacks = []
 
@@ -1104,7 +1079,7 @@ def detect_re_aging_attacks(
     Detect potential re-aging: collector's Date Opened is significantly
     later than the estimated DOFD, suggesting the collector may be using
     its own open date to artificially extend the reporting period.
-    This violates §1681c(c) and is a common FDCPA violation.
+    This violates section 1681c(c) and is a common FDCPA violation.
     """
     attacks = []
 
@@ -1158,14 +1133,14 @@ def is_negative(acc):
     if "late" in payment and "current" not in payment:
         return True
 
-    # Paid collection — Status=Paid but was a collection/chargeoff
+    # Paid collection, Status=Paid but was a collection/chargeoff
     if "paid" in status and (
         "collection" in raw or "chargeoff" in raw or "charged off" in raw
         or "profit and loss" in raw
     ):
         return True
 
-    # Child support — §1681s-1 special account, always negative if past due
+    # Child support, section 1681s-1 special account, always negative if past due
     acct_detail = safe_lower(acc.get("account_type_detail", ""))
     if any(k in acct_detail for k in ["child support", "family support", "spousal support"]):
         if any(k in payment for k in ["late", "collection", "chargeoff", "past due"]):
@@ -1174,7 +1149,7 @@ def is_negative(acc):
         if past_due_val and past_due_val not in ("0", "0.00", "-", ""):
             return True
 
-    # Repossession — voluntary or involuntary, including "taken back" language
+    # Repossession, voluntary or involuntary, including "taken back" language
     if any(k in raw for k in [
         "repossess", "voluntary surrender", "involuntary repo", "surrender",
         "merchandise was taken back", "taken back by credit grantor",
@@ -1182,18 +1157,18 @@ def is_negative(acc):
     ]):
         return True
 
-    # Bankruptcy — included-in-BK accounts still reporting
+    # Bankruptcy, included-in-BK accounts still reporting
     if any(k in raw for k in ["included in bankruptcy", "included in bk", "discharged in bankruptcy"]):
         return True
 
-    # Student loan — only if derogatory indicators present
+    # Student loan, only if derogatory indicators present
     if any(k in name for k in ["dept of ed", "navient", "sallie mae", "mohela", "nelnet",
                                  "fedloan", "great lakes", "aidvantage"]):
         if any(k in raw for k in ["default", "derogatory", "collection", "chargeoff",
                                     "late", "past due", "deferment violation"]):
             return True
 
-    # Charge-off with deficiency balance — account shows balance after chargeoff
+    # Charge-off with deficiency balance, account shows balance after chargeoff
     if ("chargeoff" in payment or "charged off" in raw or "profit and loss" in raw):
         return True
 
@@ -1213,12 +1188,12 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
     balance  = acc.get("balance", "")
     past_due = acc.get("past_due", "")
 
-    # ── 0. Child support — §1681s-1 special rules ────────────────────────
+    # -- 0. Child support, section 1681s-1 special rules ------------------------
     acct_detail = safe_lower(acc.get("account_type_detail", ""))
     if any(k in acct_detail for k in ["child support", "family support", "spousal support"]):
         return "child_support"
 
-    # ── 1. Repossession ──────────────────────────────────────────────────
+    # -- 1. Repossession --------------------------------------------------
     if any(k in raw for k in [
         "repossess", "voluntary surrender", "involuntary repo",
         "merchandise was taken back", "taken back by credit grantor",
@@ -1226,14 +1201,14 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
     ]):
         return "repossession"
 
-    # ── 2. Bankruptcy included-in-BK ────────────────────────────────────
+    # -- 2. Bankruptcy included-in-BK ------------------------------------
     if any(k in raw for k in [
         "included in bankruptcy", "included in bk", "discharged in bankruptcy",
         "chapter 7", "chapter 13", "bankruptcy"
     ]):
         return "bankruptcy"
 
-    # ── 3. Student loan derogatory ───────────────────────────────────────
+    # -- 3. Student loan derogatory ---------------------------------------
     student_servicers = [
         "dept of ed", "department of education", "navient", "sallie mae",
         "mohela", "nelnet", "fedloan", "great lakes", "aidvantage",
@@ -1243,7 +1218,7 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
         if any(k in raw for k in ["default", "derogatory", "collection", "late", "past due"]):
             return "student_loan"
 
-    # ── 4. Known debt buyer — always collection regardless of payment status ──
+    # -- 4. Known debt buyer, always collection regardless of payment status --
     debt_buyers = [
         "lvnv", "portfolio", "cavalry", "midland", "resurgent",
         "jefferson capital", "asset acceptance", "national collegiate",
@@ -1252,7 +1227,7 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
     if any(k in name for k in debt_buyers):
         return "collection"
 
-    # ── 5. Paid collection / settled — BEFORE charge_off check ──────────
+    # -- 5. Paid collection / settled, BEFORE charge_off check ----------
     if "paid" in status and (
         "collection" in raw or "chargeoff" in raw or "charged off" in raw
         or "profit and loss" in raw or "collection" in payment
@@ -1263,13 +1238,13 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
         if "collection" in raw or "chargeoff" in raw or "derogatory" in status:
             return "paid_collection"
 
-    # ── 6. Collection (standard) ─────────────────────────────────────────
+    # -- 6. Collection (standard) -----------------------------------------
     if "collection" in payment or "collection" in raw or "collection" in comments:
         return "collection"
 
-    # ── 7. Charge-off with deficiency balance ────────────────────────────
+    # -- 7. Charge-off with deficiency balance ----------------------------
     # Only flag as deficiency if it's an auto loan or similar installment
-    # with a non-zero balance — credit card charge-offs are plain charge_off
+    # with a non-zero balance, credit card charge-offs are plain charge_off
     has_chargeoff = (
         "chargeoff" in payment or "collection/chargeoff" in payment
         or "charged off" in raw or "profit and loss" in raw
@@ -1283,14 +1258,14 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
             return "charge_off_deficiency"
         return "charge_off"
 
-    # ── 8. Late payment ──────────────────────────────────────────────────
+    # -- 8. Late payment --------------------------------------------------
     if "late" in payment:
         return "late_payment"
     # Late payment detected in two-year payment history table
     if acc.get("has_30_in_history") or acc.get("has_60_in_history") or acc.get("has_90_in_history"):
         return "late_payment"
 
-    # ── 9. Generic derogatory ────────────────────────────────────────────
+    # -- 9. Generic derogatory --------------------------------------------
     if "derogatory" in status:
         return "derogatory"
 
@@ -1467,7 +1442,7 @@ def detect_dofd_unknown_attacks(
                 f"suggesting the collector is refreshing this date to keep the tradeline "
                 f"appearing current. The actual Date of First Delinquency (DOFD) cannot "
                 f"be determined from the data reported. Under 15 USC 1681c(c), the 7-year "
-                f"reporting period runs from the DOFD — the furnisher must disclose the "
+                f"reporting period runs from the DOFD, the furnisher must disclose the "
                 f"DOFD and provide documentation of the original delinquency date."
             )
             tags = [
@@ -1523,8 +1498,8 @@ def detect_child_support_attacks(bureau: str, accounts: list[dict]) -> list[dict
                 f"{acc.get('name','')} account {acc.get('account_number','')} "
                 f"is a child/family support obligation reported as past due "
                 f"(balance: {balance}, past due: {past_due}, status: {payment}). "
-                f"Under 15 U.S.C. §1681s-1, child support agencies may only "
-                f"report overdue support — the reported amount and status must "
+                f"Under 15 U.S.C. section 1681s-1, child support agencies may only "
+                f"report overdue support, the reported amount and status must "
                 f"accurately reflect only the delinquent portion as certified "
                 f"by the state agency. Full itemization and agency certification required."
             ),
@@ -1591,7 +1566,7 @@ def detect_bankruptcy_attacks(bureau: str, accounts: list[dict]) -> list[dict]:
                     f"{acc.get('name','')} account {acc.get('account_number','')} "
                     f"was included in a bankruptcy proceeding but continues to show "
                     f"an active balance of {balance}. Discharged accounts must reflect "
-                    f"a zero balance and discharged status under 11 U.S.C. \u00a7524."
+                    f"a zero balance and discharged status under 11 U.S.C. section 524."
                 ),
             ))
         else:
@@ -1603,7 +1578,7 @@ def detect_bankruptcy_attacks(bureau: str, accounts: list[dict]) -> list[dict]:
                 reason=(
                     f"{acc.get('name','')} account {acc.get('account_number','')} "
                     f"is associated with a bankruptcy and must accurately reflect the "
-                    f"discharged status. Under 15 U.S.C. \u00a71681c(a)(1), Chapter 7 "
+                    f"discharged status. Under 15 U.S.C. section 1681c(a)(1), Chapter 7 "
                     f"bankruptcies may be reported for 10 years and Chapter 13 for 7 years "
                     f"from filing. The reporting period and status must be verified."
                 ),
@@ -1675,7 +1650,7 @@ def detect_paid_collection_attacks(bureau: str, accounts: list[dict]) -> list[di
                 f"but continues to be reported with a derogatory status. "
                 f"A paid or settled collection must reflect its resolved status. "
                 f"Reporting it as derogatory after payment is inaccurate under "
-                f"15 U.S.C. \u00a71681e(b)."
+                f"15 U.S.C. section 1681e(b)."
             ),
         ))
     return attacks
@@ -1729,12 +1704,12 @@ def _parse_dollar(s: str) -> float:
 def detect_intra_account_inconsistencies(bureau: str, accounts: list[dict[str, Any]], report_date: str = "") -> list[dict[str, Any]]:
     """
     Detect logical impossibilities within a single account's own fields.
-    These are §1681e(b) violations — the data reported is self-contradictory.
+    These are section 1681e(b) violations, the data reported is self-contradictory.
 
     Patterns detected:
-      1. date_opened > date_last_active  (opened after last activity — impossible)
-      2. past_due > balance              (owe more past-due than total — impossible)
-      3. balance > credit_limit × 2     (revolving — extreme overage, likely error)
+      1. date_opened > date_last_active  (opened after last activity, impossible)
+      2. past_due > balance              (owe more past-due than total, impossible)
+      3. balance > credit_limit x 2     (revolving, extreme overage, likely error)
       4. balance > high_credit on installment (loan balance exceeds original amount)
       5. status=Open + payment=Chargeoff (open account cannot be charged off)
       6. status=Paid + past_due > $0    (paid account cannot have past-due)
@@ -1774,7 +1749,7 @@ def detect_intra_account_inconsistencies(bureau: str, accounts: list[dict[str, A
                 strategy_tags=["FCRA_1681e_b"],
                 reason=(
                     f"{name} account {acct} shows a date opened of {opened} "
-                    f"but a date last active of {dla} — which is earlier. "
+                    f"but a date last active of {dla}, which is earlier. "
                     f"An account cannot have activity before it was opened. "
                     f"This is a chronological impossibility that indicates "
                     f"inaccurate date reporting."
@@ -1837,7 +1812,7 @@ def detect_intra_account_inconsistencies(bureau: str, accounts: list[dict[str, A
                     f"'Open' while the payment status is "
                     f"'{acc.get('payment_status','')}'. An account that has "
                     f"been charged off or placed in collection cannot "
-                    f"simultaneously be 'Open' — the account was closed when "
+                    f"simultaneously be 'Open', the account was closed when "
                     f"it was charged off. This classification conflict is inaccurate."
                 ),
             ))
@@ -1879,7 +1854,7 @@ def detect_intra_account_inconsistencies(bureau: str, accounts: list[dict[str, A
                 strategy_tags=["FCRA_1681e_b"],
                 reason=(
                     f"{name} account {acct} shows a payment status of 'Current' "
-                    f"— meaning no payment is late — but an account status of "
+                    f", meaning no payment is late, but an account status of "
                     f"'Derogatory'. If all payments are current, the account "
                     f"cannot be derogatory. These two classifications are "
                     f"contradictory and indicate a reporting error."
@@ -1896,7 +1871,7 @@ def detect_intra_account_inconsistencies(bureau: str, accounts: list[dict[str, A
                     f"{name} account {acct} is a collection account reporting "
                     f"a monthly payment of {acc.get('monthly_payment','')}. "
                     f"Collection accounts do not have an ongoing payment schedule "
-                    f"— the debt has been transferred and there is no creditor "
+                    f", the debt has been transferred and there is no creditor "
                     f"expecting monthly payments. This field should be zero."
                 ),
             ))
@@ -1952,7 +1927,7 @@ def detect_cross_bureau_field_conflicts(
                         f"values across bureaus: "
                         + ", ".join(f"{b}={s}" for b,(_,s) in dates_opened.items())
                         + f". The date an account was opened cannot be different "
-                        f"depending on which bureau is reporting it — only one "
+                        f"depending on which bureau is reporting it, only one "
                         f"date is correct."
                     ),
                 ))
@@ -1973,7 +1948,7 @@ def detect_cross_bureau_field_conflicts(
                     f"{name} account {acct_num} is classified differently "
                     f"across bureaus: "
                     + ", ".join(f"{b}='{v}'" for b,v in acct_types.items())
-                    + ". The account type cannot vary by bureau — "
+                    + ". The account type cannot vary by bureau, "
                     f"this indicates at least one bureau is reporting an "
                     f"incorrect classification."
                 ),
@@ -1990,7 +1965,7 @@ def detect_cross_bureau_field_conflicts(
                 reason=(
                     f"{name} account {acct_num} shows different credit limits "
                     f"across bureaus: "
-                    + ", ".join(f"{b}=${v:,.2f}" for b,v in cl_nonzero.items())
+                    + ", ".join(f"{b}=${v:.2f}" for b,v in cl_nonzero.items())
                     + ". A credit limit is set by the creditor and cannot be "
                     f"different at different bureaus. One or more bureaus is "
                     f"reporting an incorrect limit."
@@ -2010,9 +1985,9 @@ def detect_cross_bureau_field_conflicts(
                     reason=(
                         f"{name} account {acct_num} shows different high credit "
                         f"amounts across bureaus: "
-                        + ", ".join(f"{b}=${v:,.2f}" for b,v in hc_nonzero.items())
+                        + ", ".join(f"{b}=${v:.2f}" for b,v in hc_nonzero.items())
                         + ". The original loan amount or highest balance cannot "
-                        f"differ by bureau — this discrepancy indicates an "
+                        f"differ by bureau, this discrepancy indicates an "
                         f"accuracy problem in at least one bureau's file."
                     ),
                 ))
@@ -2023,8 +1998,8 @@ def detect_cross_bureau_field_conflicts(
 def detect_inquiry_attacks(inquiries: list[dict[str, Any]], accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Detect inquiry-level inconsistencies:
-    1. Same creditor, same bureau, same day — duplicate inquiry
-    2. Large cluster same day (>5) — may indicate unauthorized batch pull
+    1. Same creditor, same bureau, same day, duplicate inquiry
+    2. Large cluster same day (>5), may indicate unauthorized batch pull
     """
     attacks = []
     if not inquiries:
@@ -2061,7 +2036,7 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]], accounts: list[dict[
                         f"{name} pulled my credit report {len(inqs)} times "
                         f"at {bureau.title()} on {date}. Each credit inquiry "
                         f"requires a separate permissible purpose under "
-                        f"15 U.S.C. §1681b. Multiple pulls in one day from the "
+                        f"15 U.S.C. section 1681b. Multiple pulls in one day from the "
                         f"same creditor without separate applications constitute "
                         f"an unauthorized inquiry and must be removed."
                     ),
@@ -2085,7 +2060,7 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]], accounts: list[dict[
                     f"{len(unique_names)} different creditors on {date}. "
                     f"While rate shopping for a single loan may justify "
                     f"multiple inquiries, each inquiry must still have an "
-                    f"independent permissible purpose under 15 U.S.C. §1681b. "
+                    f"independent permissible purpose under 15 U.S.C. section 1681b. "
                     f"I am requesting that each creditor confirm the permissible "
                     f"purpose for their inquiry or that unauthorized pulls be removed."
                 ),
@@ -2099,16 +2074,16 @@ def detect_late_collection_conflict_attacks(bureau: str, accounts: list[dict[str
     Detect accounts where payment status and account type are mutually exclusive.
 
     Three patterns:
-      TYPE A — account_type=Collection + payment_status=Late X Days
-               A collection has no active payment obligation — it cannot be "late."
+      TYPE A, account_type=Collection + payment_status=Late X Days
+               A collection has no active payment obligation, it cannot be "late."
                Two mutually exclusive classifications on the same account.
 
-      TYPE B — payment_status=Collection/Chargeoff + separate late payment history
+      TYPE B, payment_status=Collection/Chargeoff + separate late payment history
                One delinquency event cannot generate both a charge-off AND independent
                late-payment notations. Double-derogatory for a single event.
 
-      TYPE C — account_type=Collection but payment_status shows Late (no CO code)
-               Collection account disguised as a late payment — misclassification
+      TYPE C, account_type=Collection but payment_status shows Late (no CO code)
+               Collection account disguised as a late payment, misclassification
                that distorts what the account actually is.
     """
     attacks = []
@@ -2138,7 +2113,7 @@ def detect_late_collection_conflict_attacks(bureau: str, accounts: list[dict[str
                     f"account but is also being reported with a payment status of "
                     f"'{acc.get('payment_status','')}'. These two classifications "
                     f"are mutually exclusive. A collection account has already "
-                    f"defaulted and been transferred — there is no active payment "
+                    f"defaulted and been transferred, there is no active payment "
                     f"obligation, so it cannot be 'late.' Reporting both inflates "
                     f"the negative impact of a single delinquency event."
                 ),
@@ -2155,7 +2130,7 @@ def detect_late_collection_conflict_attacks(bureau: str, accounts: list[dict[str
                     f"{name} account {acct_num} shows both a charge-off/collection "
                     f"status and a late payment classification. A single delinquency "
                     f"event cannot be reported as both a charge-off and a separate "
-                    f"late payment — these represent the same failure being double-counted."
+                    f"late payment, these represent the same failure being double-counted."
                 ),
             ))
 
@@ -2233,7 +2208,7 @@ def is_collector_name(name: str) -> bool:
 
     Two detection strategies:
     1. Name matches known-collector marker list (comprehensive)
-    2. Name contains "(Original Creditor: X)" label — this pattern by
+    2. Name contains "(Original Creditor: X)" label, this pattern by
        itself IS definitive evidence of a collector, since original
        creditors never declare themselves as "original creditor" in their
        own name. Only collectors/debt-buyers add that label.
@@ -2244,7 +2219,7 @@ def is_collector_name(name: str) -> bool:
     if "(original creditor:" in n:
         return True
 
-    # Strategy 1 — comprehensive marker list
+    # Strategy 1, comprehensive marker list
     markers = [
         # Major debt buyers
         "lvnv", "portfolio", "cavalry", "midland", "resurgent", "asset acceptance",
@@ -2276,9 +2251,9 @@ def detect_cross_bureau_inconsistency_attacks(
     Cross-bureau analysis pass.
 
     CRITICAL RULE: Account number variation across bureaus for the SAME
-    tradeline block is NORMAL and COSMETIC — not an attack.
+    tradeline block is NORMAL and COSMETIC, not an attack.
     Example: NAVY FCU reports 406095**** (TU), 83** (EXP), 406095XXXXXX**** (EQ)
-    — these are the same account, just masked differently per bureau.
+   , these are the same account, just masked differently per bureau.
 
     We MUST use base_tradeline_id (PDF block grouping) as the anchor for
     same-account detection, NOT the account number string.
@@ -2340,7 +2315,7 @@ def detect_cross_bureau_inconsistency_attacks(
             """Return the negative acc for this bureau, or a minimal stub."""
             if bureau in neg_accs:
                 return neg_accs[bureau]
-            # Stub from base_tradeline data — bureau may not be negative
+            # Stub from base_tradeline data, bureau may not be negative
             return {
                 "block_id": btid,
                 "name": furnisher_name,
@@ -2352,7 +2327,7 @@ def detect_cross_bureau_inconsistency_attacks(
             }
 
         # -----------------------------------------------------------------
-        # 1. BALANCE CONFLICT (material — directly affects credit scoring)
+        # 1. BALANCE CONFLICT (material, directly affects credit scoring)
         # -----------------------------------------------------------------
         unique_bals = {v for v in balances.values() if v and v not in {"0", "0.0"}}
         if len(unique_bals) > 1:
@@ -2384,7 +2359,7 @@ def detect_cross_bureau_inconsistency_attacks(
             if "collection" in p or "chargeoff" in p or "charge off" in p:
                 return "collection_chargeoff"
             if "late" in p:
-                # "late 120 days" vs "late 90 days" are different — keep as-is
+                # "late 120 days" vs "late 90 days" are different, keep as-is
                 return p
             return p
 
@@ -2441,7 +2416,7 @@ def detect_single_bureau_collector_pattern(
 ) -> list[dict[str, Any]]:
     """
     Detect collector/original-creditor WITHIN a bureau where the label
-    '(Original Creditor: X)' is embedded in the collector name itself —
+    '(Original Creditor: X)' is embedded in the collector name itself,
     meaning a single account already self-declares the chain of title.
 
     This is valid even with a single tradeline because the name itself
@@ -2483,7 +2458,7 @@ def detect_absent_bureau_inconsistency(
     """
     If a negative account appears in 2 bureaus but NOT in a third,
     flag it on the bureaus where it IS present as a reporting inconsistency.
-    The absent bureau is inconsistent with the others — the furnisher
+    The absent bureau is inconsistent with the others, the furnisher
     should be reporting to all 3 or explaining why not.
     """
     # Build set of (acct, name) pairs per bureau
@@ -2551,15 +2526,15 @@ def detect_late_payment_attacks(bureau: str, accounts: list) -> list:
             reason = (
                 f"{name} (account {acct_num}) is closed/paid but still shows a "
                 f"{worst}-day late in its history ({late_str}). The Date of First "
-                f"Delinquency must be correctly reported under 15 U.S.C. §1681c(a)(4) "
+                f"Delinquency must be correctly reported under 15 U.S.C. section 1681c(a)(4) "
                 f"so the 7-year clock can be verified. I am requesting original payment "
                 f"records confirming the late date and the correct DOFD."
             )
         else:
             reason = (
                 f"{name} (account {acct_num}) shows a {worst}-day late payment in "
-                f"its history ({late_str}). Under 15 U.S.C. §1681e(b), I am requesting "
-                f"documentation — original payment records showing when payment was due "
+                f"its history ({late_str}). Under 15 U.S.C. section 1681e(b), I am requesting "
+                f"documentation, original payment records showing when payment was due "
                 f"and when it was received. If this cannot be verified, the late mark "
                 f"must be removed."
             )
@@ -2610,7 +2585,7 @@ def detect_cross_bureau_late_date_conflict(
             reason=(
                 f"{name} (account {acct_num}) reports late payments in different months "
                 f"across bureaus: {detail}. A payment can only be late on one specific "
-                f"date — inconsistent reporting is inaccurate under 15 U.S.C. §1681e(b). "
+                f"date, inconsistent reporting is inaccurate under 15 U.S.C. section 1681e(b). "
                 f"The creditor must provide original payment records and correct the "
                 f"reporting to show the same month on all bureaus."
             ),
@@ -2641,7 +2616,7 @@ def build_legal_detection_engine(
             detect_absent_bureau_inconsistency(bureau, accounts, negatives_by_bureau)
         )
 
-        # --- DOFD attacks: §1681c obsolete + re-aging + unknown ---
+        # --- DOFD attacks: section 1681c obsolete + re-aging + unknown ---
         bureau_attacks.extend(detect_obsolete_account_attacks(bureau, accounts))
         bureau_attacks.extend(detect_re_aging_attacks(bureau, accounts))
         bureau_attacks.extend(detect_dofd_unknown_attacks(bureau, accounts))
@@ -2805,20 +2780,20 @@ def get_attack_priority(severity_score: int) -> str:
 
 
 def get_recommended_round(severity_score: int, attack_type: str) -> str:
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # RULE: Every negative account starts at Round 1, always.
     #
-    # Round escalation (Round 2 → Round 3 → CFPB) is determined by the
-    # bureau's response to a prior dispute — not by the attack type.
+    # Round escalation (Round 2 -> Round 3 -> CFPB) is determined by the
+    # bureau's response to a prior dispute, not by the attack type.
     # The attack type tells us HOW to argue, not WHEN to send.
     #
-    # Round 1  → first dispute, no prior bureau response on record
-    # Round 2  → bureau responded "verified" or did not respond in 30 days
-    # Round 3  → bureau verified again without real documentation
-    # CFPB     → reinsertion, ignored disputes, bad-faith pattern
+    # Round 1  -> first dispute, no prior bureau response on record
+    # Round 2  -> bureau responded "verified" or did not respond in 30 days
+    # Round 3  -> bureau verified again without real documentation
+    # CFPB     -> reinsertion, ignored disputes, bad-faith pattern
     #
     # Escalation is handled by compare_rounds() when a prior result exists.
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     return "round_1"
 
 
@@ -3243,7 +3218,7 @@ def get_strategy_summary(attack: dict[str, Any]) -> str:
             "This account has exceeded the FCRA 7-year maximum reporting period "
             "calculated from the Date of First Delinquency (DOFD) under 15 USC 1681c(c). "
             "Reporting an obsolete account is a violation of 15 USC 1681c(a)(4) and requires "
-            "mandatory deletion. No reinvestigation is needed — the account is time-barred."
+            "mandatory deletion. No reinvestigation is needed, the account is time-barred."
         ),
         "potential_re_aging": (
             "The collector's Date Opened is significantly later than the estimated DOFD, "
@@ -3350,7 +3325,7 @@ def build_account_reason_from_strategy(strategy_item: dict[str, Any], account: d
         "obsolete_account_7yr_limit": (
             f"this account {acct_num} has exceeded the FCRA maximum 7-year reporting period "
             f"under 15 USC 1681c(a)(4). This account is time-barred from appearing on any consumer "
-            f"report and must be deleted immediately. No reinvestigation is required — "
+            f"report and must be deleted immediately. No reinvestigation is required, "
             f"the statute mandates deletion."
         ),
         "potential_re_aging": (
@@ -3409,7 +3384,7 @@ def get_attack_rank_for_letter_input(attack_type: str) -> int:
         "student_loan_deferment_late_payment":    91,
         "student_loan_balance_inflated":          88,
         "student_loan_paid_still_reporting":      86,
-        "reinsertion_violation":         99,  # highest priority — willful violation
+        "reinsertion_violation":         99,  # highest priority, willful violation
         "medical_debt_under_500":        98,  # bureau violating its own policy
         "paid_medical_collection":       97,
         "medical_debt_state_law":        96,
@@ -3447,7 +3422,7 @@ def build_letter_input_engine(
     For each bureau:
     - Pulls all attacked accounts from the strategy engine.
     - Also includes any negative account that has NO attack detected yet,
-      flagging it as 'requires_basic_verification' (round 1 — do not assume
+      flagging it as 'requires_basic_verification' (round 1, do not assume
       anything, just demand the bureau verify the data under 15 USC 1681i).
     - Groups by negative type: collections | charge_offs | late_payments | other_derogatory.
     - Deduplicates per (furnisher_name, account_number), keeping highest-ranked attack.
@@ -3522,7 +3497,7 @@ def build_letter_input_engine(
                         })
                     dedupe_map[key] = entry
                 else:
-                    # This attack is secondary — save as flag
+                    # This attack is secondary, save as flag
                     secondary_flags_map.setdefault(key, []).append({
                         "attack_type": attack_type,
                         "laws":        laws,
@@ -3629,7 +3604,7 @@ BUREAU_ADDRESSES = {
 
 
 def _format_date_long(report_date_str: str) -> str:
-    """Returns date as 'January 7, 2026' — how a person writes it."""
+    """Returns date as 'January 7, 2026', how a person writes it."""
     from datetime import datetime as _dt
     d = parse_date_field(report_date_str)
     if d:
@@ -3643,234 +3618,178 @@ import random as _random
 # Same legal content, different sentence order and wording.
 # The system picks one per letter so no two letters are identical.
 _OPENING_TEMPLATES_R1 = [
-    # Template 1 — Personal discovery, documentation-focused
+    # Version A -- starts with the personal situation
     (
-        "To Whom It May Concern,\n\n"
-        "I sat down recently to go through my credit "
-        "report carefully, and I found {count} that {they_verb} not being reported "
-        "the way I believe {they_verb} supposed to be. I am writing to formally "
-        "dispute {these_items} and to ask that you conduct a proper reinvestigation. "
-        "The Fair Credit Reporting Act gives me that right and requires you to "
-        "complete it within 30 days (15 U.S.C. \u00a71681i). The law also requires "
-        "that every item on my report be as accurate as possible (15 U.S.C. \u00a71681e(b))."
+        "Hi,\n\n"
+        "I recently went through my credit report and found {count} that I do not "
+        "believe {they_verb} being reported correctly. I am writing to formally dispute "
+        "{these_items} and to ask that you reinvestigate them. The Fair Credit "
+        "Reporting Act gives me the right to dispute inaccurate or unverifiable "
+        "information, and it requires you to complete that investigation within "
+        "30 days (15 U.S.C. section 1681i). It also requires that any information "
+        "you report be as accurate as possible (15 U.S.C. section 1681e(b))."
         "\n\n"
-        "For every account I am disputing below, I need you to go back to the "
-        "company reporting it and require actual documentation — not just a "
-        "confirmation that the information is correct. I want the original "
-        "agreement, a complete payment history, an explanation of the balance, "
-        "the exact date I first fell behind, and if the account was transferred "
-        "or sold, proof of that assignment. If they cannot produce all of that, "
-        "the account cannot be verified and needs to come off my report. "
-        "Please also send me your written investigation results, including "
-        "the names of every company you contacted and what they provided "
-        "(15 U.S.C. \u00a71681i(a))."
+        "For each account I am disputing, I am asking that you contact the company "
+        "reporting it and require them to provide actual proof: the original "
+        "agreement, a full payment history, a breakdown of the balance, the exact "
+        "date I first fell behind, and if the account was transferred or sold, "
+        "documentation of that transfer. If you cannot get that proof and verify "
+        "the account fully, it needs to come off my report. I am also asking that "
+        "you send me the results of your investigation in writing, including which "
+        "companies you contacted and what they provided (15 U.S.C. section 1681i(a))."
     ),
-    # Template 2 — Rights-first, firm tone
+    # Version B -- starts with the legal right, then gets personal
     (
-        "To Whom It May Concern,\n\n"
-        "I am writing to formally exercise my rights "
-        "under the Fair Credit Reporting Act. I have reviewed my credit report "
-        "and identified {count} that I believe {they_verb} either inaccurate or "
-        "cannot be verified. Under 15 U.S.C. \u00a71681i, I have the right to "
-        "request a reinvestigation of any item I dispute, and I am doing so now "
-        "for {these_items} listed in this letter."
+        "Hi,\n\n"
+        "I am writing to dispute {count} on my credit report. Under the Fair Credit "
+        "Reporting Act, specifically 15 U.S.C. section 1681i, I have the right to "
+        "ask you to reinvestigate information I believe is inaccurate or cannot be "
+        "verified. I am exercising that right now regarding {these_items} listed below."
         "\n\n"
-        "I am not asking for a simple reconfirmation from the furnisher. I am "
-        "asking that you require each reporting company to produce real records: "
-        "the original signed agreement, complete billing and payment history, "
-        "an itemized breakdown of any balance, the date I actually first missed "
-        "a payment, and — if the account was sold — the full chain of assignment. "
-        "Under 15 U.S.C. \u00a71681i(a)(5), any item that cannot be verified "
-        "with documentation must be deleted. Under 15 U.S.C. \u00a71681e(b), "
-        "you are required to maintain maximum possible accuracy. Please send me "
-        "your written results when the investigation is complete."
+        "I am asking that for each account, you require the company reporting it to "
+        "show real documentation: the original signed agreement, complete billing and "
+        "payment records, an itemized breakdown of what is owed, the date I first "
+        "missed a payment, and if the account was sold to a collector, proof of "
+        "that transfer. If any account cannot be fully backed up with documentation, "
+        "it must be deleted under 15 U.S.C. section 1681i(a)(5). The law also requires "
+        "that you follow reasonable procedures to make sure what you report is "
+        "accurate (15 U.S.C. section 1681e(b)). Please send me your results in writing "
+        "when the investigation is complete."
     ),
-    # Template 3 — Conversational, verification-first
+    # Version C -- conversational, verification-first
     (
-        "To Whom It May Concern,\n\n"
-        "I recently went through my credit report "
-        "line by line. I found {count} that raised concerns for me — I do not "
-        "believe {they_verb} being reported correctly, and I am formally asking "
+        "Hi,\n\n"
+        "I looked over my credit report and I have questions about {count}. "
+        "I do not believe {they_verb} being reported correctly, and I am asking "
         "that you look into {these_items}."
         "\n\n"
-        "The Fair Credit Reporting Act — specifically 15 U.S.C. \u00a71681i "
-        "and \u00a71681e(b) — gives me the right to ask for this, and requires "
-        "you to complete the reinvestigation within 30 days. What I need is not "
-        "a rubber stamp. I need you to go back to each company and ask for "
-        "documentation: the original agreement between me and that creditor, "
-        "a full payment record, an explanation of the balance, the date I first "
-        "went delinquent, and — if the account changed hands — proof of the "
-        "transfer. If they cannot verify any of that with actual records, it "
-        "needs to be removed from my report. Please let me know in writing "
+        "The Fair Credit Reporting Act (15 U.S.C. section 1681i and section 1681e(b)) "
+        "gives me the right to request this and requires you to complete it within "
+        "30 days. What I am asking for specifically is that you go back to each "
+        "company reporting these accounts and ask them for documentation, not just "
+        "a yes or no answer that the information is correct. I want to see that they "
+        "can provide the original agreement, a full history of payments, an "
+        "explanation of the balance, the date I first went delinquent, and proof "
+        "of ownership if the account changed hands. Anything they cannot verify "
+        "with actual records needs to be removed. Please also let me know in writing "
         "what you found and who you contacted."
     ),
-    # Template 4 — Direct, account-focused
+    # Version D -- brief opening, weight on the account list
     (
-        "To Whom It May Concern,\n\n"
-        "I am disputing {count} on my credit report "
-        "that I believe {they_verb} either inaccurate or not verifiable. "
-        "I am formally requesting that you reinvestigate {these_items} "
-        "under 15 U.S.C. \u00a71681i."
+        "Hi,\n\n"
+        "I am disputing {count} on my credit report that I believe "
+        "{they_verb} not accurate or cannot be verified. I am asking that you "
+        "reinvestigate {these_items} under 15 U.S.C. section 1681i."
         "\n\n"
-        "For each account listed below, I need you to require the reporting "
-        "company to produce full documentation — the original agreement, "
-        "a complete payment record, an itemized explanation of the balance, "
-        "the exact date I first fell behind, and assignment records if the "
-        "debt changed hands. If they cannot produce that documentation, "
-        "the account is not verifiable and must be deleted under "
-        "15 U.S.C. \u00a71681i(a)(5). I am also asking that you follow "
-        "the accuracy procedures required by 15 U.S.C. \u00a71681e(b) "
-        "and provide me with written results including the contact "
-        "information for anyone you reached out to."
+        "For each account below, I need you to require the reporting company to "
+        "provide full documentation: original agreement, complete payment records, "
+        "itemized balance, the exact date I first fell behind, and assignment "
+        "records if the debt changed hands. If they cannot produce that, the "
+        "account is not verifiable and must be deleted under 15 U.S.C. section 1681i(a)(5). "
+        "You are also required to follow reasonable accuracy procedures under "
+        "15 U.S.C. section 1681e(b). Please provide written results including the "
+        "name and contact information of anyone you reached out to."
     ),
-    # Template 5 — Accuracy obligation emphasis
+    # Version E -- focuses on accuracy obligation
     (
-        "To Whom It May Concern,\n\n"
-        "I am writing to formally dispute "
-        "{these_items} that appear on my credit report. The Fair Credit Reporting "
-        "Act makes it clear that every piece of information in my credit file "
-        "must be accurate, complete, and verifiable (15 U.S.C. \u00a71681e(b)). "
-        "The accounts I am listing below do not meet that standard as currently reported."
+        "Hi,\n\n"
+        "I am writing to formally dispute {these_items} on my credit report. "
+        "The Fair Credit Reporting Act requires that every piece of information "
+        "on my credit file be accurate, complete, and verifiable "
+        "(15 U.S.C. section 1681e(b)). The accounts listed below do not meet "
+        "that standard."
         "\n\n"
         "I am asking that you reinvestigate {these_items} within 30 days as "
-        "required by 15 U.S.C. \u00a71681i(a). For each account, please require "
-        "the furnisher to provide documentation supporting every field being "
-        "reported — including the original agreement, complete payment history, "
-        "an exact balance breakdown, and the date I first fell behind. If any "
-        "account cannot be verified with actual documentation, it must be "
-        "corrected or deleted under 15 U.S.C. \u00a71681i(a)(5). Please send "
-        "me written results including who you contacted and what they provided."
+        "required by 15 U.S.C. section 1681i(a). For each account, please require "
+        "the furnisher to provide documentation that fully supports every field "
+        "being reported, including the original agreement, complete payment history, "
+        "exact balance breakdown, and the date I first fell behind. If any account "
+        "cannot be verified with actual documentation, it must be corrected or "
+        "deleted under 15 U.S.C. section 1681i(a)(5). Please send me written results "
+        "including who you contacted and what they provided."
     ),
-    # Template 6 — Deletion demand, strong consumer voice
+    # Version F -- focuses on deletion demand, strong closer
     (
-        "To Whom It May Concern,\n\n"
-        "I have reviewed my credit report and I "
-        "found {these_items} that {they_verb} being reported inaccurately. "
-        "I am writing to dispute {these_items} under the Fair Credit Reporting "
-        "Act and to ask that you investigate and remove anything that cannot "
-        "be fully verified with documentation."
+        "Hi,\n\n"
+        "I recently reviewed my credit report and found {these_items} that "
+        "{they_verb} being reported inaccurately. I am disputing {these_items} "
+        "under the Fair Credit Reporting Act and asking that you investigate "
+        "and remove anything that cannot be fully verified."
         "\n\n"
-        "Under 15 U.S.C. \u00a71681i(a), you must complete this reinvestigation "
-        "within 30 days. Under 15 U.S.C. \u00a71681i(a)(5), any item that "
-        "cannot be verified must be deleted — not disputed and left on, but "
-        "actually removed. Under 15 U.S.C. \u00a71681e(b), you are required "
-        "to maintain maximum possible accuracy in my file at all times. "
-        "I am asking that the companies reporting these accounts produce "
-        "complete documentation — original agreements, full payment records, "
-        "and any assignment records if the debt was sold or transferred. "
-        "Please send me your written investigation results."
-    ),
-    # Template 7 — Thoughtful, thorough, personal
-    (
-        "To Whom It May Concern,\n\n"
-        "I am reaching out because I found problems "
-        "in my credit report that I believe need to be corrected. After reviewing "
-        "my file, I identified {count} that I do not believe {they_verb} accurate "
-        "or properly verifiable. I am formally requesting a reinvestigation of "
-        "{these_items} as permitted under 15 U.S.C. \u00a71681i."
-        "\n\n"
-        "I want to be specific about what I am asking for. For each account "
-        "below, I need you to require the company reporting it to provide the "
-        "original credit agreement with my signature, a transaction-by-transaction "
-        "payment history from the time the account was opened, an itemized "
-        "breakdown of the current balance, the exact date I first missed a "
-        "payment, and — if this is a collection — proof of the full chain of "
-        "assignment from the original creditor. If any of that cannot be "
-        "produced, the account is unverifiable and must come off my report "
-        "under 15 U.S.C. \u00a71681i(a)(5). Please also send me your "
-        "written results when you are done."
-    ),
-    # Template 8 — Matter-of-fact, FCRA-grounded
-    (
-        "To Whom It May Concern,\n\n"
-        "I am sending this letter to dispute "
-        "{count} on my credit report under the Fair Credit Reporting Act. "
-        "I have gone through my report and identified {these_items} that "
-        "I believe contain inaccurate or unverifiable information."
-        "\n\n"
-        "The FCRA at 15 U.S.C. \u00a71681i requires you to reinvestigate "
-        "disputed items within 30 days and to contact the furnisher for "
-        "actual verification — not just a reconfirmation. Under "
-        "15 U.S.C. \u00a71681e(b), you must also follow reasonable procedures "
-        "to assure maximum accuracy. For each account listed below, "
-        "I am asking that the reporting company provide the original agreement, "
-        "a complete and chronological payment history, documentation of the "
-        "balance and how it was calculated, and the correct date of first "
-        "delinquency. Any account that cannot be verified with primary "
-        "documentation must be deleted under 15 U.S.C. \u00a71681i(a)(5). "
-        "Please provide me with your written results."
+        "Under 15 U.S.C. section 1681i(a), you must complete this reinvestigation "
+        "within 30 days. Under 15 U.S.C. section 1681i(a)(5), any item that "
+        "cannot be verified must be deleted. Under 15 U.S.C. section 1681e(b), "
+        "you are required to maintain maximum possible accuracy on all "
+        "information in my file. I am asking that the companies reporting "
+        "these accounts provide complete documentation: original agreements, "
+        "full payment records, and any assignment records if the debt was sold "
+        "or transferred. Please send me your written investigation results."
     ),
 ]
 
 _OPENING_TEMPLATES_R2 = [
-    # R2 Template 1 — Escalation after inadequate response
+    # Version A
     (
-        "To Whom It May Concern,\n\n"
-        "I am writing a second time about {count} "
-        "on my credit report. I submitted a dispute previously and received a "
-        "response, but I am not satisfied with the outcome. The accounts listed "
-        "below remain on my file and I do not believe a proper reinvestigation "
-        "was conducted. I am asking you to take a real look — not a form response "
-        "that says the information was verified without explaining how."
+        "Hi,\n\n"
+        "I disputed {count} on my credit report previously and I am not satisfied "
+        "with the outcome. I am writing again to push for a real investigation, "
+        "not just a form response that the information was verified."
         "\n\n"
-        "{bureau_response_summary}"
-        "Under 15 U.S.C. \u00a71681i(a), the law requires an actual, reasonable "
-        "reinvestigation — not just forwarding my dispute to the furnisher and "
-        "accepting their confirmation. I am specifically requesting under "
-        "15 U.S.C. \u00a71681i(a)(6)(B)(iii) that you tell me the exact procedure "
-        "you used, the name and contact information of every company you reached out "
-        "to, and what documentation you reviewed. I am also noting that continuing "
-        "to report information that cannot be properly verified, after a properly "
-        "submitted dispute, creates potential liability under 15 U.S.C. \u00a71681n. "
-        "I am keeping a record of all correspondence."
+        "Under 15 U.S.C. section 1681i(a), the law requires an actual reasonable "
+        "reinvestigation, which means going back to the reporting company and "
+        "reviewing documentation, not just sending an automated inquiry and "
+        "accepting whatever answer comes back. I am specifically requesting, under "
+        "15 U.S.C. section 1681i(a)(6)(B)(iii), that you tell me the procedure you "
+        "used, the name and contact information of every company you reached out to, "
+        "and what documentation you relied on. I am also noting that continuing to "
+        "report information that cannot be verified, after a properly submitted "
+        "dispute, can create liability under 15 U.S.C. section 1681n. "
+        "I am keeping all records."
     ),
-    # R2 Template 2 — Following up, documentation-demanding
+    # Version B
     (
-        "To Whom It May Concern,\n\n"
-        "I am following up on a dispute I submitted "
-        "previously regarding {count} on my credit file. I received your response, "
-        "but the accounts I disputed are still showing on my report and I do not "
-        "believe the investigation met the standard required by law. I am asking "
-        "that you take another look — this time with actual documentation from "
-        "the reporting companies, not just a reconfirmation."
+        "Hi,\n\n"
+        "I am following up on a dispute I submitted earlier about {count} "
+        "on my credit file. I did not feel the prior investigation was thorough "
+        "enough, so I am asking that you take another look, this time with "
+        "actual documentation from the reporting companies."
         "\n\n"
-        "{bureau_response_summary}"
-        "Under 15 U.S.C. \u00a71681i(a), a reasonable reinvestigation means "
-        "reviewing real records — not just sending an electronic inquiry and "
-        "accepting whatever the furnisher says back. I want actual documentation "
-        "reviewed. Under 15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am also asking "
-        "that you provide me with a written description of your investigation "
-        "process and the contact information for every company you reached out to. "
-        "If any account cannot be verified with real documentation, it must be "
-        "deleted. I am keeping a record of all correspondence in case I need to "
-        "pursue this under 15 U.S.C. \u00a71681n."
+        "I know under 15 U.S.C. section 1681i(a) that a reasonable reinvestigation "
+        "is required and that just confirming the data with the furnisher is not "
+        "enough. I want real records reviewed. Under 15 U.S.C. section 1681i(a)(6)(B)(iii) "
+        "I am asking that you provide me with a written description of your "
+        "investigation process and the contact information for every company you "
+        "reached out to. If any of these accounts cannot be verified with real "
+        "documentation, they need to be removed. I want you to know I am keeping "
+        "a record of all correspondence in case I need to pursue this further "
+        "under 15 U.S.C. section 1681n."
     ),
-    # R2 Template 3 — Firm, FCRA-grounded escalation
+    # Version C
     (
-        "To Whom It May Concern,\n\n"
-        "I am writing back about accounts I disputed on my "
-        "credit report. The issues were not resolved to my satisfaction and "
-        "I am asking you to conduct a proper investigation of {count}."
+        "Hi,\n\n"
+        "I previously disputed some accounts on my credit report and I am "
+        "writing back because the issues were not resolved to my satisfaction. "
+        "I am asking you to take a closer look at {count}."
         "\n\n"
-        "{bureau_response_summary}"
-        "What I need is a real investigation — not a process where someone "
-        "at the reporting company clicks a button to confirm and nothing actually "
-        "gets reviewed. The Fair Credit Reporting Act at 15 U.S.C. \u00a71681i(a) "
-        "requires a reasonable reinvestigation, and I expect that standard to be "
-        "met. I am requesting under 15 U.S.C. \u00a71681i(a)(6)(B)(iii) a written "
-        "description of exactly how each account was investigated, including who "
-        "was contacted and what they provided. Any account that cannot be fully "
-        "verified must be deleted. I am aware of my remedies under "
-        "15 U.S.C. \u00a71681n if unverifiable information continues to be reported."
+        "What I need is a real investigation, not an automated check where "
+        "someone at the reporting company clicks confirm and nothing gets reviewed. "
+        "The Fair Credit Reporting Act (15 U.S.C. section 1681i(a)) requires a "
+        "reasonable reinvestigation, and I expect that standard to be met. "
+        "I am also requesting under 15 U.S.C. section 1681i(a)(6)(B)(iii) that "
+        "you send me a description of exactly how each account was investigated, "
+        "including who was contacted and what they provided. Any account that "
+        "cannot be fully verified must be deleted. I am aware of the remedies "
+        "available to me under 15 U.S.C. section 1681n if unverifiable information "
+        "continues to be reported."
     ),
 ]
 
 
 
 _OPENING_TEMPLATES_R3 = [
-    # R3 Template 1 — Final escalation, legal consequences explicit
+    # R3 Template 1, Final escalation, legal consequences explicit
     (
-        "To Whom It May Concern,\n\n"
+        "Hi,\n\n"
         "I have now submitted two prior disputes regarding {count} "
         "on my credit report and I have not received a response that "
         "reflects a genuine reinvestigation. I am writing a third time "
@@ -3879,19 +3798,19 @@ _OPENING_TEMPLATES_R3 = [
         "\n\n"
         "{bureau_response_summary}"
         "I want to be direct: the Fair Credit Reporting Act at "
-        "15 U.S.C. \u00a71681i(a) requires a reasonable reinvestigation "
+        "15 U.S.C. section 1681i(a) requires a reasonable reinvestigation "
         "of every properly submitted dispute. I have submitted mine in writing, "
         "identified the accounts, and explained why I believe they are inaccurate. "
         "What I have received back does not constitute a reasonable reinvestigation "
-        "under that standard. Under 15 U.S.C. \u00a71681n, willful noncompliance "
+        "under that standard. Under 15 U.S.C. section 1681n, willful noncompliance "
         "with the FCRA exposes the reporting agency to actual damages, statutory "
         "damages up to $1,000 per violation, punitive damages, and attorney fees. "
         "I am keeping a complete record of all correspondence. If these accounts "
         "are not corrected or deleted, I will pursue every remedy available to me."
     ),
-    # R3 Template 2 — Demand for method of verification + legal escalation
+    # R3 Template 2, Demand for method of verification + legal escalation
     (
-        "To Whom It May Concern,\n\n"
+        "Hi,\n\n"
         "This is my third and final dispute letter regarding "
         "{count} that remain on my credit report. After two prior disputes "
         "that were not resolved to my satisfaction, I am putting you on notice "
@@ -3899,20 +3818,20 @@ _OPENING_TEMPLATES_R3 = [
         "corrected immediately."
         "\n\n"
         "{bureau_response_summary}"
-        "Under 15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am demanding a written "
+        "Under 15 U.S.C. section 1681i(a)(6)(B)(iii), I am demanding a written "
         "description of the method of verification used for each account "
         "including the name and contact information of everyone contacted "
         "and the documentation reviewed. A form letter stating the information "
         "was verified does not satisfy this requirement. Under 15 U.S.C. "
-        "\u00a71681i(a)(5)(A), any account that cannot be verified must be "
+        "section 1681i(a)(5)(A), any account that cannot be verified must be "
         "deleted promptly. I have documented all prior correspondence. "
         "Failure to comply will leave me no choice but to file a complaint "
         "with the Consumer Financial Protection Bureau and pursue civil "
-        "remedies under 15 U.S.C. \u00a71681n and \u00a71681o."
+        "remedies under 15 U.S.C. section 1681n and section 1681o."
     ),
-    # R3 Template 3 — Exhausted patience, CFPB and legal action imminent
+    # R3 Template 3, Exhausted patience, CFPB and legal action imminent
     (
-        "To Whom It May Concern,\n\n"
+        "Hi,\n\n"
         "I have submitted disputes regarding {count} "
         "on two prior occasions. Both times, the accounts remained on my "
         "report without a satisfactory explanation of how they were verified. "
@@ -3921,20 +3840,20 @@ _OPENING_TEMPLATES_R3 = [
         "{bureau_response_summary}"
         "The FCRA does not permit a credit reporting agency to simply "
         "confirm information from a furnisher and call it a reinvestigation. "
-        "15 U.S.C. \u00a71681i(a) requires actual, reasonable investigation "
+        "15 U.S.C. section 1681i(a) requires actual, reasonable investigation "
         "of disputed information. I have met my obligations under the law. "
         "You have not met yours. I am placing you on formal written notice "
         "that if {these_items} {they_verb} not corrected or deleted, "
         "I will file a complaint with the Consumer Financial Protection Bureau, "
         "the Federal Trade Commission, and my state attorney general, "
-        "and I will seek all available remedies under 15 U.S.C. \u00a71681n "
+        "and I will seek all available remedies under 15 U.S.C. section 1681n "
         "including statutory damages, punitive damages, and attorney fees. "
         "I am retaining copies of all correspondence."
     ),
 ]
 
 
-# Fixed template index per bureau+round — guarantees no two letters share an opening.
+# Fixed template index per bureau+round, guarantees no two letters share an opening.
 _TEMPLATE_INDEX = {
     ("transunion", "round_1"): 0,
     ("experian",   "round_1"): 1,
@@ -3946,7 +3865,7 @@ _TEMPLATE_INDEX = {
 
 
 def _pick_opening(templates: list, items: list, bureau: str, round_key: str) -> str:
-    """Pick a template by fixed index (no randomness — guaranteed unique per bureau+round)."""
+    """Pick a template by fixed index (no randomness, guaranteed unique per bureau+round)."""
     idx = _TEMPLATE_INDEX.get((bureau, round_key), 0) % len(templates)
     tpl = templates[idx]
     n           = len(items)
@@ -3957,13 +3876,13 @@ def _pick_opening(templates: list, items: list, bureau: str, round_key: str) -> 
     return tpl.format(count=count, verb=verb, they_verb=they_verb, these_items=these_items)
 
 
-# Reason variation seeds — ensures same attack type gets slightly different
+# Reason variation seeds, ensures same attack type gets slightly different
 # phrasing when it appears more than once in the same letter.
 _VARIATION_OPENERS = [
     "Looking at this account, ",
     "When I reviewed this entry, I noticed ",
     "On this account, ",
-    "Regarding this entry — ",
+    "Regarding this entry, ",
     "For this account, ",
 ]
 
@@ -3979,7 +3898,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
     """
     Converts secondary_flags into a supplementary paragraph for the dispute letter.
     Each flag is an additional FCRA violation found on the same account.
-    Written in first-person consumer voice — no mention of automated analysis.
+    Written in first-person consumer voice, no mention of automated analysis.
 
     variation_idx rotates the lead-in phrasing so the SAME account in letters
     to different bureaus gets a DIFFERENT secondary-flag paragraph. This is
@@ -3991,13 +3910,13 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
     if not secondary_flags:
         return ""
 
-    # Human-readable descriptions per attack_type — each in TWO phrasings so
+    # Human-readable descriptions per attack_type, each in TWO phrasings so
     # cross-bureau repeats of the same flag don't use identical language.
     FLAG_DESCRIPTIONS_A = {
         "cross_bureau_balance_conflict":        "the balance being reported is not the same at every bureau",
         "cross_bureau_payment_status_conflict": "the payment status is reported differently across bureaus",
         "cross_bureau_account_status_conflict": "the account status varies depending on which bureau you look at",
-        "cross_bureau_high_credit_conflict":    "the high credit amount — which should be a fixed figure — differs by bureau",
+        "cross_bureau_high_credit_conflict":    "the high credit amount, which should be a fixed figure, differs by bureau",
         "cross_bureau_credit_limit_conflict":   "the credit limit is not reported consistently across bureaus",
         "cross_bureau_date_opened_conflict":    "the date this account was opened is different at different bureaus",
         "cross_bureau_account_type_conflict":   "the account type classification is not the same at every bureau",
@@ -4022,7 +3941,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "opened_after_last_active":             "the account open date is later than the date of last activity, which is chronologically impossible",
     }
 
-    # Alternate phrasings — rotate to variant B when variation_idx is odd
+    # Alternate phrasings, rotate to variant B when variation_idx is odd
     FLAG_DESCRIPTIONS_B = {
         "cross_bureau_balance_conflict":        "the balance amount does not match from one bureau to the next",
         "cross_bureau_payment_status_conflict": "each bureau is showing a different payment status for this account",
@@ -4048,7 +3967,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "balance_exceeds_credit_limit":         "the reported balance is higher than the credit limit by a significant margin",
         "past_due_exceeds_balance":             "the past-due figure exceeds the total balance, which mathematically cannot be correct",
         "monthly_payment_on_collection":        "a monthly payment is being reported on this collection account, even though collections do not carry active payment schedules",
-        "current_payment_derogatory_status":    "the payment status reads current while the overall account classification is derogatory — those two do not agree",
+        "current_payment_derogatory_status":    "the payment status reads current while the overall account classification is derogatory, those two do not agree",
         "opened_after_last_active":             "the account open date falls after the date of last activity, which makes no chronological sense",
     }
 
@@ -4065,7 +3984,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
     if not described:
         return ""
 
-    # Lead-in phrasings — rotate so cross-bureau letters vary
+    # Lead-in phrasings, rotate so cross-bureau letters vary
     _SINGLE_FLAG_INTROS = [
         " Beyond the primary dispute above, I also noticed that {desc}. "
         "That is an additional accuracy issue on the same account that I am "
@@ -4083,7 +4002,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "That is its own accuracy problem and needs to be corrected as part of "
         "the reinvestigation of this account.",
 
-        " I also want to note a second issue on this same account — {desc}. "
+        " I also want to note a second issue on this same account, {desc}. "
         "Please include this in the reinvestigation, as it affects whether the "
         "entry as a whole can be considered accurate under the FCRA.",
 
@@ -4096,7 +4015,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         " In addition to the dispute above, I found several other accuracy "
         "problems with this account that I want addressed at the same time: "
         "{bullets}. Each of these is a separate issue that requires "
-        "verification and correction under 15 U.S.C. §1681e(b).",
+        "verification and correction under 15 U.S.C. section 1681e(b).",
 
         " Beyond the main dispute, I identified a number of additional "
         "accuracy issues on this same account: {bullets}. I am asking that "
@@ -4125,7 +4044,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     Generates a unique, specific, humanized dispute reason for each account.
     Uses all available fields from the item to craft individualized language.
     No two accounts with different data will ever share identical text.
-    No automated/AI language — written as if the client themselves wrote it.
+    No automated/AI language, written as if the client themselves wrote it.
 
     bureau: if provided (transunion|experian|equifax), used to guarantee that
     the SAME account in letters to different bureaus selects a DIFFERENT
@@ -4153,12 +4072,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # Build contextual detail strings used across multiple attack types
     bal_str   = f" of ${balance}"   if balance and balance not in ("0","0.0","$0.00","") else ""
-    acct_str  = f" (account ending {acct[-4:]})" if acct and len(acct) >= 4 else (f" (account {acct})" if acct else "")
+    _last4 = last_four_digits(acct)
+    acct_str  = f" (account ending {_last4})" if _last4 else (f" (account {acct})" if acct else "")
     open_str  = f" opened {date_opened}" if date_opened else ""
     rpt_str   = f", last reported {last_rpt}" if last_rpt else ""
     active_str = f", last active {date_active}" if date_active else ""
 
-    # ── BUREAU-AWARE VARIANT SELECTION ─────────────────────────────────
+    # -- BUREAU-AWARE VARIANT SELECTION ---------------------------------
     # Each bureau gets a deterministic shift per pool size. For 2-variant
     # pools (the tightest constraint), we rely on the item's hash to ensure
     # the three bureaus don't all collide: TU and EQF take opposite slots
@@ -4167,9 +4087,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     # Why this works:
     #   - 2-variant pool: EXP differs from TU by 1. EQF differs from both
     #     (when possible) by using account-level parity.
-    #   - 3-variant pool: TU=0, EXP=1, EQF=2 — all three guaranteed different.
-    #   - 4-variant pool: TU=0, EXP=1, EQF=3 — all three guaranteed different.
-    #   - 8-variant pool: TU=0, EXP=3, EQF=5 — large spacing, all different.
+    #   - 3-variant pool: TU=0, EXP=1, EQF=2, all three guaranteed different.
+    #   - 4-variant pool: TU=0, EXP=1, EQF=3, all three guaranteed different.
+    #   - 8-variant pool: TU=0, EXP=3, EQF=5, large spacing, all different.
     #
     # The result: cross-bureau duplicate variants are impossible regardless
     # of the attack pool's size.
@@ -4193,13 +4113,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         v4 = variation_idx % 4
         v8 = variation_idx % 8
 
-    # ── OBSOLETE — 7-year limit ────────────────────────────────────────────
+    # -- OBSOLETE, 7-year limit --------------------------------------------
     if attack_type == "obsolete_account_7yr_limit":
         if v3 == 0:
             reason = (
                 f"I went back and calculated the dates on this account. Based on "
-                f"when I first fell behind — around {dofd} — the Fair Credit "
-                f"Reporting Act (15 U.S.C. §1681c(a)(4)) only allows this type of "
+                f"when I first fell behind, around {dofd}, the Fair Credit "
+                f"Reporting Act (15 U.S.C. section 1681c(a)(4)) only allows this type of "
                 f"account to stay on a report for seven years from 180 days after "
                 f"that first missed payment. That window closed around {fcra_exp}. "
                 f"This account should have been removed by then and has no legal "
@@ -4210,24 +4130,24 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"This account has been on my credit "
                 f"report longer than the law allows. My first delinquency was around "
                 f"{dofd}, which means the seven-year FCRA clock expired around "
-                f"{fcra_exp} under 15 U.S.C. §1681c(a)(4). Keeping it on my report "
-                f"past that date is a violation — I am asking for it to be deleted immediately."
+                f"{fcra_exp} under 15 U.S.C. section 1681c(a)(4). Keeping it on my report "
+                f"past that date is a violation, I am asking for it to be deleted immediately."
             )
         else:
             reason = (
-                f"The math on this account does not add up in my favor — it adds up "
+                f"The math on this account does not add up in my favor, it adds up "
                 f"in the law's favor. First delinquency around {dofd} means the FCRA "
-                f"seven-year limit (15 U.S.C. §1681c(a)(4)) ran out around {fcra_exp}. "
+                f"seven-year limit (15 U.S.C. section 1681c(a)(4)) ran out around {fcra_exp}. "
                 f"the creditor cannot legally keep this on my report past that date. "
-                f"I am requesting deletion with no further reinvestigation required — "
+                f"I am requesting deletion with no further reinvestigation required, "
                 f"the statute is clear."
             )
 
-    # ── CHILD SUPPORT ──────────────────────────────────────────────────────
+    # -- CHILD SUPPORT ------------------------------------------------------
     elif neg_type == "child_support":
         reason = (
             f"I am disputing this child or family support account from them. "
-            f"Under 15 U.S.C. §1681s-1, only overdue support that has been certified "
+            f"Under 15 U.S.C. section 1681s-1, only overdue support that has been certified "
             f"by the state agency may be reported. The balance shown{bal_str} and the "
             f"past-due amount of {past_due} need to be backed up by a current state "
             f"certification confirming exactly what is delinquent. If any of that "
@@ -4235,11 +4155,11 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"is outdated, this must be corrected or removed entirely."
         )
 
-    # ── STUDENT LOAN — generic ─────────────────────────────────────────────
+    # -- STUDENT LOAN, generic ---------------------------------------------
     elif neg_type == "student_loan":
         reason = (
             f"I am disputing this student loan from them. "
-            f"Student loan accounts have a documented history of servicer errors — "
+            f"Student loan accounts have a documented history of servicer errors, "
             f"loans reported by multiple servicers at once, balances that do not "
             f"update after transfers, and late marks that appear during deferment "
             f"periods when no payment was actually due. I need them to confirm "
@@ -4248,13 +4168,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"reporting the same loan. If this cannot all be verified, it must be removed."
         )
 
-    # ── BANKRUPTCY ────────────────────────────────────────────────────────
+    # -- BANKRUPTCY --------------------------------------------------------
     elif neg_type == "bankruptcy":
         reason = (
             f"I am disputing how the creditor is reporting this account "
-            f"in connection with a bankruptcy. Under 15 U.S.C. §1681c(a)(1), "
+            f"in connection with a bankruptcy. Under 15 U.S.C. section 1681c(a)(1), "
             f"accounts included in a bankruptcy discharge must accurately reflect "
-            f"that discharged status — they cannot continue showing an active balance "
+            f"that discharged status, they cannot continue showing an active balance "
             f"or derogatory payment history after the discharge date. "
             f"I need them to confirm the correct bankruptcy chapter, the filing "
             f"date, the discharge date, and that every field reflects what actually "
@@ -4262,7 +4182,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"needs to be corrected or deleted."
         )
 
-    # ── REPOSSESSION ──────────────────────────────────────────────────────
+    # -- REPOSSESSION ------------------------------------------------------
     elif neg_type == "repossession":
         bal_note = f" The remaining balance shown is{bal_str}." if balance and balance not in ("0","0.0","$0.00","") else ""
         reason = (
@@ -4278,12 +4198,12 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"Without that, this account cannot be verified."
         )
 
-    # ── CHARGE-OFF DEFICIENCY ─────────────────────────────────────────────
+    # -- CHARGE-OFF DEFICIENCY ---------------------------------------------
     elif neg_type == "charge_off_deficiency":
         reason = (
             f"I am disputing the balance on this charged-off account from "
             f"the creditor. When an account is charged off, the creditor "
-            f"writes it off as a loss — but the balance they continue to report must "
+            f"writes it off as a loss, but the balance they continue to report must "
             f"reflect only what was actually owed at that point, not an inflated "
             f"figure padded with fees or interest added after the charge-off date. "
             f"The balance shown{bal_str} needs to be backed up with a complete "
@@ -4292,12 +4212,12 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"this account must be corrected or removed."
         )
 
-    # ── PAID COLLECTION ───────────────────────────────────────────────────
+    # -- PAID COLLECTION ---------------------------------------------------
     elif neg_type == "paid_collection":
         reason = (
-            f"This account has been paid or settled — "
-            f"the balance is zero — yet it continues to be reported with a derogatory "
-            f"classification. Under 15 U.S.C. §1681e(b), reporting a negative status "
+            f"This account has been paid or settled, "
+            f"the balance is zero, yet it continues to be reported with a derogatory "
+            f"classification. Under 15 U.S.C. section 1681e(b), reporting a negative status "
             f"on an account that has been resolved is not accurate. I am asking that "
             f"the creditor update the status to correctly reflect that this account was "
             f"paid or settled, and also confirm the correct Date of First Delinquency "
@@ -4305,14 +4225,14 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"is not corrected, it needs to be deleted."
         )
 
-    # ── RE-AGING ──────────────────────────────────────────────────────────
+    # -- RE-AGING ----------------------------------------------------------
     elif attack_type == "potential_re_aging":
         if v4 == 0:
             reason = (
                 f"I looked at the dates on this account "
                 f"and something does not add up. The date being used is well after "
-                f"when I actually stopped paying — which was around {dofd}. Under "
-                f"15 U.S.C. §1681c(c), the seven-year clock runs from my original "
+                f"when I actually stopped paying, which was around {dofd}. Under "
+                f"15 U.S.C. section 1681c(c), the seven-year clock runs from my original "
                 f"date of first delinquency, not from the date a collector picked "
                 f"it up or when their records start. Using their own date would push "
                 f"the expiration out to somewhere past {fcra_exp}, which is longer "
@@ -4324,8 +4244,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"The date associated with this account "
                 f"does not match when I actually first fell behind. My last payment "
                 f"to the original creditor was around {dofd}. The date being shown "
-                f"looks like when the creditor acquired the account — not my actual "
-                f"delinquency date. Under 15 U.S.C. §1681c(c), only the original "
+                f"looks like when the creditor acquired the account, not my actual "
+                f"delinquency date. Under 15 U.S.C. section 1681c(c), only the original "
                 f"date of first delinquency controls the reporting period. I need "
                 f"the original date verified with records from the original creditor. "
                 f"Using their own date to extend this account past {fcra_exp} is "
@@ -4336,23 +4256,23 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"Something is off about the dates on this account. "
                 f"I first fell behind around {dofd}, which means this account's legal "
                 f"reporting window should have closed around {fcra_exp}. If the creditor "
-                f"is using a later date — like when they obtained the account — to "
+                f"is using a later date, like when they obtained the account, to "
                 f"extend how long this stays on my report, that is re-aging under "
-                f"15 U.S.C. §1681c(c). I am requesting documentation of the original "
+                f"15 U.S.C. section 1681c(c). I am requesting documentation of the original "
                 f"date of first delinquency directly from the original creditor's records."
             )
         else:
             reason = (
                 f"The reporting date on this account "
                 f"appears to be later than my actual delinquency date of around {dofd}. "
-                f"That pushes the FCRA expiration past {fcra_exp} — longer than the "
-                f"law permits. Under 15 U.S.C. §1681c(c), only my original date of "
+                f"That pushes the FCRA expiration past {fcra_exp}, longer than the "
+                f"law permits. Under 15 U.S.C. section 1681c(c), only my original date of "
                 f"first delinquency counts. I am asking them to produce that "
                 f"date with primary documentation. If they use their own acquisition "
                 f"date, that is a statutory violation I intend to pursue."
             )
 
-    # ── DOFD UNKNOWN ──────────────────────────────────────────────────────
+    # -- DOFD UNKNOWN ------------------------------------------------------
     elif attack_type == "dofd_unknown_verification_required":
         if dla_refresh:
             if v4 == 0:
@@ -4362,7 +4282,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"reported to you{rpt_str}. That looks like the creditor is refreshing "
                     f"that date to make the account appear more recent than it actually is. "
                     f"The seven-year window under the FCRA must run from when I first "
-                    f"missed a payment — not from the last time they updated their own "
+                    f"missed a payment, not from the last time they updated their own "
                     f"record. I am asking them to disclose the original date of "
                     f"first delinquency with backup documentation from the original creditor. "
                     f"If they cannot do that, this account cannot be reported."
@@ -4372,8 +4292,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"The date being used for this account appears "
                     f"to reflect when they last touched the record{active_str}, not when "
                     f"I actually first fell behind. That is a meaningful difference. "
-                    f"Under 15 U.S.C. §1681c(c), the reporting clock starts from my "
-                    f"original date of first delinquency — not from a furnisher's "
+                    f"Under 15 U.S.C. section 1681c(c), the reporting clock starts from my "
+                    f"original date of first delinquency, not from a furnisher's "
                     f"internal update date. I need the original DOFD with primary "
                     f"documentation, or this account must be removed."
                 )
@@ -4381,7 +4301,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 reason = (
                     f"Looking at this account more closely, the 'last active' field "
                     f"seems to shift every time the creditor updates the record{active_str}. "
-                    f"That is not how the FCRA clock works — the reporting window runs "
+                    f"That is not how the FCRA clock works, the reporting window runs "
                     f"from the original date of first delinquency, fixed at the moment "
                     f"I first fell behind with the original creditor. Repeatedly "
                     f"refreshing an internal date does not reset the statutory period. "
@@ -4395,7 +4315,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"suggests the creditor is refreshing it rather than anchoring "
                     f"reporting to the actual DOFD. Under federal law, only the "
                     f"original delinquency date controls how long this can stay on my "
-                    f"file — not a running tally of when the furnisher last touched "
+                    f"file, not a running tally of when the furnisher last touched "
                     f"the account. Please require them to produce the original DOFD "
                     f"from the creditor's records."
                 )
@@ -4404,8 +4324,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 reason = (
                     f"I cannot tell from what is being reported when I actually first "
                     f"fell behind on this account. That date "
-                    f"is critical — it controls how long this account is legally allowed "
-                    f"to stay on my report under 15 U.S.C. §1681c(c). Without it, I "
+                    f"is critical, it controls how long this account is legally allowed "
+                    f"to stay on my report under 15 U.S.C. section 1681c(c). Without it, I "
                     f"cannot confirm this account is even within its seven-year window. "
                     f"I am asking them to provide the original date of first "
                     f"delinquency with supporting records. If they cannot produce it, "
@@ -4416,7 +4336,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"The date of first delinquency for this account "
                     f"is not clearly shown{rpt_str}. Without that date, I have no way to "
                     f"confirm this account falls within the FCRA's seven-year reporting "
-                    f"window under 15 U.S.C. §1681c(c). I am requesting that they "
+                    f"window under 15 U.S.C. section 1681c(c). I am requesting that they "
                     f"produce the original DOFD from the original creditor's records. "
                     f"If they cannot establish that date, this account is unverifiable."
                 )
@@ -4441,12 +4361,12 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"cannot establish it, the account has not been properly verified."
                 )
 
-    # ── COLLECTOR / ORIGINAL CREDITOR PATTERN ─────────────────────────────
+    # -- COLLECTOR / ORIGINAL CREDITOR PATTERN -----------------------------
     elif attack_type in {
         "collector_original_creditor_self_declared",
         "collector_original_creditor_pattern",
     }:
-        # 4 variantes base × 2 sub-variantes = 8 combinaciones efectivas.
+        # 4 variantes base x 2 sub-variantes = 8 combinaciones efectivas.
         # Sub-variante se selecciona con variation_idx % 7 (coprimo con 4)
         # para garantizar que dos cuentas que caigan en el mismo v4 slot
         # reciban sub-variantes distintas.
@@ -4461,7 +4381,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"agreement between me and the original creditor, a complete chain of "
                 f"assignment showing how this account got from the original creditor to "
                 f"them, and documentation that they have the legal authority to report "
-                f"it under 15 U.S.C. §1681s-2(b). Without all of that, this account "
+                f"it under 15 U.S.C. section 1681s-2(b). Without all of that, this account "
                 f"cannot be verified."
             )
         elif v4 == 0 and sub_variant == 1:
@@ -4470,8 +4390,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"prove they have the right to do so. What I am asking for is specific: "
                 f"the original agreement I signed with the original creditor, the full "
                 f"chain of assignment documenting how the debt reached this agency, and "
-                f"the legal basis for them reporting it under 15 U.S.C. §1681s-2(b). "
-                f"Those are the records they should have in hand — if they do not, "
+                f"the legal basis for them reporting it under 15 U.S.C. section 1681s-2(b). "
+                f"Those are the records they should have in hand, if they do not, "
                 f"this tradeline has not been verified."
             )
         elif v4 == 1 and sub_variant == 0:
@@ -4482,7 +4402,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"of the full assignment chain from the original creditor, and "
                 f"documentation of their standing to report under federal law. "
                 f"I am also asking for the original date of first delinquency from "
-                f"the original creditor's records — not from their own files. "
+                f"the original creditor's records, not from their own files. "
                 f"If any part of that cannot be produced, this account is unverifiable."
             )
         elif v4 == 1 and sub_variant == 1:
@@ -4492,7 +4412,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"the burden is on them to produce the signed original contract, every "
                 f"step of the assignment chain from the original creditor, and "
                 f"documentation of their standing under federal law. I also want the "
-                f"original date of first delinquency — from the original creditor's "
+                f"original date of first delinquency, from the original creditor's "
                 f"records, not from theirs. Any gap in that proof leaves this account "
                 f"unverifiable."
             )
@@ -4500,7 +4420,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"A collection agency is furnishing this account, and I want to "
                 f"confirm they have the right to do so. Simply showing up on my "
-                f"report is not enough — they need to be able to demonstrate how "
+                f"report is not enough, they need to be able to demonstrate how "
                 f"this debt was transferred to them, when, and under what agreement. "
                 f"I am requesting the original signed contract, every assignment "
                 f"document between the original creditor and this agency, and the "
@@ -4523,26 +4443,26 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"This entry looks like a third-party collection, and that carries "
                 f"specific verification requirements under federal law. The agency "
-                f"reporting it has to be able to produce the underlying paperwork — "
+                f"reporting it has to be able to produce the underlying paperwork, "
                 f"not just a data feed. That means the original contract I signed with "
                 f"the original creditor, a documented chain of transfer showing how "
                 f"the account legally reached this agency, and the original delinquency "
                 f"date from the creditor's files. Reporting without those records "
-                f"does not meet the accuracy standard of 15 U.S.C. §1681e(b)."
+                f"does not meet the accuracy standard of 15 U.S.C. section 1681e(b)."
             )
         else:  # v4 == 3 and sub_variant == 1
             reason = (
                 f"What is being reported here appears to be a third-party collection, "
                 f"which triggers heightened verification requirements. The agency "
-                f"cannot satisfy those by pointing back at its own data — it has to "
+                f"cannot satisfy those by pointing back at its own data, it has to "
                 f"produce the original signed contract, a documented chain of transfer "
                 f"from the original creditor, and the actual date of first delinquency "
                 f"from the creditor's own files. Reporting without being able to "
                 f"produce those records does not meet the accuracy standard under "
-                f"15 U.S.C. §1681e(b)."
+                f"15 U.S.C. section 1681e(b)."
             )
 
-    # ── DUPLICATE ACCOUNT / SAME BALANCE ──────────────────────────────────
+    # -- DUPLICATE ACCOUNT / SAME BALANCE ----------------------------------
     elif attack_type in {
         "same_account_number_same_balance",
         "duplicate_account_number",
@@ -4551,9 +4471,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"This account number{bal_str} from them is showing "
                 f"up more than once on my credit report. As far as I know, this is one "
-                f"debt — not two separate obligations. Having it listed twice makes my "
+                f"debt, not two separate obligations. Having it listed twice makes my "
                 f"report look worse than it actually is, and reporting the same debt "
-                f"multiple times is inaccurate under 15 U.S.C. §1681e(b). I am asking "
+                f"multiple times is inaccurate under 15 U.S.C. section 1681e(b). I am asking "
                 f"that you determine whether these entries are the same account and "
                 f"remove whichever one cannot be verified as a distinct separate debt."
             )
@@ -4561,7 +4481,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"I see this same account from them{bal_str} appearing "
                 f"more than once on my report. If it is the same debt, only the entity "
-                f"that currently holds it should be reporting it — and only once. "
+                f"that currently holds it should be reporting it, and only once. "
                 f"I am asking that every reporting party provide independent proof of "
                 f"ownership and authority, and that any duplicate entry be deleted."
             )
@@ -4579,28 +4499,28 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"reported under more than one name. Only one party can own and "
                 f"report the same debt at any time. I am requesting proof of ownership "
                 f"from each party, and deletion of any entry that cannot independently "
-                f"verify it is a distinct and separate obligation under 15 U.S.C. §1681e(b)."
+                f"verify it is a distinct and separate obligation under 15 U.S.C. section 1681e(b)."
             )
 
-    # ── MULTI FURNISHER SAME BALANCE ──────────────────────────────────────
+    # -- MULTI FURNISHER SAME BALANCE --------------------------------------
     elif attack_type == "multi_furnisher_same_balance":
         reason = (
-            f"Multiple companies — including the creditor — appear to be "
+            f"Multiple companies, including the creditor, appear to be "
             f"reporting the same balance{bal_str}. If this is one debt, only whoever "
             f"actually holds it right now should be reporting it. I am asking each "
             f"reporting company to show independent proof of ownership and their "
-            f"right to report under 15 U.S.C. §1681s-2. Any company that cannot "
+            f"right to report under 15 U.S.C. section 1681s-2. Any company that cannot "
             f"prove they are the current holder of this debt needs to be removed."
         )
 
-    # ── CROSS-BUREAU BALANCE CONFLICT ─────────────────────────────────────
+    # -- CROSS-BUREAU BALANCE CONFLICT -------------------------------------
     elif attack_type == "cross_bureau_balance_conflict":
         if v3 == 0:
             reason = (
                 f"The balance on this account is being "
                 f"reported as {balance or 'different amounts'} at this bureau, "
                 f"but a different figure appears elsewhere. A balance is a specific "
-                f"dollar amount at a specific point in time — it cannot be two "
+                f"dollar amount at a specific point in time, it cannot be two "
                 f"different numbers simultaneously. One of those figures has to be "
                 f"wrong. I am asking them to document the actual correct "
                 f"balance and update all three bureaus to show the same number."
@@ -4610,7 +4530,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"I noticed that the creditor shows a balance of "
                 f"{balance or 'a certain amount'} here, but a different balance "
                 f"at another bureau{rpt_str}. There is only one correct balance "
-                f"for this account at any given time. Under 15 U.S.C. §1681e(b), "
+                f"for this account at any given time. Under 15 U.S.C. section 1681e(b), "
                 f"I am requesting that the accurate figure be verified with account "
                 f"statements and reported consistently everywhere."
             )
@@ -4618,19 +4538,19 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"There is a balance discrepancy on this account. "
                 f"This bureau shows {balance or 'one amount'}, while another bureau "
-                f"shows something different. A creditor reports one balance — not "
+                f"shows something different. A creditor reports one balance, not "
                 f"different numbers to different bureaus. At least one bureau is "
                 f"receiving inaccurate data. I am requesting verification of the "
                 f"correct balance with primary account documentation and correction "
                 f"at whichever bureau is reporting the wrong figure."
             )
 
-    # ── CROSS-BUREAU PAYMENT STATUS CONFLICT ──────────────────────────────
+    # -- CROSS-BUREAU PAYMENT STATUS CONFLICT ------------------------------
     elif attack_type == "cross_bureau_payment_status_conflict":
         if v3 == 0:
             reason = (
                 f"The payment status on this account is "
-                f"inconsistent across bureaus. Here it shows as '{pay_status}' — "
+                f"inconsistent across bureaus. Here it shows as '{pay_status}', "
                 f"but a different status appears elsewhere. The same account cannot "
                 f"have two different payment statuses. I am asking that the accurate "
                 f"status be determined and reported the same way at every bureau."
@@ -4640,41 +4560,41 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"the creditor is reporting this account with a payment "
                 f"status of '{pay_status}' here, but the other bureaus show something "
                 f"different. These conflicting classifications cannot all be correct. "
-                f"Under 15 U.S.C. §1681e(b), I am asking that the right status be "
+                f"Under 15 U.S.C. section 1681e(b), I am asking that the right status be "
                 f"verified and that all three bureaus are updated to match."
             )
         else:
             reason = (
                 f"I am disputing the payment classification on this account from "
                 f"the creditor. The status here is '{pay_status}' but it "
-                f"varies at other bureaus — which means at least one bureau is "
+                f"varies at other bureaus, which means at least one bureau is "
                 f"getting inaccurate information from the furnisher. Only one "
                 f"status can be correct. I am requesting verification and correction."
             )
 
-    # ── CROSS-BUREAU ACCOUNT STATUS CONFLICT ──────────────────────────────
+    # -- CROSS-BUREAU ACCOUNT STATUS CONFLICT ------------------------------
     elif attack_type == "cross_bureau_account_status_conflict":
         reason = (
             f"This account shows a status of '{status}' "
             f"here, but a different status at another bureau. Whether an account is "
-            f"open, closed, charged off, or in collection is a factual matter — it "
+            f"open, closed, charged off, or in collection is a factual matter, it "
             f"cannot differ by bureau. I am asking that the correct status be "
             f"determined and that the inaccurate reporting be corrected or deleted."
         )
 
-    # ── OPENED AFTER LAST ACTIVE ──────────────────────────────────────────
+    # -- OPENED AFTER LAST ACTIVE ------------------------------------------
     elif attack_type == "opened_after_last_active":
         reason = (
             f"There is a date problem with this account. "
             f"The open date is listed as {date_opened}, but the last activity date "
-            f"is {date_active} — which is before the account supposedly opened. "
+            f"is {date_active}, which is before the account supposedly opened. "
             f"An account cannot have activity before it existed. At least one of "
-            f"these dates is wrong, and inaccurate dates violate 15 U.S.C. §1681e(b). "
+            f"these dates is wrong, and inaccurate dates violate 15 U.S.C. section 1681e(b). "
             f"I am asking that both dates be verified with the original records and "
             f"the incorrect one corrected."
         )
 
-    # ── PAST DUE EXCEEDS BALANCE ──────────────────────────────────────────
+    # -- PAST DUE EXCEEDS BALANCE ------------------------------------------
     elif attack_type == "past_due_exceeds_balance":
         if v4 == 0:
             reason = (
@@ -4682,23 +4602,23 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"sense. The past-due amount being reported is {past_due}, but the total "
                 f"balance is only {balance}. You cannot owe more in past-due payments "
                 f"than the full outstanding debt. This is mathematically impossible, "
-                f"which means either the balance or the past-due figure — or both — "
+                f"which means either the balance or the past-due figure, or both, "
                 f"is being reported incorrectly."
             )
         elif v4 == 1:
             reason = (
                 f"There is a math problem on this account that the creditor needs "
                 f"to explain. The past-due figure is {past_due} while the total "
-                f"balance is {balance} — meaning the past-due portion is larger than "
+                f"balance is {balance}, meaning the past-due portion is larger than "
                 f"the entire debt. That is not possible by definition. Under "
-                f"15 U.S.C. §1681e(b), figures being reported have to be accurate, "
+                f"15 U.S.C. section 1681e(b), figures being reported have to be accurate, "
                 f"and at least one of these is not."
             )
         elif v4 == 2:
             reason = (
                 f"I am flagging this account because the numbers being reported "
                 f"contradict each other. A past-due amount of {past_due} on a total "
-                f"balance of {balance} is arithmetically impossible — the part "
+                f"balance of {balance} is arithmetically impossible, the part "
                 f"cannot exceed the whole. This indicates an error in how the "
                 f"creditor is reporting one or both figures, and I am asking that "
                 f"it be investigated and corrected."
@@ -4707,28 +4627,28 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"This account shows a past-due amount ({past_due}) that is larger "
                 f"than the reported total balance ({balance}). Those two figures "
-                f"cannot both be accurate at the same time — a past-due portion "
+                f"cannot both be accurate at the same time, a past-due portion "
                 f"cannot be greater than the whole debt it comes from. Please have "
                 f"the creditor verify both numbers against the actual account "
                 f"records and correct whichever is wrong."
             )
 
-    # ── BALANCE EXCEEDS CREDIT LIMIT ──────────────────────────────────────
+    # -- BALANCE EXCEEDS CREDIT LIMIT --------------------------------------
     elif attack_type == "balance_exceeds_credit_limit":
         if v4 == 0:
             reason = (
                 f"This account shows a balance of {balance} "
                 f"against a credit limit of {credit_limit}. While fees can push a balance "
                 f"slightly over the limit, the extent of this difference indicates something "
-                f"is wrong — either the balance is inflated or the credit limit is being "
-                f"understated. Under 15 U.S.C. §1681e(b), both numbers need to be accurate. "
+                f"is wrong, either the balance is inflated or the credit limit is being "
+                f"understated. Under 15 U.S.C. section 1681e(b), both numbers need to be accurate. "
                 f"I am requesting documentation to verify both figures."
             )
         elif v4 == 1:
             reason = (
                 f"The balance on this account ({balance}) is significantly higher than "
                 f"the credit limit ({credit_limit}). That spread is too large to be "
-                f"explained by normal fees or interest — at least one of these two "
+                f"explained by normal fees or interest, at least one of these two "
                 f"figures is being reported incorrectly. I am asking that both be "
                 f"verified against the actual account records."
             )
@@ -4744,18 +4664,18 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"I am disputing the figures on this account. The balance ({balance}) "
                 f"is meaningfully higher than the credit limit ({credit_limit}). "
                 f"Either the credit limit has been under-reported or the balance has "
-                f"been inflated — in either case, the reporting is not accurate under "
-                f"15 U.S.C. §1681e(b)."
+                f"been inflated, in either case, the reporting is not accurate under "
+                f"15 U.S.C. section 1681e(b)."
             )
 
-    # ── BALANCE EXCEEDS HIGH CREDIT ───────────────────────────────────────
+    # -- BALANCE EXCEEDS HIGH CREDIT ---------------------------------------
     elif attack_type == "balance_exceeds_high_credit":
         if v4 == 0:
             reason = (
                 f"Something is wrong with the balance on this account. "
                 f"The current balance is {balance}, but that exceeds the original loan amount "
                 f"of {high_credit}. On an installment loan, the balance should decrease over "
-                f"time as payments are made — it cannot grow beyond the original principal "
+                f"time as payments are made, it cannot grow beyond the original principal "
                 f"without indicating a reporting error. I am asking that both figures be "
                 f"verified with original records and any error corrected."
             )
@@ -4763,7 +4683,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"The balance on this account ({balance}) is higher than the "
                 f"original loan amount ({high_credit}). That should not be possible "
-                f"on an installment account — the debt decreases over time as "
+                f"on an installment account, the debt decreases over time as "
                 f"principal is paid down. At least one of these figures is being "
                 f"reported inaccurately. Please verify."
             )
@@ -4779,21 +4699,21 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"There is an accuracy problem on this account: the reported "
                 f"balance ({balance}) exceeds the high credit amount ({high_credit}) "
-                f"— the original loan principal. A balance cannot legitimately grow "
+                f", the original loan principal. A balance cannot legitimately grow "
                 f"larger than the original amount owed on an installment account. "
                 f"Please have both figures reviewed and corrected."
             )
 
-    # ── OPEN STATUS / CHARGEOFF CONFLICT ──────────────────────────────────
+    # -- OPEN STATUS / CHARGEOFF CONFLICT ----------------------------------
     elif attack_type == "open_status_chargeoff_conflict":
         if v4 == 0:
             reason = (
                 f"This account is listed as 'Open' in the "
                 f"account status, but the payment status shows '{pay_status}'. Those two "
                 f"things cannot coexist. An account that has been charged off or sent to "
-                f"collections is not open — it was closed when it defaulted. Reporting "
+                f"collections is not open, it was closed when it defaulted. Reporting "
                 f"it as both open and charged-off is directly contradictory and inaccurate "
-                f"under 15 U.S.C. §1681e(b). I am asking that the correct status be "
+                f"under 15 U.S.C. section 1681e(b). I am asking that the correct status be "
                 f"applied and the inaccurate one removed."
             )
         elif v4 == 1:
@@ -4801,14 +4721,14 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"The reporting on this account contradicts itself. The account "
                 f"status reads 'Open' while the payment status reads '{pay_status}'. "
                 f"A charged-off or collection account is by definition no longer "
-                f"open — the two states are mutually exclusive. One of these fields "
+                f"open, the two states are mutually exclusive. One of these fields "
                 f"is wrong and needs to be corrected."
             )
         elif v4 == 2:
             reason = (
                 f"I am disputing this account because it is being reported with two "
                 f"conflicting statuses. It is flagged 'Open' yet also shows a payment "
-                f"status of '{pay_status}' — a charge-off/collection state. Those "
+                f"status of '{pay_status}', a charge-off/collection state. Those "
                 f"cannot both be true at once. Please investigate and report this "
                 f"account under a single accurate status."
             )
@@ -4818,17 +4738,17 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"the account is active and in good standing, while '{pay_status}' "
                 f"indicates the account defaulted and was written off. Reporting "
                 f"both at the same time is not consistent with reality, and under "
-                f"15 U.S.C. §1681e(b), the record has to be accurate."
+                f"15 U.S.C. section 1681e(b), the record has to be accurate."
             )
 
-    # ── PAID STATUS WITH PAST DUE ─────────────────────────────────────────
+    # -- PAID STATUS WITH PAST DUE -----------------------------------------
     elif attack_type == "paid_status_with_past_due":
         if v4 == 0:
             reason = (
                 f"The reporting on this account is contradictory. "
                 f"The status shows as 'Paid,' but there is also a past-due amount of "
                 f"{past_due} being reported. An account that has been paid cannot "
-                f"simultaneously carry an outstanding past-due balance — those two "
+                f"simultaneously carry an outstanding past-due balance, those two "
                 f"things directly contradict each other. One of them is wrong, and "
                 f"I am asking that the accurate information be verified and the "
                 f"inaccurate data corrected immediately."
@@ -4837,7 +4757,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"I am flagging an inconsistency on this account. It is marked "
                 f"'Paid' but at the same time shows a past-due figure of {past_due}. "
-                f"A paid account does not have past-due amounts — those two fields "
+                f"A paid account does not have past-due amounts, those two fields "
                 f"are mutually exclusive. Please correct whichever is not accurate."
             )
         elif v4 == 2:
@@ -4845,7 +4765,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"The status and balance on this account do not match. The status "
                 f"reads 'Paid' yet a past-due amount of {past_due} is still being "
                 f"reported. If the account is paid in full, the past-due should be "
-                f"zero. Under 15 U.S.C. §1681e(b), both fields cannot be right at "
+                f"zero. Under 15 U.S.C. section 1681e(b), both fields cannot be right at "
                 f"the same time."
             )
         else:
@@ -4853,17 +4773,17 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"There is a conflict on this account between the status and the "
                 f"past-due figure. The account is showing as paid, but also carries "
                 f"a past-due amount of {past_due}. That combination is logically "
-                f"impossible — a paid account has no past-due balance. I am asking "
+                f"impossible, a paid account has no past-due balance. I am asking "
                 f"that the reporting be corrected to reflect the actual state."
             )
 
-    # ── CLOSED WITH BALANCE ───────────────────────────────────────────────
+    # -- CLOSED WITH BALANCE -----------------------------------------------
     elif attack_type == "closed_with_balance":
         if v4 == 0:
             reason = (
                 f"This account shows a status of 'Closed' "
                 f"but is still reporting a balance of {balance}. A closed account that "
-                f"is not in collection or charged off should carry a zero balance — "
+                f"is not in collection or charged off should carry a zero balance, "
                 f"when the account closed, the creditor relationship ended. "
                 f"I am asking that this discrepancy be investigated and either the "
                 f"balance be corrected to zero or the account status be updated to "
@@ -4881,7 +4801,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"The status on this account reads 'Closed' but there is a balance "
                 f"of {balance} still on file. A closed account, by definition, means "
-                f"the relationship with the creditor has ended — if money is still "
+                f"the relationship with the creditor has ended, if money is still "
                 f"owed, the account should be reported under a status that reflects "
                 f"that (collection, charge-off, etc.), not simply 'closed'. I am "
                 f"asking that the reporting be made internally consistent."
@@ -4892,27 +4812,27 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"show a balance of {balance}. Those two pieces of information "
                 f"conflict: a normal closure implies a zero balance, while a "
                 f"remaining balance implies the account is not truly closed. "
-                f"Under 15 U.S.C. §1681e(b), the reporting has to be consistent "
+                f"Under 15 U.S.C. section 1681e(b), the reporting has to be consistent "
                 f"and accurate. Please correct whichever field is in error."
             )
 
-    # ── CURRENT PAYMENT / DEROGATORY STATUS ───────────────────────────────
+    # -- CURRENT PAYMENT / DEROGATORY STATUS -------------------------------
     elif attack_type == "current_payment_derogatory_status":
         if v4 == 0:
             reason = (
                 f"There is a direct contradiction in how the creditor is reporting "
-                f"this account. The payment status shows 'Current' — meaning "
-                f"no payment is overdue — but the account classification is 'Derogatory'. "
+                f"this account. The payment status shows 'Current', meaning "
+                f"no payment is overdue, but the account classification is 'Derogatory'. "
                 f"Those two things cannot both be true at the same time. If all payments "
                 f"are being made on time, the account cannot be classified as derogatory. "
                 f"I am asking that the accurate classification be applied and the "
-                f"conflicting one corrected under 15 U.S.C. §1681e(b)."
+                f"conflicting one corrected under 15 U.S.C. section 1681e(b)."
             )
         elif v4 == 1:
             reason = (
                 f"The payment status on this account reads 'Current' while the "
                 f"overall classification is 'Derogatory'. Those two fields are "
-                f"contradicting each other — an account that is paying on time "
+                f"contradicting each other, an account that is paying on time "
                 f"cannot legitimately be classified as derogatory. One of these "
                 f"needs to be fixed."
             )
@@ -4930,26 +4850,26 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"a current payment status but a derogatory overall rating. If "
                 f"payments are truly current, the derogatory classification is "
                 f"wrong. If the account is actually derogatory, the 'Current' "
-                f"payment status is wrong. Under 15 U.S.C. §1681e(b), this has "
+                f"payment status is wrong. Under 15 U.S.C. section 1681e(b), this has "
                 f"to be reconciled."
             )
 
-    # ── MONTHLY PAYMENT ON COLLECTION ─────────────────────────────────────
+    # -- MONTHLY PAYMENT ON COLLECTION -------------------------------------
     elif attack_type == "monthly_payment_on_collection":
         if v4 == 0:
             reason = (
                 f"This collection account from them is reporting a "
                 f"monthly payment of {monthly_pmt}. Collection accounts do not have an "
-                f"ongoing monthly payment schedule — the original creditor relationship "
+                f"ongoing monthly payment schedule, the original creditor relationship "
                 f"ended when the account defaulted and was transferred. There is no "
                 f"entity expecting regular monthly payments from me on this account, "
-                f"which makes this field inaccurate and misleading under 15 U.S.C. §1681e(b)."
+                f"which makes this field inaccurate and misleading under 15 U.S.C. section 1681e(b)."
             )
         elif v4 == 1:
             reason = (
                 f"A monthly payment figure of {monthly_pmt} is being reported on "
                 f"what is classified as a collection account. Collections do not "
-                f"carry active monthly payment schedules — once a debt is charged "
+                f"carry active monthly payment schedules, once a debt is charged "
                 f"off or assigned to a collector, the original payment arrangement "
                 f"no longer exists. This field should be zero or not reported at all."
             )
@@ -4957,7 +4877,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"I am disputing the monthly payment field on this account. It "
                 f"shows {monthly_pmt} as a monthly payment, but the account is "
-                f"reported as a collection. Those two things don't fit together — "
+                f"reported as a collection. Those two things don't fit together, "
                 f"a collection account is past the stage of scheduled payments. "
                 f"Please remove or correct the monthly payment field."
             )
@@ -4965,56 +4885,56 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"This account is in collection, yet it is reporting a monthly "
                 f"payment amount of {monthly_pmt}. That field does not apply to "
-                f"collection accounts — there is no ongoing payment obligation in "
+                f"collection accounts, there is no ongoing payment obligation in "
                 f"the normal sense once an account reaches that stage. Reporting "
-                f"a monthly payment here is inaccurate under 15 U.S.C. §1681e(b)."
+                f"a monthly payment here is inaccurate under 15 U.S.C. section 1681e(b)."
             )
 
-    # ── CROSS-BUREAU DATE OPENED CONFLICT ─────────────────────────────────
+    # -- CROSS-BUREAU DATE OPENED CONFLICT ---------------------------------
     elif attack_type == "cross_bureau_date_opened_conflict":
         reason = (
             f"The date this account was opened is being "
             f"reported differently across bureaus. Here it shows {date_opened}. "
             f"The date an account was opened is a historical fact established by the "
-            f"original creditor — it cannot legitimately vary by bureau. I am asking "
+            f"original creditor, it cannot legitimately vary by bureau. I am asking "
             f"that the correct opening date be verified with the original account "
             f"records and reported consistently at all three bureaus."
         )
 
-    # ── CROSS-BUREAU ACCOUNT TYPE CONFLICT ────────────────────────────────
+    # -- CROSS-BUREAU ACCOUNT TYPE CONFLICT --------------------------------
     elif attack_type == "cross_bureau_account_type_conflict":
         reason = (
             f"This account is classified differently "
             f"depending on which bureau you look at. The account type is a factual "
-            f"characteristic set by the original creditor — it cannot legitimately "
+            f"characteristic set by the original creditor, it cannot legitimately "
             f"change from bureau to bureau. At least one bureau is receiving "
-            f"inaccurate information. Under 15 U.S.C. §1681e(b), I am requesting "
+            f"inaccurate information. Under 15 U.S.C. section 1681e(b), I am requesting "
             f"that the correct account type be confirmed and applied consistently."
         )
 
-    # ── CROSS-BUREAU CREDIT LIMIT CONFLICT ────────────────────────────────
+    # -- CROSS-BUREAU CREDIT LIMIT CONFLICT --------------------------------
     elif attack_type == "cross_bureau_credit_limit_conflict":
         reason = (
             f"The credit limit for this account is being "
             f"reported as a different number at different bureaus. A credit limit "
-            f"is set by the creditor and is specific to the account — it cannot "
+            f"is set by the creditor and is specific to the account, it cannot "
             f"be one amount here and a different amount somewhere else. "
             f"I am asking that the accurate credit limit be confirmed and that "
             f"all three bureaus report the same correct figure."
         )
 
-    # ── CROSS-BUREAU HIGH CREDIT CONFLICT ─────────────────────────────────
+    # -- CROSS-BUREAU HIGH CREDIT CONFLICT ---------------------------------
     elif attack_type == "cross_bureau_high_credit_conflict":
         bal_note = f" This bureau shows {high_credit}" if high_credit else ""
         if v3 == 0:
             reason = (
-                f"The high credit amount for this account — "
+                f"The high credit amount for this account, "
                 f"which represents the original loan amount or the highest balance "
-                f"this account ever carried — is not the same at every bureau.{bal_note}, "
+                f"this account ever carried, is not the same at every bureau.{bal_note}, "
                 f"but another bureau shows a different number. That figure is a "
                 f"historical fact about the account that cannot legitimately differ "
                 f"by bureau. The discrepancy means at least one bureau is receiving "
-                f"inaccurate data from them. Under 15 U.S.C. §1681e(b), "
+                f"inaccurate data from them. Under 15 U.S.C. section 1681e(b), "
                 f"I am asking that the correct amount be verified with original "
                 f"account records and reported consistently."
             )
@@ -5023,32 +4943,32 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"I noticed that the creditor is reporting different high "
                 f"credit amounts depending on which bureau you look at.{bal_note} "
                 f"at this bureau. The high credit figure reflects the highest balance "
-                f"or original loan amount — a fact that does not change. Having a "
+                f"or original loan amount, a fact that does not change. Having a "
                 f"different number at each bureau means the creditor is not reporting "
                 f"accurately to all of them. I am asking that the correct figure be "
-                f"verified and corrected wherever it is wrong under 15 U.S.C. §1681e(b)."
+                f"verified and corrected wherever it is wrong under 15 U.S.C. section 1681e(b)."
             )
         else:
             reason = (
                 f"There is an inconsistency in the high credit amount being reported "
                 f"for this account across bureaus.{bal_note} "
                 f"here. The original loan amount or highest balance reached on an "
-                f"account is a fixed data point — it cannot be a different number "
+                f"account is a fixed data point, it cannot be a different number "
                 f"at one bureau versus another. At least one of those numbers is "
                 f"wrong. I am disputing the inaccurate figure and requesting that "
                 f"the creditor provide documentation of the correct amount so all "
                 f"bureaus can be updated."
             )
 
-    # ── STUDENT LOAN — SPECIFIC ATTACKS ───────────────────────────────────
+    # -- STUDENT LOAN, SPECIFIC ATTACKS -----------------------------------
     elif attack_type == "student_loan_duplicate_tradeline":
         reason = (
             f"This student loan from them appears to be reported "
-            f"more than once — the same loan showing up as a separate tradeline. "
+            f"more than once, the same loan showing up as a separate tradeline. "
             f"When a loan transfers between servicers, only the current servicer "
             f"should be reporting an active balance. Having it listed twice by "
             f"different parties inflates my total debt and is inaccurate under "
-            f"15 U.S.C. §1681e(b). I am requesting removal of the duplicate entry "
+            f"15 U.S.C. section 1681e(b). I am requesting removal of the duplicate entry "
             f"and confirmation that only one servicer is actively reporting this loan."
         )
 
@@ -5059,7 +4979,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"When a federal loan transfers, the prior servicer must update their "
             f"tradeline to show a zero balance and a transferred or closed status. "
             f"Continuing to report an active balance after the transfer doubles the "
-            f"debt on my credit report, which is a violation of 15 U.S.C. §1681s-2(a)(1). "
+            f"debt on my credit report, which is a violation of 15 U.S.C. section 1681s-2(a)(1). "
             f"I am requesting that this tradeline be corrected to reflect the transfer."
         )
 
@@ -5068,8 +4988,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"This student loan from them is showing a late payment "
             f"during what appears to be a deferment or forbearance period. When a "
             f"loan is in an authorized deferment or forbearance, no payment is legally "
-            f"due — so no payment can be late. Reporting a late mark when no payment "
-            f"was actually required is a violation of 15 U.S.C. §1681e(b). "
+            f"due, so no payment can be late. Reporting a late mark when no payment "
+            f"was actually required is a violation of 15 U.S.C. section 1681e(b). "
             f"I am requesting removal of any late payment notation that falls during "
             f"a deferment or forbearance period."
         )
@@ -5080,7 +5000,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"status but continues to report an outstanding balance{bal_str}. A loan "
             f"that has been paid in full must show a zero balance. Failing to update "
             f"the balance after payoff is a furnisher accuracy violation under "
-            f"15 U.S.C. §1681s-2(a)(1). I am requesting that the balance be "
+            f"15 U.S.C. section 1681s-2(a)(1). I am requesting that the balance be "
             f"corrected to zero to accurately reflect this account's current status."
         )
 
@@ -5088,11 +5008,11 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         reason = (
             f"This student loan from them appears to have been "
             f"discharged or forgiven, yet continues to show an active balance{bal_str} "
-            f"with a derogatory status. Discharged loans — whether through PSLF, "
-            f"total and permanent disability, borrower defense, or other programs — "
+            f"with a derogatory status. Discharged loans, whether through PSLF, "
+            f"total and permanent disability, borrower defense, or other programs, "
             f"must be reported with a zero balance and an appropriate discharged status. "
             f"Continuing to show a balance and derogatory classification after discharge "
-            f"violates 15 U.S.C. §1681s-2(a)(1). I am requesting verification of "
+            f"violates 15 U.S.C. section 1681s-2(a)(1). I am requesting verification of "
             f"this loan's discharge status and immediate correction of the reporting."
         )
 
@@ -5101,9 +5021,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"This student loan from them is reporting a default "
             f"status that I believe is inaccurate. When a federal student loan is "
             f"successfully rehabilitated, consolidated out of default, or restored to "
-            f"good standing — including through the Department of Education's Fresh "
-            f"Start program — the servicer is required to remove the default notation. "
-            f"Under 15 U.S.C. §1681s-2(a)(1), furnishers must report accurate, "
+            f"good standing, including through the Department of Education's Fresh "
+            f"Start program, the servicer is required to remove the default notation. "
+            f"Under 15 U.S.C. section 1681s-2(a)(1), furnishers must report accurate, "
             f"current information. I am requesting verification of the current loan "
             f"status and correction of any inaccurate default notation."
         )
@@ -5114,35 +5034,35 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"balance{bal_str} that significantly exceeds what I would expect based "
             f"on the original loan amount. While interest accrual is normal, the "
             f"extent of this difference is concerning. CFPB has documented widespread "
-            f"billing errors across major servicers — including improper interest "
+            f"billing errors across major servicers, including improper interest "
             f"capitalization and processing errors during transfers. Under 15 U.S.C. "
-            f"§1681e(b), only accurate information may be reported. I am requesting "
+            f"section 1681e(b), only accurate information may be reported. I am requesting "
             f"a complete itemized statement of all interest, fees, and charges, "
             f"and correction of any errors."
         )
 
-    # ── REINSERTION VIOLATION ─────────────────────────────────────────────
+    # -- REINSERTION VIOLATION ---------------------------------------------
     elif attack_type == "reinsertion_violation":
         if v4 == 0:
             reason = (
                 f"This account was previously deleted "
                 f"from my credit report following a dispute. It has since reappeared "
-                f"without the written notice required by 15 U.S.C. §1681i(a)(5)(B). "
+                f"without the written notice required by 15 U.S.C. section 1681i(a)(5)(B). "
                 f"Before reinserting a deleted item, the bureau must notify the consumer "
                 f"within 5 business days and certify that the furnisher has verified the "
                 f"information. Neither of those steps happened. This reinsertion is a "
                 f"willful violation subject to statutory and punitive damages under "
-                f"15 U.S.C. §1681n. I am demanding immediate re-deletion."
+                f"15 U.S.C. section 1681n. I am demanding immediate re-deletion."
             )
         elif v4 == 1:
             reason = (
                 f"This account was removed from my file "
                 f"after a prior dispute. It has been reinserted without following "
-                f"the mandatory consumer notice procedure under 15 U.S.C. §1681i(a)(5)(B) — "
+                f"the mandatory consumer notice procedure under 15 U.S.C. section 1681i(a)(5)(B), "
                 f"which requires written notice to me within 5 business days and "
                 f"certification by the furnisher. That procedure was not followed. "
                 f"I am demanding this account be deleted again and I am preserving "
-                f"all rights under 15 U.S.C. §1681n for the unlawful reinsertion."
+                f"all rights under 15 U.S.C. section 1681n for the unlawful reinsertion."
             )
         elif v4 == 2:
             reason = (
@@ -5152,21 +5072,21 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"reinserted: the furnisher must certify the information, and the "
                 f"bureau must send me written notice within 5 business days. I "
                 f"never received any such notice. That makes this a procedural "
-                f"violation under 15 U.S.C. §1681i(a)(5)(B) and, depending on the "
-                f"circumstances, a willful violation under §1681n."
+                f"violation under 15 U.S.C. section 1681i(a)(5)(B) and, depending on the "
+                f"circumstances, a willful violation under section 1681n."
             )
         else:
             reason = (
                 f"This item reappeared on my report after it had previously been "
-                f"deleted — and it reappeared without the bureau following the "
+                f"deleted, and it reappeared without the bureau following the "
                 f"reinsertion procedure required by federal law. I should have "
                 f"received written notice within 5 business days of the reinsertion, "
                 f"and the furnisher should have certified the information first. "
                 f"Neither happened. I am requesting this account be deleted again "
-                f"and I am reserving all rights for the §1681i(a)(5)(B) violation."
+                f"and I am reserving all rights for the section 1681i(a)(5)(B) violation."
             )
 
-    # ── MEDICAL DEBT — UNDER $500 ─────────────────────────────────────────
+    # -- MEDICAL DEBT, UNDER $500 -----------------------------------------
     elif attack_type == "medical_debt_under_500":
         if v4 == 0:
             reason = (
@@ -5185,7 +5105,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"sub-$500 medical debts are no longer reportable regardless of "
                 f"payment status. Reporting this account is inconsistent with the "
                 f"bureau's own policy and violates the accuracy standard under "
-                f"15 U.S.C. §1681e(b). I am requesting immediate deletion."
+                f"15 U.S.C. section 1681e(b). I am requesting immediate deletion."
             )
         elif v4 == 2:
             reason = (
@@ -5200,13 +5120,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"The bureaus publicly agreed in April 2023 to stop reporting "
                 f"medical collections under $500. The balance on this account is "
-                f"{balance} — below that cutoff. Keeping a sub-$500 medical "
+                f"{balance}, below that cutoff. Keeping a sub-$500 medical "
                 f"collection on my file contradicts the stated policy and also "
-                f"runs into accuracy issues under 15 U.S.C. §1681e(b). "
+                f"runs into accuracy issues under 15 U.S.C. section 1681e(b). "
                 f"I am asking that this account be taken off my report."
             )
 
-    # ── PAID MEDICAL COLLECTION ───────────────────────────────────────────
+    # -- PAID MEDICAL COLLECTION -------------------------------------------
     elif attack_type == "paid_medical_collection":
         if v4 == 0:
             reason = (
@@ -5215,7 +5135,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"to removing paid medical collection accounts from consumer credit "
                 f"reports. This account shows a zero balance or paid status yet remains "
                 f"as a derogatory item. I am requesting its removal per the bureau's "
-                f"own policy and the accuracy requirements of 15 U.S.C. §1681e(b)."
+                f"own policy and the accuracy requirements of 15 U.S.C. section 1681e(b)."
             )
         elif v4 == 1:
             reason = (
@@ -5237,45 +5157,45 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             )
         else:
             reason = (
-                f"This medical collection has already been paid — the balance is "
-                f"zero — and under the July 2022 policy adopted by all three credit "
+                f"This medical collection has already been paid, the balance is "
+                f"zero, and under the July 2022 policy adopted by all three credit "
                 f"bureaus, a paid medical collection is not supposed to remain on a "
                 f"consumer's credit report at all. Reporting it as a derogatory item "
                 f"after payment does not match the stated policy and does not match "
                 f"the actual status of the account. I am requesting deletion."
             )
 
-    # ── MEDICAL DEBT PREMATURE ────────────────────────────────────────────
+    # -- MEDICAL DEBT PREMATURE --------------------------------------------
     elif attack_type == "medical_debt_premature":
         reason = (
             f"This medical collection from them was opened "
-            f"{date_opened} — less than 12 months ago. All three credit bureaus "
+            f"{date_opened}, less than 12 months ago. All three credit bureaus "
             f"committed in 2022 to a 12-month waiting period before any medical "
             f"debt may appear on a consumer credit report. This account is being "
             f"reported before that window has passed. I am requesting that it be "
             f"removed until the 12-month period has fully elapsed."
         )
 
-    # ── MEDICAL DEBT STATE LAW ────────────────────────────────────────────
+    # -- MEDICAL DEBT STATE LAW --------------------------------------------
     elif attack_type == "medical_debt_state_law":
         reason = (
             f"This medical collection from them is being reported "
             f"for a consumer in a state that has enacted legal protections "
             f"specifically prohibiting medical debt from appearing on consumer credit "
             f"reports. Reporting this account violates applicable state law. Under "
-            f"15 U.S.C. §1681e(b), the bureau must maintain maximum possible "
+            f"15 U.S.C. section 1681e(b), the bureau must maintain maximum possible "
             f"accuracy, which includes compliance with state-level restrictions. "
             f"I am requesting immediate removal of this account."
         )
 
-    # ── MEDICAL DEBT ACCURACY ─────────────────────────────────────────────
+    # -- MEDICAL DEBT ACCURACY ---------------------------------------------
     elif attack_type == "medical_debt_accuracy":
         if v3 == 0:
             reason = (
                 f"I am disputing this medical collection from them "
                 f"with a balance of {balance}. Medical billing is uniquely prone to "
-                f"error — insurance disputes, incorrect coding, surprise bills, and "
-                f"balance inflation are documented problems. Under 15 U.S.C. §1681e(b), "
+                f"error, insurance disputes, incorrect coding, surprise bills, and "
+                f"balance inflation are documented problems. Under 15 U.S.C. section 1681e(b), "
                 f"I am requesting full verification: the complete itemized bill, proof "
                 f"that insurance was properly applied, the original creditor's name, "
                 f"and the exact amount owed at the time of default."
@@ -5283,7 +5203,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         elif v3 == 1:
             reason = (
                 f"I am disputing this medical collection from them. "
-                f"Medical bills are frequently incorrect — the CFPB has documented "
+                f"Medical bills are frequently incorrect, the CFPB has documented "
                 f"that medical debt is often reported with errors and is a poor "
                 f"predictor of creditworthiness. I am asking them to provide "
                 f"a complete itemized statement, evidence that my insurance was properly "
@@ -5293,7 +5213,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         else:
             reason = (
                 f"This medical collection from them{bal_str} requires "
-                f"full verification under 15 U.S.C. §1681i(a). Medical bills often "
+                f"full verification under 15 U.S.C. section 1681i(a). Medical bills often "
                 f"result from insurance billing failures, coordination errors, or "
                 f"disputed amounts. I am requesting the original itemized bill, "
                 f"confirmation of all insurance payments and adjustments, and validation "
@@ -5301,7 +5221,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"this account cannot be verified and must be deleted."
             )
 
-    # ── COLLECTION / LATE PAYMENT CONFLICT ────────────────────────────────
+    # -- COLLECTION / LATE PAYMENT CONFLICT --------------------------------
     elif attack_type == "collection_late_payment_conflict":
         if v3 == 0:
             reason = (
@@ -5309,10 +5229,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"collection, but is also being reported with a payment status of "
                 f"'{pay_status}'. Those two classifications cannot coexist. A "
                 f"collection account represents a debt that has already defaulted "
-                f"and been transferred — there is no active payment obligation "
+                f"and been transferred, there is no active payment obligation "
                 f"remaining, so it cannot simultaneously be 'late' on payments. "
                 f"Reporting both inflates the damage from a single event and "
-                f"is inaccurate under 15 U.S.C. §1681e(b). I am asking that the "
+                f"is inaccurate under 15 U.S.C. section 1681e(b). I am asking that the "
                 f"correct single classification be applied."
             )
         elif v3 == 1:
@@ -5321,34 +5241,34 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f" directly conflicts with it being classified as a "
                 f"collection. An account that has defaulted and been transferred "
                 f"to a collector cannot simultaneously be in an active late-payment "
-                f"status — those are mutually exclusive. I am requesting that the "
+                f"status, those are mutually exclusive. I am requesting that the "
                 f"inaccurate classification be corrected, or if the account cannot "
                 f"be accurately described at all, that it be deleted."
             )
         else:
             reason = (
                 f"I am disputing the dual classification on this account"
-                f" — it is being reported as both a collection and a "
+                f", it is being reported as both a collection and a "
                 f"'{pay_status}' account at the same time. Once a debt goes to a "
                 f"collection agency, the original payment schedule no longer exists. "
                 f"A late payment notation on top of a collection creates a "
                 f"double-negative from one single event, which is inaccurate under "
-                f"15 U.S.C. §1681e(b)."
+                f"15 U.S.C. section 1681e(b)."
             )
 
-    # ── LATE COLLECTION CONFLICT ──────────────────────────────────────────
+    # -- LATE COLLECTION CONFLICT ------------------------------------------
     elif attack_type == "late_collection_conflict":
         reason = (
             f"The classification on this account does "
             f"not add up. It appears to carry both a late payment status and "
             f"collection-type language simultaneously, which are contradictory. "
-            f"A debt that has gone to collection has already defaulted — there are "
+            f"A debt that has gone to collection has already defaulted, there are "
             f"no more payments to be 'late' on. I am asking that the correct single "
             f"classification be verified and applied, and any inaccurate duplicate "
             f"notation be removed."
         )
 
-    # ── ABSENT BUREAU REPORTING INCONSISTENCY ─────────────────────────────
+    # -- ABSENT BUREAU REPORTING INCONSISTENCY -----------------------------
     elif attack_type == "absent_bureau_reporting_inconsistency":
         if v4 == 0:
             reason = (
@@ -5363,7 +5283,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"I noticed this account appears here "
                 f"as a negative item but is not showing up the same way at all bureaus. "
-                f"Under 15 U.S.C. §1681e(b), every bureau must maintain maximum "
+                f"Under 15 U.S.C. section 1681e(b), every bureau must maintain maximum "
                 f"possible accuracy. An item that cannot be reported consistently "
                 f"raises serious concerns about its accuracy and needs to be "
                 f"fully verified or removed."
@@ -5382,13 +5302,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"This account appears as a negative here "
                 f"but the reporting is inconsistent across bureaus. A furnisher "
-                f"who reports to one bureau but not others — or reports different "
-                f"information — creates an accuracy problem. Under 15 U.S.C. "
-                f"§1681e(b), I am requesting verification and deletion if the "
+                f"who reports to one bureau but not others, or reports different "
+                f"information, creates an accuracy problem. Under 15 U.S.C. "
+                f"section 1681e(b), I am requesting verification and deletion if the "
                 f"account cannot be reported accurately and consistently."
             )
 
-    # ── LATE PAYMENT HISTORY DISPUTE ──────────────────────────────────────
+    # -- LATE PAYMENT HISTORY DISPUTE --------------------------------------
     elif attack_type == "late_payment_history_dispute":
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
         worst = "30"
@@ -5406,9 +5326,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"zero balance, but the payment history contains a {worst}-day "
                     f"late mark ({late_str}). Late marks on closed accounts still "
                     f"hurt my credit and must be accurate. I am asking that the creditor "
-                    f"provide the original payment records for that month — the exact "
-                    f"due date and the date payment was received — and confirm the "
-                    f"correct Date of First Delinquency. Under 15 U.S.C. §1681c(a)(4), "
+                    f"provide the original payment records for that month, the exact "
+                    f"due date and the date payment was received, and confirm the "
+                    f"correct Date of First Delinquency. Under 15 U.S.C. section 1681c(a)(4), "
                     f"the DOFD controls how long this account can legally remain."
                 )
             elif v3 == 1:
@@ -5416,7 +5336,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"I am disputing a {worst}-day late payment mark on this closed "
                     f"this account ({late_str}). Even though the "
                     f"account is paid, the late mark remains on my report and must "
-                    f"be verified under 15 U.S.C. §1681e(b). I am requesting that "
+                    f"be verified under 15 U.S.C. section 1681e(b). I am requesting that "
                     f"the creditor provide original payment records and the correct "
                     f"Date of First Delinquency. If the late mark cannot be "
                     f"documented, it must be removed."
@@ -5428,7 +5348,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"I am asking them to verify this with original records "
                     f"showing when the payment was due and when it was actually "
                     f"received, and to confirm the DOFD is correct at all bureaus. "
-                    f"Under 15 U.S.C. §1681e(b), every piece of reported information "
+                    f"Under 15 U.S.C. section 1681e(b), every piece of reported information "
                     f"must be accurate."
                 )
         else:
@@ -5437,9 +5357,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"This account shows a {worst}-day "
                     f"late payment in its history ({late_str}){rpt_str}. I am "
                     f"disputing this mark and requesting documentation from them "
-                    f"— specifically the original payment records showing the exact "
+                    f", specifically the original payment records showing the exact "
                     f"due date and when the payment was received. Under 15 U.S.C. "
-                    f"§1681e(b), if they cannot verify this with actual records, "
+                    f"section 1681e(b), if they cannot verify this with actual records, "
                     f"the late mark must be removed."
                 )
             elif v3 == 1:
@@ -5448,7 +5368,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"account ({late_str}). I need them to provide "
                     f"the original billing statement and payment records for the months "
                     f"in question, showing the exact due date and date of receipt. "
-                    f"Under 15 U.S.C. §1681s-2(a)(1), a late payment cannot be "
+                    f"Under 15 U.S.C. section 1681s-2(a)(1), a late payment cannot be "
                     f"reported without primary documentation to back it up."
                 )
             else:
@@ -5461,7 +5381,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"the FCRA."
                 )
 
-    # ── CROSS-BUREAU PAYMENT HISTORY DATE CONFLICT ────────────────────────
+    # -- CROSS-BUREAU PAYMENT HISTORY DATE CONFLICT ------------------------
     elif attack_type == "cross_bureau_payment_history_date_conflict":
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
         late_str = ", ".join(actual_lates) if actual_lates else "in the payment history"
@@ -5470,8 +5390,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"This account shows a late payment "
                 f"({late_str}), but the month it is reported in differs depending on "
                 f"which bureau you look at. A payment can only be late on one specific "
-                f"date — the same event cannot appear in different months at different "
-                f"bureaus. Under 15 U.S.C. §1681e(b), I am requesting that they "
+                f"date, the same event cannot appear in different months at different "
+                f"bureaus. Under 15 U.S.C. section 1681e(b), I am requesting that they "
                 f"provide the original payment records and correct the reporting to "
                 f"show the same accurate date consistently at all three bureaus."
             )
@@ -5479,8 +5399,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"The late payment on this account ({late_str}) "
                 f"is being reported in different months across bureaus. An event "
-                f"cannot occur on two different dates — this is an accuracy violation "
-                f"under 15 U.S.C. §1681e(b). I am asking them to review the "
+                f"cannot occur on two different dates, this is an accuracy violation "
+                f"under 15 U.S.C. section 1681e(b). I am asking them to review the "
                 f"original payment records and update all three bureaus to show the "
                 f"same accurate month. If the correct date cannot be verified, the "
                 f"late mark must be removed entirely."
@@ -5489,9 +5409,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"The month of the late-payment mark ({late_str}) on this account "
                 f"does not line up between bureaus. A missed payment happens once, "
-                f"on one specific date — so it cannot legitimately appear in "
+                f"on one specific date, so it cannot legitimately appear in "
                 f"different months at different bureaus. That is an accuracy problem "
-                f"under 15 U.S.C. §1681e(b). I want them to go back to the original "
+                f"under 15 U.S.C. section 1681e(b). I want them to go back to the original "
                 f"payment records and bring the reporting into alignment across "
                 f"all three bureaus."
             )
@@ -5499,29 +5419,29 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"A late payment on this account ({late_str}) is being dated "
                 f"differently across bureaus. The actual missed payment, if one "
-                f"occurred, would have a single fixed date — there is no legitimate "
+                f"occurred, would have a single fixed date, there is no legitimate "
                 f"way for it to move between months depending on which report you "
                 f"look at. I am asking that the original payment records be "
                 f"consulted and the month be corrected consistently. If that date "
                 f"cannot be established, the late mark should come off."
             )
 
-    # ── FALLBACK: requires_basic_verification ─────────────────────────────
+    # -- FALLBACK: requires_basic_verification -----------------------------
     else:
         # v8 selects the OPENING variant (already has bureau shift applied).
         # We compute a SEPARATE index for detail_pool so that the attempt
-        # loop — which increments variation_idx by coprime strides — can
+        # loop, which increments variation_idx by coprime strides, can
         # rotate the detail pool independently from the opening variant.
         # This dramatically reduces intra-letter collisions when many
         # accounts fall into the fallback path.
         #
         # pool_idx uses a different modulus (coprime with 8) so that as
         # attempts advance variation_idx, v8 and pool_idx walk through
-        # different cycles — the product of the two gives 8 × 11 = 88
+        # different cycles, the product of the two gives 8 x 11 = 88
         # effective variant combinations.
         pool_idx = variation_idx % 11
 
-        # 11 detail-field rotations — each account in the same letter
+        # 11 detail-field rotations, each account in the same letter
         # highlights different data fields.
         _DETAIL_POOL_TEMPLATES = [
             # 0: balance + status
@@ -5565,7 +5485,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         else:
             detail_str = f" The account shows {', and '.join([', '.join(detail_parts[:-1]), detail_parts[-1]]) if len(detail_parts) > 2 else ' and '.join(detail_parts)}."
 
-        # 8 openings base × 2 sub-variantes = 16 openings efectivos.
+        # 8 openings base x 2 sub-variantes = 16 openings efectivos.
         # La sub-variante se selecciona por pool_idx (independiente de v8),
         # asi que dos cuentas con el mismo v8 pero distinto pool_idx reciben
         # openings DIFERENTES. Esto elimina colisiones intra-carta cuando
@@ -5586,7 +5506,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 reason = (
                     f"When I went through my credit report this account stood out because "
                     f"something about the reporting seems off.{detail_str} I want the creditor "
-                    f"to produce the actual paperwork — the signed agreement, the full transaction "
+                    f"to produce the actual paperwork, the signed agreement, the full transaction "
                     f"log, and a clear explanation of how the numbers got to where they are. "
                     f"Without that, I cannot accept this as accurate."
                 )
@@ -5595,7 +5515,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 reason = (
                     f"Something about this entry does not match what I remember, and I need it looked "
                     f"into.{detail_str} I am asking that the company reporting it be required to "
-                    f"back up every number and date with actual records — the original contract, the "
+                    f"back up every number and date with actual records, the original contract, the "
                     f"payment ledger, and a clear breakdown of what I supposedly owe. An item on my "
                     f"credit file has to be provable, and right now I do not see proof."
                 )
@@ -5605,13 +5525,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"the details checked.{detail_str} The reporting company should be able to "
                     f"back up the information with primary records: the signed contract, a "
                     f"transaction-by-transaction history, and documentation of how the balance "
-                    f"was calculated. Those are the basics — and they need to be produced."
+                    f"was calculated. Those are the basics, and they need to be produced."
                 )
         elif v8 == 2:
             if sub_variant == 0:
                 reason = (
                     f"I am writing about this account because the details being reported do not line "
-                    f"up.{detail_str} Under the accuracy standard in 15 U.S.C. §1681e(b), every "
+                    f"up.{detail_str} Under the accuracy standard in 15 U.S.C. section 1681e(b), every "
                     f"field reported about me has to be verifiable with real documentation. I need "
                     f"the original agreement, a complete payment record, and an explanation of how "
                     f"the current figures were calculated."
@@ -5619,7 +5539,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             else:
                 reason = (
                     f"The reporting on this account does not hold together when I look at the "
-                    f"fields.{detail_str} Federal law under 15 U.S.C. §1681e(b) requires that "
+                    f"fields.{detail_str} Federal law under 15 U.S.C. section 1681e(b) requires that "
                     f"every piece of information reported about me be backed by real records. "
                     f"Please have the creditor produce the contract, the full payment history, "
                     f"and a breakdown of how each figure was derived."
@@ -5627,7 +5547,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         elif v8 == 3:
             if sub_variant == 0:
                 reason = (
-                    f"This one needs a closer look.{detail_str} I am not asking for a summary — I "
+                    f"This one needs a closer look.{detail_str} I am not asking for a summary, I "
                     f"am asking for the underlying records the creditor should have on file: the "
                     f"signed agreement, the itemized payment history, and documentation supporting "
                     f"the status they are reporting. If those records do not exist or do not match, "
@@ -5636,7 +5556,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             else:
                 reason = (
                     f"I want this one examined more carefully than a quick check.{detail_str} "
-                    f"What I am looking for is the actual paper trail — the signed contract, the "
+                    f"What I am looking for is the actual paper trail, the signed contract, the "
                     f"detailed payment ledger, and records that support the status being reported. "
                     f"If any of that is missing or does not add up, the account has no business "
                     f"staying on my file."
@@ -5647,15 +5567,15 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"I want this account reviewed carefully.{detail_str} I have reason to believe "
                     f"the information being furnished is either incomplete or out of step with what "
                     f"actually happened. Please have the creditor produce the underlying documentation "
-                    f"— contract, payment history, balance breakdown — so the accuracy can be confirmed "
+                    f", contract, payment history, balance breakdown, so the accuracy can be confirmed "
                     f"or the account can be corrected."
                 )
             else:
                 reason = (
                     f"Please give this account a careful review.{detail_str} Based on what I know, "
                     f"the information being reported is incomplete or does not reflect what "
-                    f"actually happened. I am asking for the underlying documentation — the "
-                    f"contract, a full payment record, and a balance breakdown — so the accuracy "
+                    f"actually happened. I am asking for the underlying documentation, the "
+                    f"contract, a full payment record, and a balance breakdown, so the accuracy "
                     f"can be verified or the entry corrected."
                 )
         elif v8 == 5:
@@ -5679,7 +5599,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             if sub_variant == 0:
                 reason = (
                     f"I need to dispute what is being reported on this account.{detail_str} The "
-                    f"creditor needs to show the paperwork behind this entry — not just repeat "
+                    f"creditor needs to show the paperwork behind this entry, not just repeat "
                     f"the same figures back. That means the original agreement with my signature, "
                     f"the detailed transaction history, and the actual basis for the status being "
                     f"reported. Without those, I do not consider this verified."
@@ -5687,7 +5607,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             else:
                 reason = (
                     f"I am disputing how this account is being reported.{detail_str} Confirming "
-                    f"what is already on the report is not verification — the creditor has to "
+                    f"what is already on the report is not verification, the creditor has to "
                     f"produce the paperwork itself: my signed agreement, the full transaction "
                     f"ledger, and the records that justify the status being reported. Anything "
                     f"short of that leaves this account unverified."
@@ -5721,9 +5641,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     secondary_flags = item.get("secondary_flags", [])
     flags_para = _build_secondary_flags_paragraph(secondary_flags, variation_idx=secondary_variation)
 
-    # Closer rotation — NEVER emit "DELETE OFF MY CREDIT REPORT" in caps again.
+    # Closer rotation, NEVER emit "DELETE OFF MY CREDIT REPORT" in caps again.
     # Pool of 12 closers; 2 are intentionally empty (trailing word from the body
-    # is enough — no need for a mechanical deletion demand on every item).
+    # is enough, no need for a mechanical deletion demand on every item).
     # Also bureau-shifted so the same account gets different closers per bureau.
     _CLOSER_POOL = [
         " Please delete this item from my file.",
@@ -5736,8 +5656,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         " Please take this off my file.",
         " Delete this account from my report.",
         " I want this removed.",
-        "",  # empty — body carries the demand
-        "",  # empty — body carries the demand
+        "",  # empty, body carries the demand
+        "",  # empty, body carries the demand
     ]
     _CLOSER_BUREAU_OFFSET = {"transunion": 0, "experian": 4, "equifax": 7}
     closer_idx = (variation_idx + _CLOSER_BUREAU_OFFSET.get(bureau, 0)) % len(_CLOSER_POOL)
@@ -5746,22 +5666,22 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# =======================================================================
 #  BUREAU RESPONSE PARSER
 #  Parses the bureau's written investigation response and classifies
 #  each account outcome to power targeted R2/R3 dispute letters.
-# ═══════════════════════════════════════════════════════════════════════
+# =======================================================================
 
 def parse_bureau_response(response_text: str) -> dict:
     """
     Parse a bureau investigation response letter into structured outcomes.
 
     Handles all standard bureau response patterns:
-      - DELETED              → account removed, no further dispute needed
-      - VERIFIED_UNCHANGED   → bureau claims accurate, no modifications
-      - VERIFIED_MODIFIED    → bureau "verified" but modified fields (admission)
-      - BELONGS_TO_YOU       → bureau says account is yours (not real verification)
-      - OTHER                → catch-all for non-standard language
+      - DELETED              -> account removed, no further dispute needed
+      - VERIFIED_UNCHANGED   -> bureau claims accurate, no modifications
+      - VERIFIED_MODIFIED    -> bureau "verified" but modified fields (admission)
+      - BELONGS_TO_YOU       -> bureau says account is yours (not real verification)
+      - OTHER                -> catch-all for non-standard language
 
     Returns:
         {
@@ -5769,7 +5689,7 @@ def parse_bureau_response(response_text: str) -> dict:
             "CREDITOR NAME": {
               "outcome":         "deleted" | "verified_modified" | "verified_unchanged"
                                  | "belongs_to_you" | "other",
-              "modified_fields": ["BALANCE", "DATE OF LAST PAYMENT", ...],
+              "modified_fields": ["BALANCE", "DATE OF LAST PAYMENT"...],
               "response_text":   "raw text for this account"
             }
           },
@@ -5793,7 +5713,7 @@ def parse_bureau_response(response_text: str) -> dict:
     }
     accounts: dict[str, dict] = {}
 
-    # Split on "Trade:" boundaries — handles multi-line results per account
+    # Split on "Trade:" boundaries, handles multi-line results per account
     # Pattern: "Trade: CREDITOR NAME - RESULT TEXT"
     trade_blocks = _re.split(r"(?i)(?:^|\n)\s*Trade:\s*", "\n" + response_text)
 
@@ -5847,7 +5767,7 @@ def _build_account_context_from_response(
     """
     Given a letter_input item and the parsed bureau response,
     return a context string that explains what the bureau said
-    about this specific account — used to craft targeted R2/R3 reasons.
+    about this specific account, used to craft targeted R2/R3 reasons.
     """
     if not bureau_response_parsed:
         return ""
@@ -5888,7 +5808,7 @@ def _build_account_context_from_response(
             f"\"belongs to me.\" That is not a reinvestigation of accuracy. "
             f"Whether an account belongs to me is a separate question from whether "
             f"the balance, status, dates, and payment history being reported are correct. "
-            f"15 U.S.C. §1681e(b) requires maximum possible accuracy — not just ownership "
+            f"15 U.S.C. section 1681e(b) requires maximum possible accuracy, not just ownership "
             f"confirmation. The bureau has not addressed the accuracy of what is being reported."
         )
 
@@ -5897,7 +5817,7 @@ def _build_account_context_from_response(
             f"In response to my prior dispute, the bureau stated that the information "
             f"was verified. However, the response did not explain the method of verification "
             f"or identify what documentation was reviewed. Under 15 U.S.C. "
-            f"§1681i(a)(6)(B)(iii), I have the right to know the business name, address, "
+            f"section 1681i(a)(6)(B)(iii), I have the right to know the business name, address, "
             f"and telephone number of the furnisher contacted, and a description of the "
             f"procedure used to determine the accuracy of the disputed information. "
             f"A bare statement that information was \"verified\" does not satisfy this requirement."
@@ -5908,7 +5828,7 @@ def _build_account_context_from_response(
         return (
             f"In response to my prior dispute, the bureau provided the following: "
             f"\"{response_text[:200]}\". I do not believe this response constitutes a "
-            f"reasonable reinvestigation as required by 15 U.S.C. §1681i(a)."
+            f"reasonable reinvestigation as required by 15 U.S.C. section 1681i(a)."
         )
     return ""
 
@@ -5924,7 +5844,7 @@ def build_dispute_letter_engine(
     bureau_response_parsed: dict | None = None,
 ) -> dict[str, dict[str, dict[str, str]]]:
     """
-    Generate dispute letters — ONE LETTER PER ACCOUNT-TYPE GROUP PER ROUND PER BUREAU.
+    Generate dispute letters, ONE LETTER PER ACCOUNT-TYPE GROUP PER ROUND PER BUREAU.
 
     Collections cannot be in the same letter as late payments or repossessions.
     Each group disputes accounts under distinct legal grounds and must be
@@ -5936,29 +5856,28 @@ def build_dispute_letter_engine(
                 "collections": {"round_1": "..."}, "charge_offs": {"round_1": "..."},
                 "late_payments":          {"round_1": "...", "round_2": "..."},
                 "other_derogatory":       {"round_1": "...", "round_2": "..."},
-            },
-            ...
+            }...
         }
 
     Groups:
-        collections — active + paid collections
-        charge_offs   — charge-off accounts
-        late_payments          — payment history accuracy, §1681e(b)
-        other_derogatory       — repossession (UCC Art.9), child support (§1681s-1),
-                                 bankruptcy (§1681c), charge-off deficiency, paid collection
+        collections, active + paid collections
+        charge_offs  , charge-off accounts
+        late_payments         , payment history accuracy, section 1681e(b)
+        other_derogatory      , repossession (UCC Art.9), child support (section 1681s-1),
+                                 bankruptcy (section 1681c), charge-off deficiency, paid collection
     """
     result: dict[str, dict[str, dict[str, str]]] = {}
     formatted_date = _format_date_long(report_date)
 
     bureau_seed_map = {"transunion": 1, "experian": 2, "equifax": 3}
 
-    # Opening template assignment — unique per bureau+group+round combination.
+    # Opening template assignment, unique per bureau+group+round combination.
     # Bureau offset (stride=3) ensures TransUnion, Experian and Equifax always
-    # receive different templates for the same category and round — preventing
+    # receive different templates for the same category and round, preventing
     # the pattern-detection risk that arises when a client's three bureau letters
     # open with identical language.
     def _tpl_idx(bureau: str, group: str, round_key: str, n_templates: int) -> int:
-        # bureau_offset: TU=0, EXP=3, EQF=6 — stride of 3 spreads evenly across 8 slots
+        # bureau_offset: TU=0, EXP=3, EQF=6, stride of 3 spreads evenly across 8 slots
         _bureau_offset = {"transunion": 0, "experian": 3, "equifax": 6}
         group_pos      = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}
         bureau_off = _bureau_offset.get(bureau, 0)
@@ -5989,7 +5908,7 @@ def build_dispute_letter_engine(
             # All items go to round_1. Round 2 is only generated after a bureau
             # response has been recorded. Escalation is handled by compare_rounds().
             # Generate letter for the requested target_round only.
-            # R1=first dispute, R2=follow-up, R3=final escalation with §1681n notice.
+            # R1=first dispute, R2=follow-up, R3=final escalation with section 1681n notice.
             group_letters: dict[str, str] = {}
 
             for round_key, items in [(target_round, items_in_group)]:
@@ -6016,7 +5935,7 @@ def build_dispute_letter_engine(
                 if (is_r2 or is_r3) and prev_response:
                     bureau_resp_block = (
                         f"In my previous dispute, the response I received stated: "
-                        f'"{prev_response}" — I do not believe that constitutes a '
+                        f'"{prev_response}", I do not believe that constitutes a '
                         f"reasonable reinvestigation under federal law.\n\n"
                     )
                 elif is_r3:
@@ -6064,23 +5983,23 @@ def build_dispute_letter_engine(
                 # Account list
                 account_lines = []
                 used_reasons: set[str] = set()
-                # ─── DISEÑO DE VARIANT SELECTION ─────────────────────────────
-                # La garantía crítica: la MISMA cuenta en cartas a DIFERENTES
-                # burós debe seleccionar DIFERENTE variante del pool. Para
-                # lograr esto de forma matemáticamente robusta:
+                # --- DISENO DE VARIANT SELECTION -----------------------------
+                # La garantia critica: la MISMA cuenta en cartas a DIFERENTES
+                # buros debe seleccionar DIFERENTE variante del pool. Para
+                # lograr esto de forma matematicamente robusta:
                 #
                 # 1) El "account fingerprint" (furnisher + account_number +
                 #    attack_type) determina el variation_idx BASE. Este base
-                #    es IDÉNTICO para la misma cuenta en los 3 burós, sin
-                #    importar su posición (idx) en la carta.
+                #    es IDENTICO para la misma cuenta en los 3 buros, sin
+                #    importar su posicion (idx) en la carta.
                 #
                 # 2) _account_reason recibe `bureau` y aplica shifts
                 #    calibrados para 2/3/4/8-variant pools, garantizando
-                #    slots distintos entre burós.
+                #    slots distintos entre buros.
                 #
                 # 3) El attempt loop con coprime-stride resuelve colisiones
                 #    intra-carta (dos cuentas con el mismo fingerprint casi
-                #    idéntico — raro, pero se desambigua avanzando el slot).
+                #    identico, raro, pero se desambigua avanzando el slot).
                 #
                 # El resultado: PORTFOLIO en TU/EXP/EQF siempre selecciona
                 # variantes diferentes incluso si tiene idx=4 en una carta
@@ -6090,15 +6009,15 @@ def build_dispute_letter_engine(
                     fname  = item.get("furnisher_name", "")
                     facct  = item.get("account_number", "")
                     at     = item.get("attack_type", "")
-                    # Account fingerprint — ESTABLE cross-bureau.
-                    # Incluye múltiples campos para evitar colisiones en accounts
-                    # con números cortos (ej: "33460****" de MIDLAND). Los
+                    # Account fingerprint, ESTABLE cross-bureau.
+                    # Incluye multiples campos para evitar colisiones en accounts
+                    # con numeros cortos (ej: "33460****" de MIDLAND). Los
                     # campos adicionales (balance, date_opened, payment_status,
                     # negative_type) son todos ESTABLES cross-bureau para el
-                    # mismo tradeline, así que el fingerprint sigue siendo el
+                    # mismo tradeline, asi que el fingerprint sigue siendo el
                     # mismo en TU/EXP/EQF para una misma cuenta, pero distinto
-                    # entre cuentas con idénticos fname+acct pero diferentes
-                    # attributos (lo cual nunca debería pasar dentro del mismo
+                    # entre cuentas con identicos fname+acct pero diferentes
+                    # attributos (lo cual nunca deberia pasar dentro del mismo
                     # cliente, pero defensa en profundidad).
                     fingerprint_basis = (
                         facct + "|" +
@@ -6120,14 +6039,14 @@ def build_dispute_letter_engine(
                     account_fingerprint = int(_h[:16], 16)  # 64-bit unsigned
                     # variation_seed lo rota on Regenerate; idx solo sirve
                     # como disambiguator intra-carta si dos cuentas tienen
-                    # fingerprints que colisionan en módulo pequeño.
+                    # fingerprints que colisionan en modulo pequeno.
                     variation_idx = account_fingerprint + variation_seed * 7
                     reason = ""
-                    # Attempt loop — strides ordenados para cubrir todos los
+                    # Attempt loop, strides ordenados para cubrir todos los
                     # pool sizes sin ciclar: primero los 4 strides coprimos
                     # con 4 (0,1,2,3) que garantizan cubrir un pool v4
                     # completo. Luego strides coprimos con 8 (5,7,3,1 en
-                    # distintos turnos). Finalmente fallback numérico.
+                    # distintos turnos). Finalmente fallback numerico.
                     _ATTEMPT_STRIDES = [
                         0, 1, 2, 3,          # cubre v4 completamente
                         5, 7, 9, 11,         # avanza en v8 sin repetir
@@ -6146,7 +6065,11 @@ def build_dispute_letter_engine(
                         if reason not in used_reasons:
                             break
                     if reason in used_reasons:
-                        reason = reason + f" (Account #{facct}.)"
+                        _dis = last_four_digits(facct)
+                        if _dis:
+                            reason = reason + f" (Account ending {_dis}.)"
+                        else:
+                            reason = reason + f" (Account #{mask_stars_to_x(facct)}.)"
                     used_reasons.add(reason)
                     # For R2/R3: prepend what the bureau said about this specific account
                     # so the dispute reason directly attacks the bureau's prior response.
@@ -6157,7 +6080,7 @@ def build_dispute_letter_engine(
                         if bureau_ctx:
                             reason = bureau_ctx + "\n\n" + reason
                     account_lines.append(
-                        f"{idx}. {fname} \u2014 Account #: {facct}\n"
+                        f"{idx}. {fname}, Account #: {mask_stars_to_x(facct)}\n"
                         f"{reason}\n"
                     )
 
@@ -6185,7 +6108,7 @@ def build_dispute_letter_engine(
 
 
 def _group_context(group_key: str) -> str:
-    """Plain-language context string for group — used in opening templates."""
+    """Plain-language context string for group, used in opening templates."""
     return {
         "collections":      "collection accounts",
         "charge_offs":      "charged-off accounts",
@@ -6201,25 +6124,25 @@ def _group_context(group_key: str) -> str:
 # attacks already in the system.
 #
 # Attack types added here:
-#   student_loan_duplicate_tradeline      — same loan reported twice (balance doubled)
-#   student_loan_transferred_still_active — old servicer still reporting after transfer
-#   student_loan_deferment_late_payment   — late payment during deferment/forbearance
-#   student_loan_paid_still_reporting     — paid/discharged loan showing balance
-#   student_loan_discharged_still_active  — PSLF/disability discharge not reflected
-#   student_loan_default_inaccurate       — default status after rehabilitation
-#   student_loan_balance_inflated         — balance > original loan amount
+#   student_loan_duplicate_tradeline     , same loan reported twice (balance doubled)
+#   student_loan_transferred_still_active, old servicer still reporting after transfer
+#   student_loan_deferment_late_payment  , late payment during deferment/forbearance
+#   student_loan_paid_still_reporting    , paid/discharged loan showing balance
+#   student_loan_discharged_still_active , PSLF/disability discharge not reflected
+#   student_loan_default_inaccurate      , default status after rehabilitation
+#   student_loan_balance_inflated        , balance > original loan amount
 #
 # Context: As of early 2026, DOE has acknowledged ~1.4M duplicate loan records
-# from servicer transfers (Navient→MOHELA, Great Lakes→Nelnet, etc.).
+# from servicer transfers (Navient->MOHELA, Great Lakes->Nelnet, etc.).
 # A Senate investigation put the number at ~2M. Two federal class actions
 # (Walsh v. DOE, SDNY Feb 2026) are active. Individual FCRA disputes are
 # the fastest path to resolution and are independent of class litigation.
 #
 # Law:
-#   §1681e(b)    — maximum possible accuracy
-#   §1681s-2(a)(1) — furnisher must report accurate information
-#   §1681s-2(b)  — furnisher must investigate disputes
-#   §1681i(a)    — bureau reinvestigation within 30 days
+#   section 1681e(b)   , maximum possible accuracy
+#   section 1681s-2(a)(1), furnisher must report accurate information
+#   section 1681s-2(b) , furnisher must investigate disputes
+#   section 1681i(a)   , bureau reinvestigation within 30 days
 
 # Known federal student loan servicers (current and legacy)
 _STUDENT_LOAN_SERVICERS: frozenset[str] = frozenset({
@@ -6260,7 +6183,7 @@ def _is_student_loan_servicer(name: str) -> bool:
     # Exact match
     if n_up in _STUDENT_LOAN_SERVICERS:
         return True
-    # Partial match — covers "NELNET BANK", "MOHELA/DOE", etc.
+    # Partial match, covers "NELNET BANK", "MOHELA/DOE", etc.
     return any(s in n_up for s in _STUDENT_LOAN_SERVICERS)
 
 
@@ -6309,7 +6232,7 @@ def detect_student_loan_complex_attacks(
         d_report = parse_date_field(report_date)
         all_text = comments + " " + raw
 
-        # ── ATTACK 1: Duplicate tradeline (same loan, same bureau) ────────
+        # -- ATTACK 1: Duplicate tradeline (same loan, same bureau) --------
         # Same servicer + same balance + same date_opened on this bureau
         duplicates_same_bureau = [
             a for a in bureau_sl
@@ -6326,19 +6249,19 @@ def detect_student_loan_complex_attacks(
                 strategy_tags=["FCRA_1681e_b", "FCRA_1681s_2_a_1"],
                 reason=(
                     f"{name} (Account #{acct_num}) appears to be a duplicate "
-                    f"tradeline — the same loan is being reported more than once "
+                    f"tradeline, the same loan is being reported more than once "
                     f"at {bureau.title()} with the same balance and opening date. "
                     f"This is consistent with the widespread servicer transfer "
                     f"errors the Department of Education has acknowledged, where "
                     f"loan data is reported by both the old and new servicer "
                     f"simultaneously. Reporting the same loan twice inflates my "
-                    f"total debt and is a direct violation of 15 U.S.C. §1681e(b). "
+                    f"total debt and is a direct violation of 15 U.S.C. section 1681e(b). "
                     f"I am requesting that the duplicate entry be removed, leaving "
                     f"only the account with the current servicer."
                 ),
             ))
 
-        # ── ATTACK 2: Transferred loan still active from old servicer ─────
+        # -- ATTACK 2: Transferred loan still active from old servicer -----
         # Old servicer (Navient, Great Lakes, FedLoan) reporting same loan
         # that also appears under a new servicer with similar balance
         legacy_servicers = {"NAVIENT", "GREAT LAKES", "FEDLOAN", "PHEAA"}
@@ -6367,13 +6290,13 @@ def detect_student_loan_complex_attacks(
                         f"to update their tradeline to show a zero balance with a "
                         f"'transferred' or 'closed' status. Continuing to report an "
                         f"active balance after transfer creates a duplicate reporting "
-                        f"of the same debt and violates 15 U.S.C. §1681s-2(a)(1). "
+                        f"of the same debt and violates 15 U.S.C. section 1681s-2(a)(1). "
                         f"I am requesting that this tradeline be updated to reflect "
                         f"the transfer with a zero balance."
                     ),
                 ))
 
-        # ── ATTACK 3: Late payment during deferment/forbearance ───────────
+        # -- ATTACK 3: Late payment during deferment/forbearance -----------
         is_late    = "late" in payment and "collection" not in payment
         in_deferment = any(k in all_text for k in _DEFERMENT_KEYWORDS)
         if is_late and in_deferment:
@@ -6387,16 +6310,16 @@ def detect_student_loan_complex_attacks(
                     f"status of '{acc.get('payment_status','')}' during what appears "
                     f"to be a deferment or forbearance period. When a student loan "
                     f"is in an authorized deferment or forbearance, no payment is "
-                    f"legally due — therefore no payment can be reported as late. "
+                    f"legally due, therefore no payment can be reported as late. "
                     f"This error is consistent with the widespread servicer billing "
                     f"mistakes documented by the CFPB following the end of the "
                     f"COVID-19 payment pause. I am disputing this late payment "
-                    f"notation as inaccurate under 15 U.S.C. §1681e(b) and "
+                    f"notation as inaccurate under 15 U.S.C. section 1681e(b) and "
                     f"requesting its immediate removal."
                 ),
             ))
 
-        # ── ATTACK 4: Paid/discharged loan still showing balance ──────────
+        # -- ATTACK 4: Paid/discharged loan still showing balance ----------
         is_paid_status = "paid" in status or "closed" in status
         if is_paid_status and balance > 0 and "collection" not in payment:
             attacks.append(build_attack_record(
@@ -6411,12 +6334,12 @@ def detect_student_loan_complex_attacks(
                     f"should reflect a zero balance. This discrepancy indicates "
                     f"that the loan payoff was not properly recorded and reported "
                     f"to the credit bureaus by the servicer, violating the "
-                    f"accuracy requirements of 15 U.S.C. §1681e(b). I am "
+                    f"accuracy requirements of 15 U.S.C. section 1681e(b). I am "
                     f"requesting that the balance be corrected to zero."
                 ),
             ))
 
-        # ── ATTACK 5: Discharged/forgiven loan still showing as active ────
+        # -- ATTACK 5: Discharged/forgiven loan still showing as active ----
         has_discharge_indicator = any(k in all_text for k in _DISCHARGE_KEYWORDS)
         if has_discharge_indicator and balance > 0 and "derogatory" in status:
             attacks.append(build_attack_record(
@@ -6432,12 +6355,12 @@ def detect_student_loan_complex_attacks(
                     f"PSLF, total and permanent disability, borrower defense, or "
                     f"another forgiveness program, the servicer is required to "
                     f"report the correct discharged status and a zero balance "
-                    f"under 15 U.S.C. §1681s-2(a)(1). I am requesting verification "
+                    f"under 15 U.S.C. section 1681s-2(a)(1). I am requesting verification "
                     f"of the current loan status and correction of the reporting."
                 ),
             ))
 
-        # ── ATTACK 6: Default status after rehabilitation ─────────────────
+        # -- ATTACK 6: Default status after rehabilitation -----------------
         is_default = (
             "default" in payment or "default" in status
             or "collection/chargeoff" in payment and "student" in acc.get("account_type_detail","").lower()
@@ -6462,8 +6385,8 @@ def detect_student_loan_complex_attacks(
                 ),
             ))
 
-        # ── ATTACK 7: Balance greater than original loan amount ───────────
-        # More than 25% above original — fees/interest cannot reasonably explain this
+        # -- ATTACK 7: Balance greater than original loan amount -----------
+        # More than 25% above original, fees/interest cannot reasonably explain this
         if high_cr > 0 and balance > high_cr * 1.25:
             overage = balance - high_cr
             attacks.append(build_attack_record(
@@ -6475,9 +6398,9 @@ def detect_student_loan_complex_attacks(
                     f"{name} (Account #{acct_num}) shows a current balance of "
                     f"{acc.get('balance','')} that exceeds the original loan "
                     f"amount of {acc.get('high_credit','')} by approximately "
-                    f"${overage:,.2f}. While interest and fees can increase the "
+                    f"${overage:.2f}. While interest and fees can increase the "
                     f"balance on student loans, an overage of this magnitude "
-                    f"suggests a reporting error — particularly given the "
+                    f"suggests a reporting error, particularly given the "
                     f"documented servicer billing errors that have caused inflated "
                     f"balances across millions of borrower accounts. I am "
                     f"requesting a complete itemized accounting of all interest, "
@@ -6495,21 +6418,21 @@ def detect_student_loan_complex_attacks(
 #
 # Legal basis hierarchy (April 2026):
 #
-#   Tier 1 — Bureau voluntary policy (strongest argument)
-#     • Under $500:      prohibited since April 11, 2023 (all 3 bureaus)
-#     • Paid medical:    removed since July 2022 (all 3 bureaus)
-#     • Under 12 months: not reportable since 2022 (all 3 bureaus)
+#   Tier 1, Bureau voluntary policy (strongest argument)
+#     * Under $500:      prohibited since April 11, 2023 (all 3 bureaus)
+#     * Paid medical:    removed since July 2022 (all 3 bureaus)
+#     * Under 12 months: not reportable since 2022 (all 3 bureaus)
 #
-#   Tier 2 — State law (applies where client lives)
-#     • 15+ states have enacted medical debt credit reporting bans (2023-2025)
-#     • CA, CO, IL, CT, NJ, NY, MD, VA, WA, OR, MN, ME, VT, RI, DE
+#   Tier 2, State law (applies where client lives)
+#     * 15+ states have enacted medical debt credit reporting bans (2023-2025)
+#     * CA, CO, IL, CT, NJ, NY, MD, VA, WA, OR, MN, ME, VT, RI, DE
 #
-#   Tier 3 — FCRA §1681e(b) accuracy (universal, always applies)
-#     • Medical billing has documented systemic inaccuracy problem
-#     • Insurance disputes, No Surprises Act violations, billing errors
+#   Tier 3, FCRA section 1681e(b) accuracy (universal, always applies)
+#     * Medical billing has documented systemic inaccuracy problem
+#     * Insurance disputes, No Surprises Act violations, billing errors
 #
-#   CFPB rule (Jan 2025) — VACATED July 11, 2025. Not citable.
-#   Bureau voluntary policies — still in effect. Primary dispute vehicle.
+#   CFPB rule (Jan 2025), VACATED July 11, 2025. Not citable.
+#   Bureau voluntary policies, still in effect. Primary dispute vehicle.
 
 # States with active medical debt credit reporting restrictions (as of April 2026)
 MEDICAL_DEBT_PROTECTED_STATES: set[str] = {
@@ -6530,7 +6453,7 @@ MEDICAL_DEBT_PROTECTED_STATES: set[str] = {
     "DE", "DELAWARE",
 }
 
-# Known medical provider name patterns — used to identify medical collections
+# Known medical provider name patterns, used to identify medical collections
 _MEDICAL_KEYWORDS: tuple[str, ...] = (
     "hospital", "medical", "health", "clinic", "surgery", "physician",
     "doctor", "dental", "dentist", "orthopedic", "radiology", "laboratory",
@@ -6596,11 +6519,11 @@ def detect_medical_debt_attacks(
     Detect medical debt accounts that should not be on credit reports.
 
     Four attack types in priority order:
-      1. medical_debt_under_500      — balance < $500, per bureau voluntary policy
-      2. paid_medical_collection     — paid/settled, per bureau voluntary policy
-      3. medical_debt_premature      — reported within 12 months of service date
-      4. medical_debt_state_law      — in a state with medical debt reporting ban
-      5. medical_debt_accuracy       — general accuracy attack on any medical debt
+      1. medical_debt_under_500     , balance < $500, per bureau voluntary policy
+      2. paid_medical_collection    , paid/settled, per bureau voluntary policy
+      3. medical_debt_premature     , reported within 12 months of service date
+      4. medical_debt_state_law     , in a state with medical debt reporting ban
+      5. medical_debt_accuracy      , general accuracy attack on any medical debt
     """
     import datetime as _dt
 
@@ -6631,7 +6554,7 @@ def detect_medical_debt_attacks(
             or "chargeoff" in payment
         )
 
-        # ── ATTACK 1: Under $500 ───────────────────────────────────────
+        # -- ATTACK 1: Under $500 ---------------------------------------
         if balance > 0 and balance < 500 and is_collection:
             attacks.append(build_attack_record(
                 attack_type="medical_debt_under_500",
@@ -6640,7 +6563,7 @@ def detect_medical_debt_attacks(
                 strategy_tags=["bureau_policy_2023", "FCRA_1681e_b"],
                 reason=(
                     f"{name} (Account #{acct_num}) is a medical collection "
-                    f"with a balance of ${balance:,.2f} — under the $500 "
+                    f"with a balance of ${balance:.2f}, under the $500 "
                     f"threshold. In April 2023, all three credit bureaus "
                     f"publicly committed to removing all medical debt under "
                     f"$500 from consumer credit reports. This account should "
@@ -6649,7 +6572,7 @@ def detect_medical_debt_attacks(
                 ),
             ))
 
-        # ── ATTACK 2: Paid medical collection ─────────────────────────
+        # -- ATTACK 2: Paid medical collection -------------------------
         elif is_paid and is_collection:
             attacks.append(build_attack_record(
                 attack_type="paid_medical_collection",
@@ -6667,7 +6590,7 @@ def detect_medical_debt_attacks(
                 ),
             ))
 
-        # ── ATTACK 3: Under 12 months ─────────────────────────────────
+        # -- ATTACK 3: Under 12 months ---------------------------------
         elif (d_opened and report_dt and is_collection
               and (report_dt - d_opened).days < 365):
             months_old = (report_dt - d_opened).days // 30
@@ -6687,7 +6610,7 @@ def detect_medical_debt_attacks(
                 ),
             ))
 
-        # ── ATTACK 4: State law ────────────────────────────────────────
+        # -- ATTACK 4: State law ----------------------------------------
         elif client_state and client_state.upper() in MEDICAL_DEBT_PROTECTED_STATES:
             state_name = client_state.upper()
             attacks.append(build_attack_record(
@@ -6705,7 +6628,7 @@ def detect_medical_debt_attacks(
                 ),
             ))
 
-        # ── ATTACK 5: General accuracy (all other medical debt) ────────
+        # -- ATTACK 5: General accuracy (all other medical debt) --------
         else:
             attacks.append(build_attack_record(
                 attack_type="medical_debt_accuracy",
@@ -6714,10 +6637,10 @@ def detect_medical_debt_attacks(
                 strategy_tags=["FCRA_1681e_b", "FCRA_1681i_a"],
                 reason=(
                     f"{name} (Account #{acct_num}) is a medical collection. "
-                    f"Medical debt is uniquely prone to inaccuracy — billing "
+                    f"Medical debt is uniquely prone to inaccuracy, billing "
                     f"errors, incorrect insurance applications, disputed charges, "
                     f"and balance inflation are documented systemic problems in "
-                    f"healthcare billing. Under 15 U.S.C. §1681e(b), this bureau "
+                    f"healthcare billing. Under 15 U.S.C. section 1681e(b), this bureau "
                     f"must maintain maximum possible accuracy. I am disputing the "
                     f"accuracy of this medical collection and requesting full "
                     f"verification: itemized bill, proof of insurance applied, "
@@ -6733,9 +6656,9 @@ def detect_medical_debt_attacks(
 # =========================
 #
 # Architecture:
-#   Level 1 — detect_source()        → identifies which service generated the PDF
-#   Level 2 — source adapters        → convert each format to canonical inventory
-#   Level 3 — detection engine       → unchanged, operates on canonical structure
+#   Level 1, detect_source()        -> identifies which service generated the PDF
+#   Level 2, source adapters        -> convert each format to canonical inventory
+#   Level 3, detection engine       -> unchanged, operates on canonical structure
 #
 # Canonical account keys (same regardless of source):
 #   bureau, name, account_number, status, payment_status, balance, past_due,
@@ -6743,13 +6666,13 @@ def detect_medical_debt_attacks(
 #   account_type_detail, high_credit, credit_limit, monthly_payment, raw_lines
 #
 # Sources supported:
-#   "identityiq"              — 3-bureau side-by-side PDF (already implemented)
-#   "bureau_direct_tu"        — TransUnion direct PDF (one bureau)
-#   "bureau_direct_exp"       — Experian direct PDF (one bureau)
-#   "bureau_direct_eq"        — Equifax direct PDF (one bureau)
-#   "myfico"                  — myFICO 3-bureau PDF
-#   "smartcredit"             — SmartCredit 3-bureau PDF
-#   "unknown"                 — fallback to IdentityIQ parser
+#   "identityiq"             , 3-bureau side-by-side PDF (already implemented)
+#   "bureau_direct_tu"       , TransUnion direct PDF (one bureau)
+#   "bureau_direct_exp"      , Experian direct PDF (one bureau)
+#   "bureau_direct_eq"       , Equifax direct PDF (one bureau)
+#   "myfico"                 , myFICO 3-bureau PDF
+#   "smartcredit"            , SmartCredit 3-bureau PDF
+#   "unknown"                , fallback to IdentityIQ parser
 
 
 SOURCE_IDENTITYIQ       = "identityiq"
@@ -6824,12 +6747,12 @@ def parse_bureau_direct(
       Experian:    same labels, sometimes "Account Condition:" for status
       Equifax:     same labels, sometimes "Remarks:" for comments
 
-    Returns canonical account list — same structure as IdentityIQ inventory.
+    Returns canonical account list, same structure as IdentityIQ inventory.
     """
     import re as _re
     accounts: list[dict[str, Any]] = []
 
-    # Account block markers — bureau-direct reports usually show account name
+    # Account block markers, bureau-direct reports usually show account name
     # on its own line followed by a line of dashes or account details
     current: dict[str, Any] | None = None
 
@@ -6862,7 +6785,7 @@ def parse_bureau_direct(
             acc.setdefault("raw_lines",           [])
             accounts.append(acc)
 
-    # Field label map — handles label variants across bureaus
+    # Field label map, handles label variants across bureaus
     LABEL_MAP = {
         "account number":       "account_number",
         "account #":            "account_number",
@@ -6909,7 +6832,7 @@ def parse_bureau_direct(
         line = lines[i].strip()
         lo   = line.lower()
 
-        # Detect account block start — line that looks like a creditor name
+        # Detect account block start, line that looks like a creditor name
         # followed by account number or type info on the next lines
         # Heuristic: all-caps or title-case word not in skip list, followed by
         # account-specific labels within 3 lines
@@ -6981,7 +6904,7 @@ def build_report_single_bureau(
     source = detect_source(raw_text[:3000])
 
     if source == SOURCE_IDENTITYIQ:
-        # IdentityIQ — use normal pipeline, just return one bureau's slice
+        # IdentityIQ, use normal pipeline, just return one bureau's slice
         full = build_report(pdf_path)
         sliced_inv = {bureau: full["inventory_by_bureau"].get(bureau, [])}
         return {"source": source, "bureau": bureau, "inventory": sliced_inv}
@@ -7008,7 +6931,7 @@ def build_report_single_bureau(
 
 def build_report_multi(pdf_paths: dict[str, str]) -> dict[str, Any]:
     """
-    Process multiple PDFs — one per bureau — and combine into a single result.
+    Process multiple PDFs, one per bureau, and combine into a single result.
     Use this when the client uploads AnnualCreditReport.com bureau-by-bureau reports.
 
     pdf_paths: {"transunion": "/path/tu.pdf", "experian": "/path/exp.pdf", "equifax": "/path/eq.pdf"}
@@ -7036,7 +6959,7 @@ def build_report_multi(pdf_paths: dict[str, str]) -> dict[str, Any]:
         source = detect_source(raw_text[:3000])
 
         if source == SOURCE_IDENTITYIQ:
-            # IdentityIQ — extract just this bureau's data
+            # IdentityIQ, extract just this bureau's data
             full = build_report(pdf_path)
             all_inventory[bureau] = full["inventory_by_bureau"].get(bureau, [])
             if not report_date_str:
@@ -7160,7 +7083,7 @@ def parse_inquiries(lines: list[str]) -> list[dict[str, Any]]:
         before     = line[:m.start()].strip()
         after      = line[m.end():].strip()
 
-        # Determine bureau — last token after date
+        # Determine bureau, last token after date
         bureau = ""
         for b in bureau_names:
             if b in after.lower() or after.lower() == b[:len(after)].lower():
@@ -7210,29 +7133,29 @@ def parse_inquiries(lines: list[str]) -> list[dict[str, Any]]:
 def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
                            accounts_opened: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """
-    Detect inquiry-level §1681b permissible purpose violations.
+    Detect inquiry-level section 1681b permissible purpose violations.
 
     Four attack types:
 
-    TYPE A — duplicate_inquiry_same_creditor
+    TYPE A, duplicate_inquiry_same_creditor
         Same creditor + same bureau + same date, pulled 2+ times.
-        No single application generates two pulls — each requires
+        No single application generates two pulls, each requires
         an independent permissible purpose.
 
-    TYPE B — repeat_inquiry_no_account
+    TYPE B, repeat_inquiry_no_account
         Same creditor + same bureau on 2+ different dates with no
         resulting account opened near those dates.
         Multiple pulls separated by weeks/months suggests the
         creditor kept pulling without a new application each time.
 
-    TYPE C — inquiry_cluster_same_day
+    TYPE C, inquiry_cluster_same_day
         5+ different creditors on the same day at the same bureau.
         While rate-shopping for auto or mortgage allows a 14-day
-        window under §1681b(c)(3), dealer pulls and financing pulls
+        window under section 1681b(c)(3), dealer pulls and financing pulls
         are counted separately. Beyond the rate-shopping window,
         each requires its own permissible purpose.
 
-    TYPE D — creditor_pulled_multiple_bureaus
+    TYPE D, creditor_pulled_multiple_bureaus
         Same creditor on the same date across 2+ bureaus.
         Each bureau pull is a separate permissible purpose event.
         Unless the consumer applied at multiple places, this may
@@ -7248,7 +7171,7 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
     by_exact:        dict[tuple, list] = defaultdict(list)  # (name, bureau, date)
     by_name_bureau:  dict[tuple, list] = defaultdict(list)  # (name, bureau)
     by_date_bureau:  dict[tuple, list] = defaultdict(list)  # (date, bureau)
-    by_name_date:    dict[tuple, set]  = defaultdict(set)   # (name, date) → bureaus
+    by_name_date:    dict[tuple, set]  = defaultdict(set)   # (name, date) -> bureaus
 
     for inq in inquiries:
         n = inq["creditor_name"]
@@ -7261,7 +7184,7 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
 
     seen: set = set()
 
-    # ── TYPE A: Exact duplicate ──────────────────────────────────────────
+    # -- TYPE A: Exact duplicate ------------------------------------------
     for (name, bureau, date), inqs in by_exact.items():
         if len(inqs) > 1:
             key = ("dup", name, bureau, date)
@@ -7279,13 +7202,13 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
                         f"{name} pulled my {bureau.title()} credit report "
                         f"{len(inqs)} times on {date}. Each credit inquiry "
                         f"requires a separate permissible purpose under "
-                        f"15 U.S.C. \u00a71681b. A single application "
-                        f"generates one pull — not two. The duplicate inquiry "
+                        f"15 U.S.C. section 1681b. A single application "
+                        f"generates one pull, not two. The duplicate inquiry "
                         f"has no valid permissible purpose and must be removed."
                     ),
                 })
 
-    # ── TYPE B: Same creditor, multiple dates, no resulting account ───────
+    # -- TYPE B: Same creditor, multiple dates, no resulting account -------
     for (name, bureau), inqs in by_name_bureau.items():
         dates = sorted(set(i["date"] for i in inqs))
         if len(dates) > 1:
@@ -7304,14 +7227,14 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
                         f"{name} pulled my {bureau.title()} credit report "
                         f"{len(dates)} times on different dates "
                         f"({', '.join(dates)}). Each pull requires a new "
-                        f"permissible purpose — a separate application or "
+                        f"permissible purpose, a separate application or "
                         f"authorization. Without evidence of separate "
                         f"applications, these repeat pulls may not have had "
-                        f"a valid permissible purpose under 15 U.S.C. \u00a71681b."
+                        f"a valid permissible purpose under 15 U.S.C. section 1681b."
                     ),
                 })
 
-    # ── TYPE C: Cluster — 5+ creditors same day same bureau ──────────────
+    # -- TYPE C: Cluster, 5+ creditors same day same bureau --------------
     for (date, bureau), inqs in by_date_bureau.items():
         unique_creditors = list(dict.fromkeys(i["creditor_name"] for i in inqs))
         if len(unique_creditors) >= 5:
@@ -7325,7 +7248,7 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
                 pct_auto   = is_auto / len(inqs) if inqs else 0
 
                 context = (
-                    "These appear to be auto-related inquiries. While §1681b(c)(3) "
+                    "These appear to be auto-related inquiries. While section 1681b(c)(3) "
                     "allows a 14-day rate-shopping window for auto loans, dealer "
                     "pulls and financing company pulls are counted separately, and "
                     "each requires that the consumer initiated an application. "
@@ -7346,13 +7269,13 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
                         f"{len(unique_creditors)} different creditors on {date}. "
                         f"{context}"
                         f"Each inquiry requires an independent permissible purpose "
-                        f"under 15 U.S.C. \u00a71681b. I am requesting that each "
+                        f"under 15 U.S.C. section 1681b. I am requesting that each "
                         f"creditor confirm the permissible purpose for their inquiry, "
                         f"and that any pull I did not authorize be removed."
                     ),
                 })
 
-    # ── TYPE D: Same creditor across multiple bureaus same day ────────────
+    # -- TYPE D: Same creditor across multiple bureaus same day ------------
     for (name, date), bureaus in by_name_date.items():
         if len(bureaus) > 1:
             key = ("multi_bureau", name, date)
@@ -7372,7 +7295,7 @@ def detect_inquiry_attacks(inquiries: list[dict[str, Any]],
                         f"without separate consumer authorizations may indicate "
                         f"that the initial inquiry was shared or resold, which "
                         f"requires a permissible purpose for each separate pull "
-                        f"under 15 U.S.C. \u00a71681b."
+                        f"under 15 U.S.C. section 1681b."
                     ),
                 })
 
@@ -7387,7 +7310,7 @@ def build_inquiry_dispute_letter(
 ) -> str:
     """
     Generate an inquiry dispute letter for one bureau.
-    Inquiries are separate from account disputes — they go in their own letter.
+    Inquiries are separate from account disputes, they go in their own letter.
     """
     bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name    = bureau_info.get("name", bureau.title())
@@ -7401,10 +7324,10 @@ def build_inquiry_dispute_letter(
     )
 
     opening = (
-        f"To Whom It May Concern,\n\n"
+        f"Hi,\n\n"
         f"I am writing to dispute unauthorized or improperly obtained "
         f"credit inquiries on my {bureau_name} credit report. Under "
-        f"15 U.S.C. \u00a71681b, a credit inquiry is only permissible "
+        f"15 U.S.C. section 1681b, a credit inquiry is only permissible "
         f"when the consumer has applied for credit or otherwise authorized "
         f"the pull. Each inquiry listed below either lacks a valid "
         f"permissible purpose, is a duplicate, or was obtained without "
@@ -7412,13 +7335,13 @@ def build_inquiry_dispute_letter(
         f"and removed."
     )
 
-    # Pool de cierres humanizados para inquiries — rota por posicion
+    # Pool de cierres humanizados para inquiries, rota por posicion
     _INQUIRY_CLOSER_POOL = [
         " Please remove this inquiry.",
         " This inquiry should be deleted.",
         " I am requesting deletion of this inquiry.",
         " Take this inquiry off my report.",
-        "",  # vacio — el reason carga el cierre
+        "",  # vacio, el reason carga el cierre
         " This one needs to come off.",
         " Please delete it.",
         "",  # vacio
@@ -7433,11 +7356,11 @@ def build_inquiry_dispute_letter(
 
     legal_note = (
         f"Unauthorized inquiries damage my credit score and constitute "
-        f"a violation of 15 U.S.C. \u00a71681b. Willful violations are "
+        f"a violation of 15 U.S.C. section 1681b. Willful violations are "
         f"subject to statutory damages of $100 to $1,000 per violation "
-        f"plus punitive damages and attorney fees under 15 U.S.C. \u00a71681n. "
+        f"plus punitive damages and attorney fees under 15 U.S.C. section 1681n. "
         f"Please complete your investigation within 30 days as required "
-        f"by 15 U.S.C. \u00a71681i(a)(1) and provide written results."
+        f"by 15 U.S.C. section 1681i(a)(1) and provide written results."
     )
 
     return (
@@ -7465,7 +7388,7 @@ def build_inquiry_letters(
     for atk in all_attacks:
         bureau = atk.get("bureau", "")
         if not bureau:
-            # Multi-bureau attacks — add to each bureau
+            # Multi-bureau attacks, add to each bureau
             for b in atk.get("bureaus", []):
                 attacks_by_bureau.setdefault(b, []).append(atk)
         else:
@@ -7502,7 +7425,7 @@ def extract_scores(lines: list[str]) -> dict[str, int]:
                 scores["experian"]   = int(vals[1])
                 scores["equifax"]    = int(vals[2])
                 break
-            # Sometimes split across next lines — scan next 3 lines
+            # Sometimes split across next lines, scan next 3 lines
             combined = line
             for j in range(1, 4):
                 if i + j < len(lines):
@@ -7517,6 +7440,382 @@ def extract_scores(lines: list[str]) -> dict[str, int]:
     return scores
 
 
+# =========================
+# E-OSCAR COMPLIANCE VALIDATION
+# =========================
+
+# Phrases that flag letters as template-generated or as consumer-aggressive
+# legalese, triggering e-OSCAR frivolous-dispute logic. Sourced from
+# PROYECTO_CONTEXT.md section "Prohibiciones absolutas (flags e-OSCAR)".
+# Matching is case-insensitive and substring-based.
+FORBIDDEN_PHRASES: tuple[str, ...] = (
+    "i demand you delete",
+    "verify or delete",
+    "delete off my credit report",
+    "pursuant to",
+    "please be advised",
+    "under penalty of perjury",
+    "notarized affidavit",
+    "strawman",
+    "sovereign",
+    "metro 2 compliance",
+    "my attorney will",
+    "i will sue",
+)
+
+# Structural markers required in a compliant bureau dispute letter.
+_REQUIRED_SALUTATION          = "Hi,"
+_REQUIRED_TRANSITION_LINE     = "The following accounts must be deleted immediately:"
+
+# Word count limits from PROYECTO_CONTEXT checklist.
+_BODY_MIN_WORDS  = 150
+_BODY_MAX_WORDS  = 350
+_TOTAL_MIN_WORDS = 200
+_TOTAL_MAX_WORDS = 600
+
+# Overlap threshold: N+ consecutive shared words between letters = fail.
+_OVERLAP_WINDOW_WORDS = 20
+
+
+def validate_eoscar_compliance(
+    letter_text: str,
+    raw_report_text: str = "",
+    other_letters: list[str] | None = None,
+    letter_type: str = "bureau_dispute",
+) -> dict[str, Any]:
+    """
+    Passive compliance check for generated dispute letters.
+
+    Reads the letter text and returns a diagnostic dict. Does not modify
+    anything. Safe to call on any string. Any internal exception is caught
+    and returned as a failed check rather than propagating.
+
+    Parameters:
+        letter_text:     The generated letter to validate.
+        raw_report_text: Optional raw text from the credit report. If
+                         provided, enables the fidelity_to_report check
+                         (furnisher names in the letter must appear
+                         verbatim in the report).
+        other_letters:   Optional list of OTHER letters from the same
+                         client. If provided, enables the overlap check
+                         (no 20+ consecutive shared words across letters).
+        letter_type:     "bureau_dispute" (default), "furnisher", or
+                         "inquiry". Controls which structural checks
+                         apply, since furnisher letters use a different
+                         salutation.
+
+    Returns:
+        {
+            "passed":  bool,       # all checks passed?
+            "score":   int,        # 0-100, weighted by severity
+            "checks": {
+                "ascii":              {"pass": bool, "detail": str},
+                "length":             {"pass": bool, "detail": str},
+                "forbidden_phrases":  {"pass": bool, "detail": str, "found": [...]},
+                "structure":          {"pass": bool, "detail": str},
+                "fidelity_to_report": {"pass": bool, "detail": str, "skipped": bool},
+                "overlap":            {"pass": bool, "detail": str, "skipped": bool},
+            },
+            "warnings": [str, ...],  # human-readable summary
+        }
+    """
+    import re as _re_v
+
+    # Defensive wrapper: if anything inside fails, we still return a
+    # structured dict instead of propagating the exception to main.py.
+    try:
+        result: dict[str, Any] = {
+            "passed": True,
+            "score":  100,
+            "checks": {},
+            "warnings": [],
+        }
+
+        if not isinstance(letter_text, str):
+            result["passed"] = False
+            result["score"]  = 0
+            result["warnings"].append("Input is not a string")
+            result["checks"]["input_type"] = {
+                "pass": False,
+                "detail": f"Expected str, got {type(letter_text).__name__}",
+            }
+            return result
+
+        text = letter_text
+        lower = text.lower()
+
+        # ---- Check 1: ASCII purity ----
+        non_ascii_chars = [c for c in text if ord(c) > 127]
+        if non_ascii_chars:
+            # Collect unique offenders
+            from collections import Counter as _Counter
+            counts = _Counter(non_ascii_chars)
+            top = counts.most_common(5)
+            detail = (
+                f"Found {len(non_ascii_chars)} non-ASCII character(s). "
+                f"Top offenders: "
+                + ", ".join(f"{c!r} (U+{ord(c):04X}) x{n}" for c, n in top)
+            )
+            result["checks"]["ascii"] = {"pass": False, "detail": detail}
+            result["warnings"].append("Letter contains non-ASCII characters")
+        else:
+            result["checks"]["ascii"] = {"pass": True, "detail": "100% ASCII"}
+
+        # ---- Check 2: Length ----
+        words = text.split()
+        total_words = len(words)
+
+        # Estimate body words by stripping header, transition, and signature.
+        # Body is between salutation and transition line.
+        body_text = text
+        sal_idx = text.find(_REQUIRED_SALUTATION)
+        if sal_idx >= 0:
+            body_text = text[sal_idx + len(_REQUIRED_SALUTATION):]
+        trans_idx = body_text.find(_REQUIRED_TRANSITION_LINE)
+        if trans_idx >= 0:
+            body_text = body_text[:trans_idx]
+        body_words = len(body_text.split())
+
+        length_ok = True
+        length_notes = []
+
+        if letter_type == "bureau_dispute":
+            if body_words < _BODY_MIN_WORDS:
+                length_ok = False
+                length_notes.append(f"body too short ({body_words} words, min {_BODY_MIN_WORDS})")
+            elif body_words > _BODY_MAX_WORDS:
+                length_ok = False
+                length_notes.append(f"body too long ({body_words} words, max {_BODY_MAX_WORDS})")
+            if total_words < _TOTAL_MIN_WORDS:
+                length_ok = False
+                length_notes.append(f"total too short ({total_words} words, min {_TOTAL_MIN_WORDS})")
+            elif total_words > _TOTAL_MAX_WORDS:
+                length_ok = False
+                length_notes.append(f"total too long ({total_words} words, max {_TOTAL_MAX_WORDS})")
+
+        length_detail = (
+            f"body={body_words}w, total={total_words}w"
+            + (" | " + "; ".join(length_notes) if length_notes else "")
+        )
+        result["checks"]["length"] = {
+            "pass":        length_ok,
+            "detail":      length_detail,
+            "body_words":  body_words,
+            "total_words": total_words,
+        }
+        if not length_ok:
+            result["warnings"].append(f"Length out of range: {'; '.join(length_notes)}")
+
+        # ---- Check 3: Forbidden phrases ----
+        found_phrases = [p for p in FORBIDDEN_PHRASES if p in lower]
+        if found_phrases:
+            result["checks"]["forbidden_phrases"] = {
+                "pass":   False,
+                "detail": f"Found {len(found_phrases)} forbidden phrase(s)",
+                "found":  found_phrases,
+            }
+            result["warnings"].append(
+                f"Forbidden phrases present: {', '.join(found_phrases)}"
+            )
+        else:
+            result["checks"]["forbidden_phrases"] = {
+                "pass":   True,
+                "detail": "No forbidden phrases",
+                "found":  [],
+            }
+
+        # ---- Check 4: Structure ----
+        structure_notes = []
+        if letter_type == "bureau_dispute":
+            has_salutation = _REQUIRED_SALUTATION in text
+            has_transition = _REQUIRED_TRANSITION_LINE in text
+            # Signature is the consumer name at the end. We can't verify
+            # the exact name (we don't have it here), but we can verify
+            # that the letter does NOT end with "Sincerely," or similar.
+            stripped = text.rstrip()
+            ends_with_forbidden_closer = any(
+                stripped.lower().rstrip().endswith(c)
+                for c in ("sincerely,", "sincerely", "best regards,", "regards,", "thank you,")
+            )
+
+            if not has_salutation:
+                structure_notes.append(f"missing salutation '{_REQUIRED_SALUTATION}'")
+            if not has_transition:
+                structure_notes.append(f"missing transition '{_REQUIRED_TRANSITION_LINE}'")
+            if ends_with_forbidden_closer:
+                structure_notes.append("ends with forbidden closer (Sincerely/Regards)")
+
+        structure_ok = len(structure_notes) == 0
+        result["checks"]["structure"] = {
+            "pass":   structure_ok,
+            "detail": "OK" if structure_ok else "; ".join(structure_notes),
+        }
+        if not structure_ok:
+            result["warnings"].append(f"Structure: {'; '.join(structure_notes)}")
+
+        # ---- Check 5: Fidelity to report ----
+        # For each "Account #: XXXXX" or "N. FURNISHER NAME," occurrence in
+        # the letter, verify the furnisher name appears verbatim in the
+        # raw report text. Skipped if raw_report_text not provided.
+        if raw_report_text:
+            # Extract furnisher names from the numbered list in the letter.
+            # Pattern: "1. FURNISHER NAME, Account #:"  or similar.
+            furnisher_pattern = _re_v.compile(
+                r"^\s*\d+\.\s+([^,\n]+?),\s*Account\s*#:",
+                _re_v.MULTILINE,
+            )
+            claimed_furnishers = [
+                m.group(1).strip()
+                for m in furnisher_pattern.finditer(text)
+            ]
+            missing = []
+            for fname in claimed_furnishers:
+                if fname and fname not in raw_report_text:
+                    missing.append(fname)
+            if missing:
+                result["checks"]["fidelity_to_report"] = {
+                    "pass":    False,
+                    "detail":  f"{len(missing)} furnisher name(s) not found verbatim in report",
+                    "missing": missing,
+                    "skipped": False,
+                }
+                result["warnings"].append(
+                    f"Fidelity: furnishers not in report verbatim: {', '.join(missing)}"
+                )
+            else:
+                result["checks"]["fidelity_to_report"] = {
+                    "pass":    True,
+                    "detail":  f"All {len(claimed_furnishers)} furnisher(s) match report",
+                    "skipped": False,
+                }
+        else:
+            result["checks"]["fidelity_to_report"] = {
+                "pass":    True,
+                "detail":  "Skipped (no raw_report_text provided)",
+                "skipped": True,
+            }
+
+        # ---- Check 6: Overlap with other letters ----
+        # For each other letter, check if any run of N+ consecutive words
+        # appears in both. Heuristic: split to word tuples of length N and
+        # test for set intersection. Skipped if other_letters not provided.
+        if other_letters:
+            # Build the set of N-word tuples from this letter
+            this_words = [w.strip(".,;:!?").lower() for w in text.split()]
+            this_ngrams = set()
+            if len(this_words) >= _OVERLAP_WINDOW_WORDS:
+                for i in range(len(this_words) - _OVERLAP_WINDOW_WORDS + 1):
+                    ngram = tuple(this_words[i:i + _OVERLAP_WINDOW_WORDS])
+                    this_ngrams.add(ngram)
+
+            overlaps_found = []
+            for other in other_letters:
+                if not isinstance(other, str) or other == text:
+                    continue
+                other_words = [w.strip(".,;:!?").lower() for w in other.split()]
+                if len(other_words) < _OVERLAP_WINDOW_WORDS:
+                    continue
+                other_ngrams = set()
+                for i in range(len(other_words) - _OVERLAP_WINDOW_WORDS + 1):
+                    other_ngrams.add(tuple(other_words[i:i + _OVERLAP_WINDOW_WORDS]))
+                # Skip ngrams that are entirely boilerplate (salutation,
+                # transition line, legal citations) which are EXPECTED to
+                # repeat across letters.
+                shared = this_ngrams & other_ngrams
+                # Filter out ngrams that are just the transition line or
+                # legal citations that appear as fixed strings.
+                meaningful_shared = [
+                    ng for ng in shared
+                    if not _is_boilerplate_ngram(ng)
+                ]
+                if meaningful_shared:
+                    overlaps_found.append({
+                        "shared_ngrams": len(meaningful_shared),
+                        "sample": " ".join(meaningful_shared[0]),
+                    })
+
+            if overlaps_found:
+                result["checks"]["overlap"] = {
+                    "pass":     False,
+                    "detail":   f"Overlap with {len(overlaps_found)} other letter(s) at {_OVERLAP_WINDOW_WORDS}+ consecutive words",
+                    "overlaps": overlaps_found[:3],  # sample, don't flood
+                    "skipped":  False,
+                }
+                result["warnings"].append(
+                    f"Overlap detected with {len(overlaps_found)} other letter(s)"
+                )
+            else:
+                result["checks"]["overlap"] = {
+                    "pass":    True,
+                    "detail":  f"No {_OVERLAP_WINDOW_WORDS}+ word overlap with other letters",
+                    "skipped": False,
+                }
+        else:
+            result["checks"]["overlap"] = {
+                "pass":    True,
+                "detail":  "Skipped (no other_letters provided)",
+                "skipped": True,
+            }
+
+        # ---- Aggregate ----
+        # Score = 100 minus weighted penalties per failed check.
+        # ASCII and forbidden_phrases are hard fails (heavy penalty).
+        weights = {
+            "ascii":              30,
+            "forbidden_phrases":  25,
+            "structure":          15,
+            "fidelity_to_report": 15,
+            "length":             10,
+            "overlap":            5,
+        }
+        score = 100
+        for check_name, weight in weights.items():
+            check = result["checks"].get(check_name, {})
+            if not check.get("pass", True) and not check.get("skipped", False):
+                score -= weight
+        result["score"]  = max(0, score)
+        result["passed"] = all(
+            c.get("pass", True)
+            for c in result["checks"].values()
+        )
+
+        return result
+
+    except Exception as e:
+        # Any unexpected error becomes a failed check, not a crash.
+        return {
+            "passed": False,
+            "score":  0,
+            "checks": {
+                "_error": {
+                    "pass":   False,
+                    "detail": f"{type(e).__name__}: {e}",
+                },
+            },
+            "warnings": [f"Validator error: {type(e).__name__}: {e}"],
+        }
+
+
+def _is_boilerplate_ngram(ngram: tuple) -> bool:
+    """
+    Return True if an ngram is expected to repeat across letters
+    (transition line, legal citations, standard phrases). These should
+    NOT count as overlap violations.
+    """
+    joined = " ".join(ngram)
+    boilerplate_markers = (
+        "the following accounts must be deleted immediately",
+        "15 u.s.c. section 1681",
+        "15 usc 1681",
+        "fair credit reporting act",
+        "reasonable reinvestigation",
+        "maximum possible accuracy",
+        "maintain reasonable procedures",
+        "15 u.s.c. section 1692g",
+    )
+    return any(m in joined for m in boilerplate_markers)
+
+
 def build_report(pdf_path: str) -> dict[str, Any]:
     raw_text = extract_text_from_pdf(pdf_path)
     clean_text = normalize_text(raw_text)
@@ -7526,7 +7825,7 @@ def build_report(pdf_path: str) -> dict[str, Any]:
     base_tradeline_engine = build_base_tradeline_engine(raw_accounts)
     same_block_cross_bureau_summary = build_same_block_cross_bureau_summary(base_tradeline_engine)
 
-    # Personal information — extracted early, before account pipeline
+    # Personal information, extracted early, before account pipeline
     personal_info, personal_info_issues = parse_and_detect_personal_info(lines)
 
     # Credit scores
@@ -7537,13 +7836,13 @@ def build_report(pdf_path: str) -> dict[str, Any]:
 
     negatives_by_bureau = build_negative_inventory_by_bureau(inventory)
 
-    # Enrich negatives with DOFD calculations (§1681c)
+    # Enrich negatives with DOFD calculations (section 1681c)
     import re as _re
     rd_match = _re.search(r"Report Date:\s*([\d/]+)", raw_text[:2000])
     report_date_str = rd_match.group(1) if rd_match else ""
     negatives_by_bureau = build_dofd_engine(negatives_by_bureau, report_date_str)
 
-    # Inquiries — analyzed after report_date is known
+    # Inquiries, analyzed after report_date is known
     inquiries       = parse_inquiries(lines)
     inquiry_attacks = detect_inquiry_attacks(inquiries)
     inquiry_letters = build_inquiry_letters(
@@ -7597,17 +7896,17 @@ def build_report(pdf_path: str) -> dict[str, Any]:
     }
 
 _COLLECTOR_ATTACK_TYPES = {
-    # Chain of title / authority attacks — definitionally collector-only
+    # Chain of title / authority attacks, definitionally collector-only
     "collector_original_creditor_self_declared",
     "collector_original_creditor_pattern",
-    # Duplicate reporting — applies to collectors
+    # Duplicate reporting, applies to collectors
     "same_account_number_same_balance",
     "duplicate_account_number",
     "multi_furnisher_same_balance",
-    # DOFD / re-aging — applies to collectors manipulating dates
+    # DOFD / re-aging, applies to collectors manipulating dates
     "potential_re_aging",
     "dofd_unknown_verification_required",
-    # Account type attacks — only when furnisher is confirmed collector
+    # Account type attacks, only when furnisher is confirmed collector
     "paid_collection_still_derogatory",
     "child_support_derogatory",
     # Note: repossession/charge_off attacks on original creditors are NOT here
@@ -7647,7 +7946,7 @@ def _normalize_collector_name(name: str) -> str:
 def _is_collector_account(item: dict[str, Any]) -> bool:
     """
     Determine if an account should get a direct furnisher letter.
-    Criteria: attack type is collector-specific AND §1681s-2 appears in laws.
+    Criteria: attack type is collector-specific AND section 1681s-2 appears in laws.
     """
     attack = item.get("attack_type", "")
     laws   = item.get("laws", [])
@@ -7694,7 +7993,7 @@ def _collector_letter_address(furnisher_name: str) -> str:
 def _furnisher_account_demand(item: dict[str, Any]) -> str:
     """
     Specific demand paragraph for one account in the furnisher letter.
-    Different from bureau letter — this goes directly to the collector.
+    Different from bureau letter, this goes directly to the collector.
     Tone: firm, legally precise, but still written in first person.
     """
     furnisher   = item.get("furnisher_name", "")
@@ -7707,12 +8006,12 @@ def _furnisher_account_demand(item: dict[str, Any]) -> str:
 
     if attack_type == "potential_re_aging":
         return (
-            f"Account #: {acct}\n"
+            f"Account #: {mask_stars_to_x(acct)}\n"
             f"I am disputing this account because the date you are showing as when "
             f"this account started does not match when I actually first fell behind "
             f"on the original obligation, which was around {dofd}. Under the Fair "
-            f"Credit Reporting Act (15 U.S.C. \u00a71681c(c)), the seven-year "
-            f"reporting period runs from when I first missed a payment — not from "
+            f"Credit Reporting Act (15 U.S.C. section 1681c(c)), the seven-year "
+            f"reporting period runs from when I first missed a payment, not from "
             f"when your company acquired the debt. I am requesting that you provide "
             f"documentation of the original date of first delinquency from the "
             f"original creditor, and correct the reporting period accordingly. "
@@ -7723,22 +8022,22 @@ def _furnisher_account_demand(item: dict[str, Any]) -> str:
     elif attack_type == "dofd_unknown_verification_required":
         if dla_refresh:
             return (
-                f"Account #: {acct}\n"
+                f"Account #: {mask_stars_to_x(acct)}\n"
                 f"I am disputing this account. The date last active you are reporting "
                 f"matches almost exactly the date this account was last reported to "
                 f"the credit bureaus, which suggests you may be refreshing that date "
                 f"rather than accurately disclosing when I first fell behind. Under "
-                f"15 U.S.C. \u00a71681c(c), the reporting period must be calculated "
+                f"15 U.S.C. section 1681c(c), the reporting period must be calculated "
                 f"from the original date of first delinquency. I am requesting that "
                 f"you provide that date with supporting documentation. If you cannot, "
                 f"you must cease reporting this account to any credit bureau."
             )
         else:
             return (
-                f"Account #: {acct}\n"
+                f"Account #: {mask_stars_to_x(acct)}\n"
                 f"I am disputing this account. The information you are reporting does "
                 f"not clearly disclose the date I first fell behind on the original "
-                f"obligation. That date is required under 15 U.S.C. \u00a71681c(c) "
+                f"obligation. That date is required under 15 U.S.C. section 1681c(c) "
                 f"to determine whether this account is within its legal reporting "
                 f"window. I am requesting full documentation including the original "
                 f"date of first delinquency. If you cannot provide it, you must "
@@ -7750,7 +8049,7 @@ def _furnisher_account_demand(item: dict[str, Any]) -> str:
         "collector_original_creditor_pattern",
     }:
         return (
-            f"Account #: {acct}\n"
+            f"Account #: {mask_stars_to_x(acct)}\n"
             f"I am disputing your authority to report this account on my credit file. "
             f"You are reporting this as a collection account, which means you must "
             f"be able to demonstrate that you are the legal holder of this debt. "
@@ -7760,7 +8059,7 @@ def _furnisher_account_demand(item: dict[str, Any]) -> str:
             f"(3) if this debt was securitized, the Pooling and Servicing Agreement "
             f"and the schedule of assets identifying this specific account, and "
             f"(4) proof that you hold the current legal right to collect and report "
-            f"this debt under the Uniform Commercial Code and 15 U.S.C. \u00a71681s-2. "
+            f"this debt under the Uniform Commercial Code and 15 U.S.C. section 1681s-2. "
             f"If you cannot produce all of this, you do not have the legal standing "
             f"to report this account and you must request its deletion."
         )
@@ -7772,20 +8071,20 @@ def _furnisher_account_demand(item: dict[str, Any]) -> str:
     }:
         bal_note = f" with a balance of {balance}" if balance and balance not in {"$0.00","0"} else ""
         return (
-            f"Account #: {acct}\n"
+            f"Account #: {mask_stars_to_x(acct)}\n"
             f"This account{bal_note} is appearing under more than one company name "
             f"on my credit report. Only one entity can legally hold and report a "
             f"single debt at any given time. If another company has also reported "
             f"this account, one of those reports is unauthorized. I am requesting "
             f"that you provide proof that you are the current legal holder of this "
-            f"specific obligation — including the full chain of assignment from the "
-            f"original creditor to your company — and that you correct or retract "
+            f"specific obligation, including the full chain of assignment from the "
+            f"original creditor to your company, and that you correct or retract "
             f"any reporting that cannot be substantiated."
         )
 
     else:
         return (
-            f"Account #: {acct}\n"
+            f"Account #: {mask_stars_to_x(acct)}\n"
             f"I am disputing the accuracy and completeness of this account as you "
             f"are reporting it. I am requesting complete documentation including "
             f"the original agreement, full payment history, itemized balance, "
@@ -7800,7 +8099,7 @@ def build_furnisher_letter_engine(
     report_date: str = "",
 ) -> dict[str, dict[str, str]]:
     """
-    Generate direct-to-collector letters (FDCPA §1692g + FCRA §1681s-2).
+    Generate direct-to-collector letters (FDCPA section 1692g + FCRA section 1681s-2).
 
     Structure returned:
         {
@@ -7812,23 +8111,23 @@ def build_furnisher_letter_engine(
 
     Rules:
     - One letter per unique collector (deduplicated across bureaus).
-    - Every collector letter is sent in Round 1 — parallel to bureau letters.
+    - Every collector letter is sent in Round 1, parallel to bureau letters.
       The bureau's round classification does NOT delay the furnisher letter.
     - Round 2 furnisher letter is generated for collectors whose accounts
       survived Round 1 (used when uploading next report cycle).
     - Covers all accounts from that collector across all bureaus in one letter.
-    - Dual legal basis: FDCPA §1692g (cease until validated) +
-                        FCRA §1681s-2(a) (accuracy duty) +
-                        FCRA §1681s-2(b) (investigation duty after bureau notice)
+    - Dual legal basis: FDCPA section 1692g (cease until validated) +
+                        FCRA section 1681s-2(a) (accuracy duty) +
+                        FCRA section 1681s-2(b) (investigation duty after bureau notice)
     """
     formatted_date = _format_date_long(report_date)
 
-    # ── Collect all collector accounts, deduplicated by furnisher name ──────
+    # -- Collect all collector accounts, deduplicated by furnisher name ------
     # Key: normalized furnisher name
     # Value: list of unique accounts across all bureaus
     collector_accounts: dict[str, list[dict[str, Any]]] = {}
 
-    seen_accts: dict[str, set[str]] = {}  # furnisher → set of account numbers seen
+    seen_accts: dict[str, set[str]] = {}  # furnisher -> set of account numbers seen
 
     for bureau, groups in letter_input_engine.items():
         for items in groups.values():
@@ -7871,8 +8170,8 @@ def build_furnisher_letter_engine(
                 f"\n"
                 f"{formatted_date}\n"
                 f"\n"
-                f"RE: Debt Validation Request and Formal Dispute — "
-                f"15 U.S.C. \u00a71692g / 15 U.S.C. \u00a71681s-2"
+                f"RE: Debt Validation Request and Formal Dispute, "
+                f"15 U.S.C. section 1692g / 15 U.S.C. section 1681s-2"
             )
 
             # Opening
@@ -7881,12 +8180,12 @@ def build_furnisher_letter_engine(
                     f"To Whom It May Concern,\n\n"
                     f"I am writing to formally dispute the account(s) listed below "
                     f"and to request validation of the alleged debt(s) pursuant to "
-                    f"the Fair Debt Collection Practices Act, 15 U.S.C. \u00a71692g(b). "
+                    f"the Fair Debt Collection Practices Act, 15 U.S.C. section 1692g(b). "
                     f"I also dispute the accuracy and completeness of the information "
                     f"you are reporting to the credit bureaus under the Fair Credit "
-                    f"Reporting Act, 15 U.S.C. \u00a71681s-2.\n\n"
+                    f"Reporting Act, 15 U.S.C. section 1681s-2.\n\n"
                     f"Until you provide complete validation of each account listed "
-                    f"below, you are required under 15 U.S.C. \u00a71692g(b) to cease "
+                    f"below, you are required under 15 U.S.C. section 1692g(b) to cease "
                     f"all collection activity, including reporting or updating this "
                     f"account at any credit reporting agency. Continued reporting "
                     f"without validating constitutes a violation of both the FDCPA "
@@ -7900,16 +8199,16 @@ def build_furnisher_letter_engine(
                     f"request regarding the account(s) below. I have not received "
                     f"a complete and adequate response, and these accounts remain "
                     f"on my credit report without proper validation.\n\n"
-                    f"Under 15 U.S.C. \u00a71692g(b), you were required to cease "
-                    f"all collection activity — including credit bureau reporting — "
+                    f"Under 15 U.S.C. section 1692g(b), you were required to cease "
+                    f"all collection activity, including credit bureau reporting, "
                     f"until you provided full validation. If you have continued "
                     f"reporting or have reported updates without completing this "
                     f"validation, you are in violation of the FDCPA. You are also "
-                    f"in violation of 15 U.S.C. \u00a71681s-2(b), which requires "
+                    f"in violation of 15 U.S.C. section 1681s-2(b), which requires "
                     f"you to investigate a consumer dispute thoroughly and correct "
                     f"or delete information you cannot verify. Continued willful "
                     f"noncompliance may expose your company to liability under "
-                    f"15 U.S.C. \u00a71681n, including statutory damages of $100 "
+                    f"15 U.S.C. section 1681n, including statutory damages of $100 "
                     f"to $1,000 per violation plus punitive damages and attorney fees."
                 )
 
@@ -7921,7 +8220,7 @@ def build_furnisher_letter_engine(
                 demand_list = (
                     f"1. The original signed agreement or contract between me and the "
                     f"original creditor establishing the obligation.\n\n"
-                    f"2. The complete chain of assignment — every sale, transfer, or "
+                    f"2. The complete chain of assignment, every sale, transfer, or "
                     f"assignment document from the original creditor to your company, "
                     f"dated and signed.\n\n"
                     f"3. Proof that your company is the current legal holder of this "
@@ -7932,10 +8231,10 @@ def build_furnisher_letter_engine(
                     f"account.\n\n"
                     f"5. A complete itemization of the debt: original principal, all "
                     f"interest, all fees and charges, and all payments made, per "
-                    f"12 CFR \u00a71006.34(c)(2).\n\n"
+                    f"12 CFR section 1006.34(c)(2).\n\n"
                     f"6. The exact Date of First Delinquency (the date I first missed "
                     f"a payment to the original creditor), which controls the FCRA "
-                    f"7-year reporting period under 15 U.S.C. \u00a71681c(c).\n\n"
+                    f"7-year reporting period under 15 U.S.C. section 1681c(c).\n\n"
                     f"7. All prior communications sent to me regarding this account."
                 )
             else:
@@ -7948,7 +8247,7 @@ def build_furnisher_letter_engine(
                     f"2. Complete chain of assignment to your company.\n\n"
                     f"3. Proof of legal right to collect and report (UCC Art. 3 & 9).\n\n"
                     f"4. PSA and asset schedule if securitized.\n\n"
-                    f"5. Full debt itemization per 12 CFR \u00a71006.34(c)(2).\n\n"
+                    f"5. Full debt itemization per 12 CFR section 1006.34(c)(2).\n\n"
                     f"6. Original Date of First Delinquency with documentation.\n\n"
                     f"7. All prior communications regarding this account."
                 )
@@ -7967,10 +8266,10 @@ def build_furnisher_letter_engine(
                 f"Any attempt to continue collection activity, report, update, or "
                 f"\"verify\" this account to any credit bureau without first "
                 f"providing complete validation constitutes a violation of:\n\n"
-                f"\u2022 15 U.S.C. \u00a71692g(b) — Continuing collection without validating.\n"
-                f"\u2022 15 U.S.C. \u00a71681s-2(b) — Reporting without proper investigation.\n"
-                f"\u2022 15 U.S.C. \u00a71692e — False representation of authority or ownership.\n"
-                f"\u2022 UCC Articles 3 and 9 — Collection without legal right.\n\n"
+                f"* 15 U.S.C. section 1692g(b), Continuing collection without validating.\n"
+                f"* 15 U.S.C. section 1681s-2(b), Reporting without proper investigation.\n"
+                f"* 15 U.S.C. section 1692e, False representation of authority or ownership.\n"
+                f"* UCC Articles 3 and 9, Collection without legal right.\n\n"
                 f"I am retaining copies of all correspondence. You have 30 days "
                 f"from receipt of this letter to provide complete validation. "
                 f"Failure to do so will be treated as an inability to validate "
@@ -8048,6 +8347,107 @@ def _split_three_bureau_names(words: list[str]) -> list[str]:
     return names
 
 
+def _parse_address_block(block_lines: list[str]) -> list[str]:
+    """
+    Parse a block of address lines from a 3-bureau IdentityIQ report
+    and split into 3 per-bureau address strings.
+
+    IdentityIQ renders addresses with repetition-per-bureau structure:
+      "7941 BRIGHTON WAY"    <- street, bureau 1 (TU)
+      "7941 BRIGHTON WAY"    <- street, bureau 2 (EXP)
+      "7941 BRIGHTON WAY"    <- street, bureau 3 (EQ)
+      "MANASSAS, VA"         <- city+state, bureau 1
+      "MANASSAS, VA"         <- city+state, bureau 2
+      "MANASSAS, VA"         <- city+state, bureau 3
+      "20109-3144"           <- ZIP, bureau 1
+      "20109-3144"           <- ZIP, bureau 2
+      "20109-3815"           <- ZIP, bureau 3  (different!)
+      "08/2025"              <- optional date (last reported) for some bureau
+
+    Strategy: detect line type by pattern (street / city-state / zip / date),
+    then group lines into columns using round-robin on each type class.
+
+    Returns a list of 3 address strings in bureau order [TU, EXP, EQ].
+    If parsing fails or data is sparse, falls back gracefully with blanks.
+    """
+    import re as _re
+
+    if not block_lines:
+        return ["", "", ""]
+
+    # Classify each line
+    ZIP_RE     = _re.compile(r"^\d{5}(-\d{4})?$")
+    CITY_ST_RE = _re.compile(r"^[A-Z][A-Za-z.\- ]+,\s*[A-Z]{2}$")
+    DATE_RE    = _re.compile(r"^\d{1,2}/\d{4}$")
+    # Street: starts with a number and contains at least one letter
+    STREET_RE  = _re.compile(r"^\d+\s+[A-Za-z]")
+
+    streets:     list[str] = []
+    city_states: list[str] = []
+    zips:        list[str] = []
+    dates:       list[str] = []
+    other:       list[str] = []
+
+    for raw in block_lines:
+        line = raw.strip()
+        if not line:
+            continue
+        # Skip column headers if they leaked in
+        if line.lower() in {"transunion", "experian", "equifax",
+                            "transunion experian equifax"}:
+            continue
+        if ZIP_RE.match(line):
+            zips.append(line)
+        elif CITY_ST_RE.match(line):
+            city_states.append(line)
+        elif DATE_RE.match(line):
+            dates.append(line)
+        elif STREET_RE.match(line):
+            streets.append(line)
+        else:
+            # Could be partial street, apt number, or unit info
+            # If starts with number or contains typical street words, treat as street
+            low = line.lower()
+            street_hint = any(k in low for k in [
+                " st", " ave", " rd", " blvd", " dr", " ln", " way", " ct",
+                " pkwy", " ter", " cir", " hwy", " place", " trail",
+                "apt ", "unit ", "ste ", "#",
+            ])
+            if street_hint or line[0:1].isdigit():
+                streets.append(line)
+            else:
+                other.append(line)
+
+    # Build 3 addresses: each bureau gets street[i], city_state[i], zip[i]
+    # Normalize to exactly 3 of each (or pad/truncate).
+    def _pad3(lst: list[str]) -> list[str]:
+        if len(lst) >= 3:
+            return lst[:3]
+        # pad with first value repeated (a common case: same street across bureaus)
+        if len(lst) == 1:
+            return [lst[0], lst[0], lst[0]]
+        if len(lst) == 2:
+            return [lst[0], lst[1], lst[1]]
+        return ["", "", ""]
+
+    streets3     = _pad3(streets)
+    city_states3 = _pad3(city_states)
+    zips3        = _pad3(zips)
+
+    addresses = []
+    for i in range(3):
+        parts = []
+        if streets3[i]:
+            parts.append(streets3[i])
+        if city_states3[i]:
+            parts.append(city_states3[i])
+        if zips3[i]:
+            parts.append(zips3[i])
+        addresses.append(", ".join(parts) if parts else "")
+
+    return addresses
+
+
 def parse_personal_information(lines: list[str]) -> dict[str, Any]:
     """Extract personal information block from PDF lines per bureau."""
     import re as _re
@@ -8057,6 +8457,10 @@ def parse_personal_information(lines: list[str]) -> dict[str, Any]:
         "dob_by_bureau": {},
         "aka_by_bureau": {},
         "former_name_by_bureau": {},
+        # New: addresses separated per bureau (TU/EXP/EQ)
+        "current_addresses_by_bureau": {b: [] for b in BUREAUS},
+        "previous_addresses_by_bureau": {b: [] for b in BUREAUS},
+        # Legacy fields (kept for backward compatibility with other code paths)
         "current_addresses": [],
         "previous_addresses": [],
         "raw_block": [],
@@ -8082,7 +8486,7 @@ def parse_personal_information(lines: list[str]) -> dict[str, Any]:
         pi_lines.append(line)
         result["raw_block"].append(line)
 
-    # Name: TU EXP EQ — line contains 3 names concatenated: "JEREMY A STEIN JEREMY STEIN JEREMY A STEIN"
+    # Name: TU EXP EQ, line contains 3 names concatenated: "JEREMY A STEIN JEREMY STEIN JEREMY A STEIN"
     for line in pi_lines:
         if line.lower().startswith("name:"):
             names_raw = line.split(":", 1)[1].strip()
@@ -8095,7 +8499,7 @@ def parse_personal_information(lines: list[str]) -> dict[str, Any]:
             for idx, bureau in enumerate(BUREAUS):
                 result["name_by_bureau"][bureau] = names3[idx] if idx < len(names3) else ""
 
-    # Date of Birth: "9/14/1992 1992 9/14/1992" — one token per bureau
+    # Date of Birth: "9/14/1992 1992 9/14/1992", one token per bureau
     for line in pi_lines:
         if line.lower().startswith("date of birth:"):
             dob_raw = line.split(":", 1)[1].strip()
@@ -8103,7 +8507,7 @@ def parse_personal_information(lines: list[str]) -> dict[str, Any]:
             for idx, bureau in enumerate(BUREAUS):
                 result["dob_by_bureau"][bureau] = tokens[idx] if idx < len(tokens) else ""
 
-    # Also Known As: "- JEREMY AARON -" — dash=no AKA, multi-word name=AKA
+    # Also Known As: "- JEREMY AARON -", dash=no AKA, multi-word name=AKA
     for line in pi_lines:
         if line.lower().startswith("also known as:"):
             raw    = line.split(":", 1)[1].strip()
@@ -8138,33 +8542,59 @@ def parse_personal_information(lines: list[str]) -> dict[str, Any]:
                 for bureau in BUREAUS:
                     result["former_name_by_bureau"][bureau] = full
 
-    # Current / Previous addresses (raw collection)
+    # Current / Previous addresses
+    # Collect lines into buckets, then split each bucket into 3 per-bureau
+    # addresses using _parse_address_block.
     state = None
-    buf: list[str] = []
+    current_buf:  list[str] = []
+    previous_buf: list[str] = []
+
     for line in pi_lines:
         lo = line.lower()
         if lo.startswith("current address"):
             state = "current"
             rest = line.split(":", 1)[1].strip() if ":" in line else ""
             if rest:
-                buf.append(rest)
+                current_buf.append(rest)
         elif lo.startswith("previous address"):
-            if buf:
-                result["current_addresses"].append(" ".join(buf))
-            buf   = []
             state = "previous"
+            rest = line.split(":", 1)[1].strip() if ":" in line else ""
+            if rest:
+                previous_buf.append(rest)
         elif lo.startswith("employer"):
-            if buf and state == "previous":
-                result["previous_addresses"].append(" ".join(buf))
-            buf   = []
             state = None
-        elif state and "http" not in line and len(line) > 3 and not line[:3].isdigit():
-            buf.append(line)
-    if buf:
-        if state == "previous":
-            result["previous_addresses"].append(" ".join(buf))
-        elif state == "current":
-            result["current_addresses"].append(" ".join(buf))
+        elif state and "http" not in line and len(line) > 1:
+            # Accept lines starting with digits (streets, zips) which the
+            # old filter incorrectly excluded.
+            if state == "current":
+                current_buf.append(line)
+            elif state == "previous":
+                previous_buf.append(line)
+
+    # Split each buffer into 3 per-bureau addresses
+    current3  = _parse_address_block(current_buf)
+    previous3 = _parse_address_block(previous_buf)
+
+    for idx, bureau in enumerate(BUREAUS):
+        if idx < len(current3) and current3[idx]:
+            result["current_addresses_by_bureau"][bureau].append(current3[idx])
+        if idx < len(previous3) and previous3[idx]:
+            result["previous_addresses_by_bureau"][bureau].append(previous3[idx])
+
+    # Legacy fields: unique addresses across all bureaus (deduplicated)
+    seen_current: set[str] = set()
+    for addr_list in result["current_addresses_by_bureau"].values():
+        for addr in addr_list:
+            if addr and addr not in seen_current:
+                seen_current.add(addr)
+                result["current_addresses"].append(addr)
+
+    seen_previous: set[str] = set()
+    for addr_list in result["previous_addresses_by_bureau"].values():
+        for addr in addr_list:
+            if addr and addr not in seen_previous:
+                seen_previous.add(addr)
+                result["previous_addresses"].append(addr)
 
     return result
 
@@ -8184,7 +8614,7 @@ def detect_personal_info_issues(personal_info: dict[str, Any]) -> list[dict[str,
             "description": (
                 "Date of birth is reported differently across bureaus: "
                 + ", ".join(f"{b}={v}" for b, v in dob.items() if v)
-                + ". Under 15 U.S.C. \u00a71681e(b), each bureau must maintain "
+                + ". Under 15 U.S.C. section 1681e(b), each bureau must maintain "
                 "maximum possible accuracy of all identifying information."
             ),
         })
@@ -8200,7 +8630,7 @@ def detect_personal_info_issues(personal_info: dict[str, Any]) -> list[dict[str,
             "description": (
                 f"A former name of '{former_vals[0]}' appears on this credit file. "
                 "If this name does not belong to the consumer, it may indicate a mixed "
-                "file — another person's information has been merged into this file. "
+                "file, another person's information has been merged into this file. "
                 "This affects the accuracy of every account under this file."
             ),
         })
@@ -8216,7 +8646,7 @@ def detect_personal_info_issues(personal_info: dict[str, Any]) -> list[dict[str,
             "description": (
                 f"The file shows 'Also Known As' name(s): {', '.join(aka_vals)}. "
                 "If the consumer does not recognize these names, they should not be "
-                "associated with this file and must be removed under \u00a71681e(b)."
+                "associated with this file and must be removed under section 1681e(b)."
             ),
         })
 
@@ -8232,6 +8662,100 @@ def detect_personal_info_issues(personal_info: dict[str, Any]) -> list[dict[str,
                 "The consumer's name appears differently across bureaus: "
                 + ", ".join(f"{b}='{v}'" for b, v in names.items() if v)
                 + "."
+            ),
+        })
+
+    # Current address inconsistency between bureaus
+    # Flags cases where the same "current address" is reported with different
+    # street, city, state, or ZIP across bureaus. This is a 1681e(b) violation.
+    curr_by_bureau = personal_info.get("current_addresses_by_bureau", {})
+    # Build per-bureau canonical string (first current address, uppercased)
+    curr_canonical: dict[str, str] = {}
+    for b, addrs in curr_by_bureau.items():
+        if addrs:
+            curr_canonical[b] = addrs[0].upper().strip()
+    curr_unique = {v for v in curr_canonical.values() if v}
+    if len(curr_unique) > 1:
+        # Try to pinpoint whether the difference is just ZIP or more
+        import re as _re_addr
+        zips_by_bureau: dict[str, str] = {}
+        city_state_by_bureau: dict[str, str] = {}
+        for b, addr in curr_canonical.items():
+            z_match = _re_addr.search(r"\b(\d{5}(?:-\d{4})?)\b", addr)
+            zips_by_bureau[b] = z_match.group(1) if z_match else ""
+            # Strict city+state match: prefer the last occurrence of
+            # "CITYNAME, ST" where ST is a 2-letter state abbreviation and
+            # the text before the comma does not contain a preceding comma
+            # (so we skip false matches inside "123 ST, CITY, ST" patterns).
+            cs_matches = _re_addr.findall(
+                r"(?:^|,\s*)([A-Z][A-Z .\-]{1,}?),\s*([A-Z]{2})(?=$|[,\s])",
+                addr,
+            )
+            if cs_matches:
+                city, state = cs_matches[-1]
+                city_state_by_bureau[b] = f"{city.strip()}, {state}"
+            else:
+                city_state_by_bureau[b] = ""
+
+        unique_zips = {z for z in zips_by_bureau.values() if z}
+        unique_cs   = {cs for cs in city_state_by_bureau.values() if cs}
+
+        if len(unique_zips) > 1 and len(unique_cs) <= 1:
+            subtype = "zip_only"
+            desc_detail = (
+                "The ZIP code reported for the current address differs across bureaus: "
+                + ", ".join(f"{b}={z}" for b, z in zips_by_bureau.items() if z)
+                + "."
+            )
+        elif len(unique_cs) > 1:
+            subtype = "city_state"
+            desc_detail = (
+                "The city or state on the current address differs across bureaus: "
+                + ", ".join(f"{b}='{cs}'" for b, cs in city_state_by_bureau.items() if cs)
+                + "."
+            )
+        else:
+            subtype = "full"
+            desc_detail = (
+                "The current address is reported differently across bureaus: "
+                + "; ".join(f"{b}='{a}'" for b, a in curr_canonical.items() if a)
+                + "."
+            )
+
+        issues.append({
+            "type": "current_address_inconsistency",
+            "subtype": subtype,
+            "severity": "medium" if subtype == "zip_only" else "high",
+            "bureaus": curr_canonical,
+            "zips": zips_by_bureau,
+            "city_states": city_state_by_bureau,
+            "description": (
+                desc_detail
+                + " Under 15 U.S.C. section 1681e(b), each bureau must maintain "
+                "maximum possible accuracy of all identifying information, "
+                "which includes the consumer's current mailing address."
+            ),
+        })
+
+    # Multiple previous addresses: if 2+ distinct previous addresses appear,
+    # flag for operator review (could be legitimate history or mixed file).
+    prev_by_bureau = personal_info.get("previous_addresses_by_bureau", {})
+    all_previous: set[str] = set()
+    for addrs in prev_by_bureau.values():
+        for a in addrs:
+            if a:
+                all_previous.add(a.upper().strip())
+    if len(all_previous) >= 2:
+        issues.append({
+            "type": "multiple_previous_addresses",
+            "severity": "medium",
+            "addresses": sorted(all_previous),
+            "description": (
+                f"The file shows {len(all_previous)} distinct previous addresses: "
+                + "; ".join(f"'{a}'" for a in sorted(all_previous))
+                + ". If the consumer does not recognize any of these, it may "
+                "indicate a mixed file (another person's information merged into "
+                "this file) and should be removed under 15 U.S.C. section 1681e(b)."
             ),
         })
 
@@ -8267,6 +8791,17 @@ def build_personal_info_section(
             all_name_vals = list(issue.get("bureaus", {}).values())
             if len(set(all_name_vals)) > 1:
                 relevant.append(issue)
+        elif itype == "current_address_inconsistency":
+            # Only include for bureaus whose address actually differs from
+            # the majority
+            bureau_addr = issue.get("bureaus", {}).get(bureau, "")
+            all_addrs   = list(issue.get("bureaus", {}).values())
+            if bureau_addr and len(set(all_addrs)) > 1:
+                relevant.append(issue)
+        elif itype == "multiple_previous_addresses":
+            # Include on every bureau since the duplicate history appears
+            # on the overall file (pulled from all bureaus).
+            relevant.append(issue)
 
     if not relevant:
         return ""
@@ -8274,8 +8809,8 @@ def build_personal_info_section(
     parts = [
         f"Before addressing the specific accounts below, I also want to dispute "
         f"inaccurate personal information in my file at {bureau_display}. "
-        f"Under 15 U.S.C. \u00a71681e(b), you are required to maintain maximum "
-        f"possible accuracy of all information — including name, date of birth, "
+        f"Under 15 U.S.C. section 1681e(b), you are required to maintain maximum "
+        f"possible accuracy of all information, including name, date of birth, "
         f"and address. Inaccurate identifying information in a file undermines "
         f"the reliability of every account reported under that file."
     ]
@@ -8294,7 +8829,7 @@ def build_personal_info_section(
             if bureau_dob and "/" not in bureau_dob and other_complete:
                 # This bureau has the incomplete/wrong DOB
                 parts.append(
-                    f"My date of birth appears as '{bureau_dob}' in your file — "
+                    f"My date of birth appears as '{bureau_dob}' in your file, "
                     f"just the year, without the full date. Other bureaus correctly "
                     f"show my complete date of birth. I am requesting that you "
                     f"update my date of birth to the accurate full date."
@@ -8309,7 +8844,7 @@ def build_personal_info_section(
                 f"My file includes a former name of '{name_val}'. "
                 f"I do not recognize this name. If it belongs to another person, "
                 f"its presence suggests information from another consumer's file "
-                f"has been mixed into mine — which would call into question the "
+                f"has been mixed into mine, which would call into question the "
                 f"accuracy of every account listed here. I am requesting that this "
                 f"name be verified and, if it does not belong to me, removed immediately."
             )
@@ -8329,18 +8864,78 @@ def build_personal_info_section(
                     f"I am requesting that my correct legal name be reflected accurately."
                 )
 
+        elif itype == "current_address_inconsistency":
+            subtype = issue.get("subtype", "full")
+            this_bureau_zip = issue.get("zips", {}).get(bureau, "")
+            this_bureau_cs  = issue.get("city_states", {}).get(bureau, "")
+            all_zips = issue.get("zips", {})
+            all_cs   = issue.get("city_states", {})
+
+            if subtype == "zip_only":
+                # Find what the OTHER bureaus have, so the letter explains
+                # "your ZIP is X but other bureaus have Y".
+                other_zips = {
+                    z for b, z in all_zips.items()
+                    if b != bureau and z and z != this_bureau_zip
+                }
+                if other_zips and this_bureau_zip:
+                    other_zip_str = " / ".join(sorted(other_zips))
+                    parts.append(
+                        f"The ZIP code on my current mailing address is reported as "
+                        f"'{this_bureau_zip}' at {bureau_display}, but is reported "
+                        f"as '{other_zip_str}' at the other bureaus. This type of "
+                        f"inconsistency on identifying information requires correction "
+                        f"so that my file reflects a single accurate mailing address."
+                    )
+            elif subtype == "city_state":
+                other_cs = {
+                    cs for b, cs in all_cs.items()
+                    if b != bureau and cs and cs != this_bureau_cs
+                }
+                if other_cs and this_bureau_cs:
+                    other_cs_str = " / ".join(sorted(other_cs))
+                    parts.append(
+                        f"The city and state on my current address is being reported "
+                        f"as '{this_bureau_cs}' at {bureau_display}, but the other "
+                        f"bureaus show '{other_cs_str}'. Only one of these can be the "
+                        f"correct current residence. I am requesting that you verify "
+                        f"and correct the address on file."
+                    )
+            else:
+                # Full inconsistency
+                parts.append(
+                    f"The current address on my file at {bureau_display} does not "
+                    f"match the addresses reported by the other two bureaus. I am "
+                    f"requesting that you confirm what address is actually on file "
+                    f"with you and correct any inaccuracies, since conflicting "
+                    f"address records across the three bureaus indicate that my "
+                    f"identifying information is not being maintained with maximum "
+                    f"possible accuracy."
+                )
+
+        elif itype == "multiple_previous_addresses":
+            addrs = issue.get("addresses", [])
+            count = len(addrs)
+            parts.append(
+                f"My file shows {count} distinct previous addresses. If any of "
+                f"these do not belong to me, their presence suggests another "
+                f"consumer's information has been mixed into my file. I am "
+                f"requesting that each previous address be verified as belonging "
+                f"to me, and that any address I do not recognize be removed."
+            )
+
     parts.append(
         f"I am requesting that {bureau_display} correct all identifying "
         f"information discrepancies above and provide me with confirmation "
         f"that my file reflects accurate personal information, per "
-        f"15 U.S.C. \u00a71681g(a) and \u00a71681i(a)."
+        f"15 U.S.C. section 1681g(a) and section 1681i(a)."
     )
 
     return "\n\n".join(parts)
 
 
 def parse_and_detect_personal_info(lines: list[str]) -> tuple:
-    """Convenience wrapper — parse then detect."""
+    """Convenience wrapper, parse then detect."""
     personal_info = parse_personal_information(lines)
     issues        = detect_personal_info_issues(personal_info)
     return personal_info, issues
@@ -8354,7 +8949,7 @@ def parse_and_detect_personal_info(lines: list[str]) -> tuple:
 # =========================
 #
 # When a bureau responds "verified", the consumer has the right under
-# §1681i(a)(6)(B)(iii) to demand:
+# section 1681i(a)(6)(B)(iii) to demand:
 #   - The exact PROCEDURE used to reinvestigate
 #   - The NAME, ADDRESS, and PHONE of every furnisher contacted
 #   - The DOCUMENTATION reviewed
@@ -8363,38 +8958,38 @@ def parse_and_detect_personal_info(lines: list[str]) -> tuple:
 # meet the "reasonable reinvestigation" standard. This letter forces the
 # bureau to either prove they did a real investigation or delete the item.
 #
-# This engine is called ON DEMAND — not during the initial pipeline.
+# This engine is called ON DEMAND, not during the initial pipeline.
 # API: POST /verified-response  {bureau, page_id, response_date, accounts[]}
 
 _VERIFIED_RESPONSE_OPENINGS = [
     (
-        "To Whom It May Concern,\n\n"
+        "Hi,\n\n"
         "I am writing in response to your reinvestigation results dated "
         "{response_date}, in which you indicated that the account(s) listed "
         "below were verified. I am not satisfied with this result because I "
         "do not believe a genuine reinvestigation took place. I am now "
-        "exercising my right under 15 U.S.C. \u00a71681i(a)(6)(B)(iii) to "
+        "exercising my right under 15 U.S.C. section 1681i(a)(6)(B)(iii) to "
         "request a full description of the procedure you used to verify each "
         "item, including who you contacted and what documentation you reviewed."
     ),
     (
-        "To Whom It May Concern,\n\n"
+        "Hi,\n\n"
         "I received your response stating that the accounts below were verified "
         "following my dispute. I am writing back because a response that simply "
         "states an account was verified does not satisfy the law. Under "
-        "15 U.S.C. \u00a71681i(a)(6)(B)(iii), I have the right to know exactly "
-        "how you conducted this investigation \u2014 the specific procedure used, "
+        "15 U.S.C. section 1681i(a)(6)(B)(iii), I have the right to know exactly "
+        "how you conducted this investigation , the specific procedure used, "
         "every company you contacted, and the documentation you relied on to "
         "conclude the information is accurate. I am requesting all of that now."
     ),
     (
-        "To Whom It May Concern,\n\n"
+        "Hi,\n\n"
         "Thank you for your reinvestigation response. However, I am disputing "
         "your conclusion that the accounts below were verified. A verification "
         "under the Fair Credit Reporting Act requires more than confirming with "
-        "the reporting company that their own data is correct \u2014 it requires "
+        "the reporting company that their own data is correct , it requires "
         "a reasonable reinvestigation with actual documentation. Under "
-        "15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am requesting a written "
+        "15 U.S.C. section 1681i(a)(6)(B)(iii), I am requesting a written "
         "description of your reinvestigation procedure for each account listed."
     ),
 ]
@@ -8429,7 +9024,7 @@ def _what_needed_to_verify(attack_type: str, furnisher: str) -> str:
         return (
             "the original Date of First Delinquency with documentation from "
             "the original creditor, confirming the correct start of the "
-            "7-year reporting period under 15 U.S.C. \u00a71681c(c)"
+            "7-year reporting period under 15 U.S.C. section 1681c(c)"
         )
     elif attack_type in {
         "cross_bureau_balance_conflict",
@@ -8438,7 +9033,7 @@ def _what_needed_to_verify(attack_type: str, furnisher: str) -> str:
     }:
         return (
             "the accurate balance, payment status, and account status with "
-            "primary documentation \u2014 not simply a confirmation from the "
+            "primary documentation , not simply a confirmation from the "
             "reporting company that their own records are correct"
         )
     elif attack_type == "obsolete_account_7yr_limit":
@@ -8448,8 +9043,8 @@ def _what_needed_to_verify(attack_type: str, furnisher: str) -> str:
         )
     else:
         return (
-            "the complete accuracy of every field reported \u2014 balance, payment "
-            "history, account status, and date of first delinquency \u2014 with "
+            "the complete accuracy of every field reported , balance, payment "
+            "history, account status, and date of first delinquency , with "
             "primary source documentation from the original creditor"
         )
 
@@ -8463,7 +9058,7 @@ def build_verified_response_letter(
 ) -> str:
     """
     Generate a post-verified-response letter demanding ACDV procedure
-    description and documentation under §1681i(a)(6)(B)(iii).
+    description and documentation under section 1681i(a)(6)(B)(iii).
 
     Parameters:
         bureau:        "transunion" | "experian" | "equifax"
@@ -8478,7 +9073,7 @@ def build_verified_response_letter(
     letter_date    = _format_date_long(report_date or response_date)
     resp_label     = response_date if response_date else "your recent reinvestigation response"
 
-    # Opening template — one per bureau, guaranteed unique
+    # Opening template, one per bureau, guaranteed unique
     tpl_idx = _VERIFIED_BUREAU_INDEX.get(bureau, 0) % len(_VERIFIED_RESPONSE_OPENINGS)
     opening = _VERIFIED_RESPONSE_OPENINGS[tpl_idx].format(response_date=resp_label)
 
@@ -8502,9 +9097,9 @@ def build_verified_response_letter(
         needed_docs = _what_needed_to_verify(attack_type, furnisher)
 
         section = (
-            f"{i}. the creditor \u2014 Account #: {acct}\n"
+            f"{i}. the creditor, Account #: {mask_stars_to_x(acct)}\n"
             f"You indicated this account was verified. Under "
-            f"15 U.S.C. \u00a71681i(a)(6)(B)(iii), I am requesting:\n\n"
+            f"15 U.S.C. section 1681i(a)(6)(B)(iii), I am requesting:\n\n"
             f"(a) A complete description of the reinvestigation procedure you "
             f"used for this account, including whether it was conducted via an "
             f"automated system or through direct contact and document review.\n\n"
@@ -8516,7 +9111,7 @@ def build_verified_response_letter(
             f"If your reinvestigation consisted only of sending an automated "
             f"inquiry to the creditor and accepting their response without "
             f"independently reviewing documentation, that does not constitute "
-            f"a reasonable reinvestigation under 15 U.S.C. \u00a71681i(a) and "
+            f"a reasonable reinvestigation under 15 U.S.C. section 1681i(a) and "
             f"this account remains unverifiable and must be deleted."
         )
         account_sections.append(section)
@@ -8525,18 +9120,18 @@ def build_verified_response_letter(
 
     legal_warning = (
         "I want to be direct: if the verification of any of these accounts was "
-        "based solely on an automated response from the reporting company \u2014 "
-        "without independent review of primary documentation \u2014 that does not "
+        "based solely on an automated response from the reporting company , "
+        "without independent review of primary documentation , that does not "
         "meet the reasonable reinvestigation standard. Courts have consistently "
         "held that simply accepting a furnisher's own confirmation is insufficient.\n\n"
         "Continuing to report information that has not been genuinely verified "
         "after a properly submitted dispute may constitute willful noncompliance "
-        "under 15 U.S.C. \u00a71681n, which provides for statutory damages of "
+        "under 15 U.S.C. section 1681n, which provides for statutory damages of "
         "$100 to $1,000 per violation, punitive damages, and attorney fees. "
         "I am retaining copies of all correspondence.\n\n"
         "Please provide the procedure description within 15 days. If any account "
         "cannot be verified with actual documentation, I am requesting its deletion "
-        "and written confirmation per 15 U.S.C. \u00a71681i(a)(5) and \u00a71681i(a)(6)."
+        "and written confirmation per 15 U.S.C. section 1681i(a)(5) and section 1681i(a)(6)."
     )
 
     closing = f"Thank you,\n\n{consumer_name}"
@@ -8586,13 +9181,13 @@ def build_verified_response_letters(
 #
 # Complete catalog of bureau responses and their attacks:
 #
-#   VERIFIED / MEETS REQUIREMENTS  — §1681i(a)(6)(B)(iii) procedure demand (already built)
-#   UPDATED                        — What changed? Why not deleted? Is it enough?
-#   DELETED                        — Victory, but monitor for reinsertion
-#   FRIVOLOUS / IRRELEVANT         — §1681i(a)(3): must give reason + info needed
-#   UNABLE TO PROCESS              — Resubmit with better identification
-#   NO RESPONSE IN 30 DAYS         — §1681i(a)(1): mandatory deletion demand
-#   REINSERTION                    — §1681i(a)(5)(B): willful violation if no notice
+#   VERIFIED / MEETS REQUIREMENTS , section 1681i(a)(6)(B)(iii) procedure demand (already built)
+#   UPDATED                       , What changed? Why not deleted? Is it enough?
+#   DELETED                       , Victory, but monitor for reinsertion
+#   FRIVOLOUS / IRRELEVANT        , section 1681i(a)(3): must give reason + info needed
+#   UNABLE TO PROCESS             , Resubmit with better identification
+#   NO RESPONSE IN 30 DAYS        , section 1681i(a)(1): mandatory deletion demand
+#   REINSERTION                   , section 1681i(a)(5)(B): willful violation if no notice
 #
 # Each response type generates a specific letter that matches exactly
 # what the law requires as the next step.
@@ -8600,7 +9195,7 @@ def build_verified_response_letters(
 # API: POST /bureau-response
 #      {page_id, bureau, response_type, response_date, report_date, accounts[]}
 
-# ── Response type constants ───────────────────────────────────────────────────
+# -- Response type constants ---------------------------------------------------
 
 BUREAU_RESPONSE_VERIFIED       = "verified"
 BUREAU_RESPONSE_UPDATED        = "updated"
@@ -8610,7 +9205,7 @@ BUREAU_RESPONSE_UNABLE         = "unable_to_process"
 BUREAU_RESPONSE_NO_RESPONSE    = "no_response_30_days"
 BUREAU_RESPONSE_REINSERTION    = "reinsertion"
 
-# ── Shared helpers ────────────────────────────────────────────────────────────
+# -- Shared helpers ------------------------------------------------------------
 
 def _bureau_header(
     consumer_name: str,
@@ -8627,7 +9222,7 @@ def _bureau_header(
     )
 
 
-# ── UPDATED response ──────────────────────────────────────────────────────────
+# -- UPDATED response ----------------------------------------------------------
 
 def build_updated_response_letter(
     bureau: str,
@@ -8648,13 +9243,13 @@ def build_updated_response_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"To Whom It May Concern,\n\n"
+        f"Hi,\n\n"
         f"I received your reinvestigation results dated {resp_label}, which "
         f"indicate that the account(s) below were 'updated.' I am writing "
         f"because an update is not the same as a resolution. Simply changing "
         f"a number or a date does not necessarily correct the underlying "
         f"inaccuracy I disputed, and it does not satisfy the bureau's "
-        f"obligation under 15 U.S.C. \u00a71681i(a)(5) to delete or "
+        f"obligation under 15 U.S.C. section 1681i(a)(5) to delete or "
         f"correct information that cannot be verified."
     )
 
@@ -8665,7 +9260,7 @@ def build_updated_response_letter(
         attack_type = acc.get("attack_type", "")
 
         section = (
-            f"{i}. the creditor \u2014 Account #: {acct}\n"
+            f"{i}. the creditor, Account #: {mask_stars_to_x(acct)}\n"
             f"You have indicated this account was updated. I have the following "
             f"questions and demands regarding this update:\n\n"
             f"(a) What specific information was changed? Please provide a "
@@ -8677,9 +9272,9 @@ def build_updated_response_letter(
             f"(c) Was this account fully verified with primary documentation, "
             f"or was the update based solely on information provided by "
             f"the creditor without independent review?\n\n"
-            f"If the update did not fully resolve my original dispute — or if "
-            f"the account still cannot be verified with primary documentation — "
-            f"it must be deleted under 15 U.S.C. \u00a71681i(a)(5)."
+            f"If the update did not fully resolve my original dispute, or if "
+            f"the account still cannot be verified with primary documentation, "
+            f"it must be deleted under 15 U.S.C. section 1681i(a)(5)."
         )
         sections.append(section)
 
@@ -8687,7 +9282,7 @@ def build_updated_response_letter(
         f"I am requesting written confirmation of exactly what was changed "
         f"and confirmation that my original dispute has been fully resolved. "
         f"If any aspect of my dispute remains unresolved, I am requesting "
-        f"deletion of the item(s) as required by 15 U.S.C. \u00a71681i(a)(5).\n\n"
+        f"deletion of the item(s) as required by 15 U.S.C. section 1681i(a)(5).\n\n"
         f"Thank you,\n\n{consumer_name}"
     )
 
@@ -8700,7 +9295,7 @@ def build_updated_response_letter(
     )
 
 
-# ── DELETED — reinsertion monitoring letter ───────────────────────────────────
+# -- DELETED, reinsertion monitoring letter -----------------------------------
 
 def build_deletion_confirmed_letter(
     bureau: str,
@@ -8710,8 +9305,8 @@ def build_deletion_confirmed_letter(
     report_date: str = "",
 ) -> str:
     """
-    Sent AFTER a deletion — not immediately, but when the consumer uploads
-    a new report and the deleted item has REAPPEARED. Attacks §1681i(a)(5)(B).
+    Sent AFTER a deletion, not immediately, but when the consumer uploads
+    a new report and the deleted item has REAPPEARED. Attacks section 1681i(a)(5)(B).
     If no reinsertion: this function returns a confirmation/monitoring notice.
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
@@ -8725,16 +9320,16 @@ def build_deletion_confirmed_letter(
     reinserted = [a for a in accounts if a.get("reinserted", False)]
 
     if not reinserted:
-        # Confirmation letter — no reinsertion yet
+        # Confirmation letter, no reinsertion yet
         opening = (
-            f"To Whom It May Concern,\n\n"
+            f"Hi,\n\n"
             f"Thank you for your reinvestigation response dated {resp_label}, "
             f"which indicates that the account(s) below have been deleted from "
             f"my credit file. I am acknowledging this deletion and requesting "
             f"written confirmation that these items have been permanently removed.\n\n"
             f"I am also putting you on notice that if any of these deleted items "
             f"reappear on my credit report in the future without proper procedure, "
-            f"that will constitute a violation of 15 U.S.C. \u00a71681i(a)(5)(B), "
+            f"that will constitute a violation of 15 U.S.C. section 1681i(a)(5)(B), "
             f"which requires written notice to the consumer within five business "
             f"days of any reinsertion and requires the furnisher to certify "
             f"the accuracy of the reinserted information."
@@ -8742,8 +9337,8 @@ def build_deletion_confirmed_letter(
         sections = []
         for i, acc in enumerate(accounts, 1):
             sections.append(
-                f"{i}. {acc.get('furnisher_name', '')} \u2014 "
-                f"Account #: {acc.get('account_number', '')}\n"
+                f"{i}. {acc.get('furnisher_name', '')}, "
+                f"Account #: {mask_stars_to_x(acc.get('account_number', ''))}\n"
                 f"Deletion confirmed. I am requesting written confirmation "
                 f"of this deletion and will monitor my credit file to ensure "
                 f"this item does not reappear."
@@ -8756,12 +9351,12 @@ def build_deletion_confirmed_letter(
     else:
         # Reinsertion violation letter
         opening = (
-            f"To Whom It May Concern,\n\n"
+            f"Hi,\n\n"
             f"I am writing regarding a serious violation of the Fair Credit "
             f"Reporting Act. The account(s) listed below were previously deleted "
             f"from my credit file following my dispute. They have now reappeared "
             f"on my credit report without the proper procedure required by law.\n\n"
-            f"Under 15 U.S.C. \u00a71681i(a)(5)(B), if deleted information is "
+            f"Under 15 U.S.C. section 1681i(a)(5)(B), if deleted information is "
             f"reinserted, the bureau must: (1) ensure the furnisher certifies "
             f"in writing that the information is complete and accurate, and "
             f"(2) notify the consumer in writing within five business days "
@@ -8771,11 +9366,11 @@ def build_deletion_confirmed_letter(
         sections = []
         for i, acc in enumerate(reinserted, 1):
             sections.append(
-                f"{i}. {acc.get('furnisher_name', '')} \u2014 "
-                f"Account #: {acc.get('account_number', '')}\n"
+                f"{i}. {acc.get('furnisher_name', '')}, "
+                f"Account #: {mask_stars_to_x(acc.get('account_number', ''))}\n"
                 f"This account was previously deleted and has reappeared. "
                 f"I did not receive the required written notice of reinsertion "
-                f"under 15 U.S.C. \u00a71681i(a)(5)(B)(ii). I am demanding "
+                f"under 15 U.S.C. section 1681i(a)(5)(B)(ii). I am demanding "
                 f"immediate re-deletion of this item and a written explanation "
                 f"of: (a) who authorized the reinsertion, (b) what certification "
                 f"the furnisher provided, and (c) why I was not notified."
@@ -8784,7 +9379,7 @@ def build_deletion_confirmed_letter(
             f"I am demanding immediate deletion of all reinserted items listed "
             f"above. Be advised that reinserting previously deleted information "
             f"without proper procedure and without notifying the consumer is a "
-            f"willful violation of 15 U.S.C. \u00a71681n, exposing your "
+            f"willful violation of 15 U.S.C. section 1681n, exposing your "
             f"organization to statutory damages of $100 to $1,000 per violation, "
             f"punitive damages, and attorney fees. I am retaining all records.\n\n"
             f"Thank you,\n\n{consumer_name}"
@@ -8793,13 +9388,13 @@ def build_deletion_confirmed_letter(
     return (
         header + "\n\n"
         + opening + "\n\n\n"
-        + ("Deleted accounts:\n\n" if not reinserted else "Reinserted accounts \u2014 immediate deletion required:\n\n")
+        + ("Deleted accounts:\n\n" if not reinserted else "Reinserted accounts , immediate deletion required:\n\n")
         + "\n\n".join(sections) + "\n\n\n"
         + closing
     )
 
 
-# ── FRIVOLOUS response ────────────────────────────────────────────────────────
+# -- FRIVOLOUS response --------------------------------------------------------
 
 def build_frivolous_response_letter(
     bureau: str,
@@ -8822,12 +9417,12 @@ def build_frivolous_response_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"To Whom It May Concern,\n\n"
+        f"Hi,\n\n"
         f"I received your response dated {resp_label} indicating that my "
         f"dispute was deemed frivolous or irrelevant. I am writing to "
         f"challenge this determination and to resubmit my dispute with "
         f"additional specificity.\n\n"
-        f"Under 15 U.S.C. \u00a71681i(a)(3), a bureau may only decline to "
+        f"Under 15 U.S.C. section 1681i(a)(3), a bureau may only decline to "
         f"investigate a dispute if it reasonably determines the dispute is "
         f"frivolous or irrelevant. When it does so, it must notify the "
         f"consumer within five business days with the specific reasons and "
@@ -8856,16 +9451,16 @@ def build_frivolous_response_letter(
         attack_type = acc.get("attack_type", "")
 
         section = (
-            f"{i}. the creditor \u2014 Account #: {acct}\n"
+            f"{i}. the creditor, Account #: {mask_stars_to_x(acct)}\n"
             f"I am resubmitting this dispute with additional specificity. "
             f"The specific inaccuracy I am disputing is: "
             f"{_short_attack_description(attack_type, furnisher)}. "
             f"This is a concrete, factual dispute about a specific field "
             f"in my credit report. The bureau is required to investigate "
-            f"this under 15 U.S.C. \u00a71681i(a). I am also requesting "
+            f"this under 15 U.S.C. section 1681i(a). I am also requesting "
             f"that you specify, in writing, exactly what additional "
             f"information you require to conduct this investigation, "
-            f"as mandated by \u00a71681i(a)(3)(C)."
+            f"as mandated by section 1681i(a)(3)(C)."
         )
         sections.append(section)
 
@@ -8873,7 +9468,7 @@ def build_frivolous_response_letter(
         f"If you continue to decline investigation of these items without "
         f"a valid legal basis, I will file a complaint with the Consumer "
         f"Financial Protection Bureau (CFPB) and consider legal action "
-        f"under 15 U.S.C. \u00a71681n for willful noncompliance.\n\n"
+        f"under 15 U.S.C. section 1681n for willful noncompliance.\n\n"
         f"Thank you,\n\n{consumer_name}"
     )
 
@@ -8886,7 +9481,7 @@ def build_frivolous_response_letter(
     )
 
 
-# ── UNABLE TO PROCESS ─────────────────────────────────────────────────────────
+# -- UNABLE TO PROCESS ---------------------------------------------------------
 
 def build_unable_to_process_letter(
     bureau: str,
@@ -8909,12 +9504,12 @@ def build_unable_to_process_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"To Whom It May Concern,\n\n"
+        f"Hi,\n\n"
         f"I received your response dated {resp_label} indicating that you "
         f"were unable to process my dispute. I am resubmitting this dispute "
         f"with additional identifying information to assist in locating my file.\n\n"
         f"The bureau's obligation to investigate a consumer dispute under "
-        f"15 U.S.C. \u00a71681i(a) cannot be waived by a processing difficulty. "
+        f"15 U.S.C. section 1681i(a) cannot be waived by a processing difficulty. "
         f"If additional identification is needed to locate my file, I am "
         f"providing it below. If the issue is something other than identification, "
         f"I am requesting a specific explanation of what prevented processing "
@@ -8936,7 +9531,7 @@ def build_unable_to_process_letter(
         furnisher = acc.get("furnisher_name", "")
         acct      = acc.get("account_number", "")
         sections.append(
-            f"{i}. the creditor \u2014 Account #: {acct}\n"
+            f"{i}. the creditor, Account #: {mask_stars_to_x(acct)}\n"
             f"I am resubmitting my dispute for this account. "
             f"If there is a specific issue that prevented processing "
             f"of this item, please advise in writing."
@@ -8946,7 +9541,7 @@ def build_unable_to_process_letter(
         f"I am enclosing copies of my identification documents to assist "
         f"in verifying my identity and locating my file. Please process "
         f"this dispute and provide a response within the 30-day period "
-        f"required by 15 U.S.C. \u00a71681i(a)(1).\n\n"
+        f"required by 15 U.S.C. section 1681i(a)(1).\n\n"
         f"Thank you,\n\n{consumer_name}\n\n"
         f"Enclosures: Government-issued ID, Proof of Address"
     )
@@ -8961,7 +9556,7 @@ def build_unable_to_process_letter(
     )
 
 
-# ── NO RESPONSE IN 30 DAYS ────────────────────────────────────────────────────
+# -- NO RESPONSE IN 30 DAYS ----------------------------------------------------
 
 def build_no_response_letter(
     bureau: str,
@@ -8972,8 +9567,8 @@ def build_no_response_letter(
 ) -> str:
     """
     When the bureau has not responded within 30 days of the dispute.
-    Under §1681i(a)(1) the disputed items MUST be deleted.
-    This is not discretionary — it is mandatory.
+    Under section 1681i(a)(1) the disputed items MUST be deleted.
+    This is not discretionary, it is mandatory.
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name = info.get("name", bureau.title())
@@ -8982,15 +9577,15 @@ def build_no_response_letter(
 
     header  = _bureau_header(consumer_name, bureau, date_str)
     opening = (
-        f"To Whom It May Concern,\n\n"
+        f"Hi,\n\n"
         f"I submitted a formal credit report dispute on or around {dispute_label}. "
         f"As of today, more than 30 days have passed and I have not received "
         f"a response to my dispute.\n\n"
-        f"Under 15 U.S.C. \u00a71681i(a)(1), the bureau must complete its "
+        f"Under 15 U.S.C. section 1681i(a)(1), the bureau must complete its "
         f"reinvestigation within 30 days of receiving the dispute. If the "
         f"bureau fails to complete the reinvestigation within this period, "
         f"the disputed items must be deleted from my credit file. "
-        f"This obligation is not discretionary — it is a statutory requirement. "
+        f"This obligation is not discretionary, it is a statutory requirement. "
         f"The 30-day period has now elapsed. I am demanding immediate deletion "
         f"of the disputed items listed below."
     )
@@ -9000,10 +9595,10 @@ def build_no_response_letter(
         furnisher = acc.get("furnisher_name", "")
         acct      = acc.get("account_number", "")
         sections.append(
-            f"{i}. the creditor \u2014 Account #: {acct}\n"
+            f"{i}. the creditor, Account #: {mask_stars_to_x(acct)}\n"
             f"This item was disputed on {dispute_label}. The 30-day "
             f"reinvestigation period has expired without a response. "
-            f"Under 15 U.S.C. \u00a71681i(a)(1), this item must be "
+            f"Under 15 U.S.C. section 1681i(a)(1), this item must be "
             f"deleted immediately."
         )
 
@@ -9011,7 +9606,7 @@ def build_no_response_letter(
         f"I am demanding written confirmation of the deletion of all items "
         f"listed above within five business days. Continued reporting of "
         f"these items after the expiration of the 30-day investigation "
-        f"period constitutes a violation of 15 U.S.C. \u00a71681n and "
+        f"period constitutes a violation of 15 U.S.C. section 1681n and "
         f"exposes this bureau to statutory damages of $100 to $1,000 per "
         f"violation, punitive damages, and attorney fees. I am retaining "
         f"certified mail records of my original dispute as proof of the "
@@ -9022,13 +9617,13 @@ def build_no_response_letter(
     return (
         header + "\n\n"
         + opening + "\n\n\n"
-        + "Items past 30-day deadline \u2014 mandatory deletion required:\n\n"
+        + "Items past 30-day deadline , mandatory deletion required:\n\n"
         + "\n\n".join(sections) + "\n\n\n"
         + closing
     )
 
 
-# ── Shared helper ─────────────────────────────────────────────────────────────
+# -- Shared helper -------------------------------------------------------------
 
 def _short_attack_description(attack_type: str, furnisher: str) -> str:
     """One-sentence plain-language description of the dispute ground."""
@@ -9064,7 +9659,7 @@ def _short_attack_description(attack_type: str, furnisher: str) -> str:
             "the payment status being reported inconsistently across bureaus"
         ),
         "absent_bureau_reporting_inconsistency": (
-            "the inconsistent reporting — this account appears negative at some "
+            "the inconsistent reporting, this account appears negative at some "
             "bureaus but not others"
         ),
         "obsolete_account_7yr_limit": (
@@ -9074,7 +9669,7 @@ def _short_attack_description(attack_type: str, furnisher: str) -> str:
     return descs.get(attack_type, "the inaccuracy and unverifiability of the reported information")
 
 
-# ── Master dispatch function ──────────────────────────────────────────────────
+# -- Master dispatch function --------------------------------------------------
 
 def build_bureau_response_letter(
     response_type: str,
@@ -9111,8 +9706,8 @@ def build_bureau_response_letter(
         )
         next_steps = (
             "Send certified mail. Bureau has 15 days to provide procedure description. "
-            "If they cannot — or if the procedure was ACDV-only — file CFPB complaint "
-            "and consult FCRA attorney for §1681n claim."
+            "If they cannot, or if the procedure was ACDV-only, file CFPB complaint "
+            "and consult FCRA attorney for section 1681n claim."
         )
 
     elif response_type == BUREAU_RESPONSE_UPDATED:
@@ -9145,7 +9740,7 @@ def build_bureau_response_letter(
         next_steps = (
             "Monitor the next credit report. If the item reappears, immediately "
             "send this letter again with reinserted=True flagged on those accounts. "
-            "Reinsertion without notice is a §1681i(a)(5)(B) violation."
+            "Reinsertion without notice is a section 1681i(a)(5)(B) violation."
         )
 
     elif response_type == BUREAU_RESPONSE_FRIVOLOUS:
@@ -9159,8 +9754,8 @@ def build_bureau_response_letter(
         )
         next_steps = (
             "File a CFPB complaint simultaneously. If the bureau ignores this "
-            "resubmission, consult an FCRA attorney — improper frivolous designations "
-            "are themselves §1681n violations."
+            "resubmission, consult an FCRA attorney, improper frivolous designations "
+            "are themselves section 1681n violations."
         )
 
     elif response_type == BUREAU_RESPONSE_UNABLE:
@@ -9192,10 +9787,10 @@ def build_bureau_response_letter(
         letter = letter.replace(consumer_name + "\n", cfpb_para + "\n\n" + consumer_name + "\n", 1)
         next_steps = (
             "Send certified mail. File CFPB complaint simultaneously at "
-            "consumerfinance.gov/complaint — this creates regulatory exposure. "
+            "consumerfinance.gov/complaint, this creates regulatory exposure. "
             "If items are not deleted within 5 business days of bureau receiving "
-            "this letter, consult an FCRA attorney — §1681i(a)(1) violation "
-            "with strong §1681n exposure."
+            "this letter, consult an FCRA attorney, section 1681i(a)(1) violation "
+            "with strong section 1681n exposure."
         )
 
     elif response_type == BUREAU_RESPONSE_REINSERTION:
@@ -9207,13 +9802,13 @@ def build_bureau_response_letter(
             response_date=response_date,
             report_date=report_date,
         )
-        # Append CFPB notice for reinsertion (willful violation — mandatory escalation)
+        # Append CFPB notice for reinsertion (willful violation, mandatory escalation)
         cfpb_para = build_cfpb_complaint_language(BUREAU_RESPONSE_REINSERTION)
         letter = letter.replace(consumer_name + "\n", cfpb_para + "\n\n" + consumer_name + "\n", 1)
         next_steps = (
             "Send certified mail. File CFPB complaint immediately at "
             "consumerfinance.gov/complaint. "
-            "Reinsertion without notice is one of the strongest §1681n claims — "
+            "Reinsertion without notice is one of the strongest section 1681n claims, "
             "consult an FCRA attorney."
         )
 
@@ -9242,13 +9837,13 @@ def build_bureau_response_letter(
 #
 # Compares Round N vs Round N+1 credit reports for the same client.
 # Determines what was removed, what remained, what worsened, and
-# what was reinserted — then generates targeted R2 strategy.
+# what was reinserted, then generates targeted R2 strategy.
 #
 # Flow:
-#   1. build_round_snapshot(result, round_num)  → compact snapshot dict
-#   2. compare_rounds(snapshot_r1, snapshot_r2) → comparison_result
-#   3. build_comparison_report(comparison_result) → human-readable text
-#   4. filter_remaining_for_r2(comparison_result, result_r2) → filtered
+#   1. build_round_snapshot(result, round_num)  -> compact snapshot dict
+#   2. compare_rounds(snapshot_r1, snapshot_r2) -> comparison_result
+#   3. build_comparison_report(comparison_result) -> human-readable text
+#   4. filter_remaining_for_r2(comparison_result, result_r2) -> filtered
 #      letter_input_engine containing only accounts that need R2 letters
 #
 # Account matching uses a normalized fingerprint:
@@ -9256,12 +9851,12 @@ def build_bureau_response_letter(
 #   Handles masking changes across reports (1234**** == 1234XXXX)
 #
 # Outcome codes per account per bureau:
-#   REMOVED    — was in R1 negatives, gone from R2 → success
-#   REMAINED   — still negative in R2 → needs R2 letter
-#   IMPROVED   — still present but status/balance improved
-#   WORSENED   — still present, balance increased or status deteriorated
-#   NEW        — appeared in R2 but was not in R1 negatives
-#   REINSERTED — was REMOVED in a prior round, now back → §1681i(a)(5)(B)
+#   REMOVED   , was in R1 negatives, gone from R2 -> success
+#   REMAINED  , still negative in R2 -> needs R2 letter
+#   IMPROVED  , still present but status/balance improved
+#   WORSENED  , still present, balance increased or status deteriorated
+#   NEW       , appeared in R2 but was not in R1 negatives
+#   REINSERTED, was REMOVED in a prior round, now back -> section 1681i(a)(5)(B)
 
 OUTCOME_REMOVED    = "removed"
 OUTCOME_REMAINED   = "remained"
@@ -9290,7 +9885,7 @@ def _normalize_name(name: str) -> str:
 
 
 def _digits_only(s: str) -> str:
-    """Extract only digit characters — strips masking (*, X, x, -)."""
+    """Extract only digit characters, strips masking (*, X, x, -)."""
     import re as _re
     return _re.sub(r"[^0-9]", "", s)
 
@@ -9302,7 +9897,7 @@ def _account_fingerprint(name: str, account_number: str) -> str:
     Handles masking format changes between reports AND collector
     name abbreviation differences (NCA == NATIONAL CREDIT ADJUST).
     """
-    # Apply collector normalization first (NCA → NATIONAL CREDIT ADJUST)
+    # Apply collector normalization first (NCA -> NATIONAL CREDIT ADJUST)
     try:
         norm = _normalize_collector_name(name)
     except Exception:
@@ -9398,7 +9993,7 @@ def compare_rounds(
     Compare two round snapshots. Returns a comprehensive comparison result.
 
     prior_removed_fingerprints: fingerprints of accounts removed in any prior
-    round — used to detect reinsertion (account removed then reappeared).
+    round, used to detect reinsertion (account removed then reappeared).
 
     Returns:
     {
@@ -9472,7 +10067,7 @@ def compare_rounds(
         total_r1 += len(r1_accs)
         total_r2 += len(r2_accs)
 
-        # Accounts in R1 — where did they go?
+        # Accounts in R1, where did they go?
         for fp, r1_acc in r1_by_fp.items():
             if fp not in r2_by_fp:
                 removed.append({**r1_acc, "outcome": OUTCOME_REMOVED})
@@ -9517,8 +10112,8 @@ def compare_rounds(
                     outcome = OUTCOME_REINSERTED
                     total_reinserted += 1
                     reinserted.append({**r2_acc, "outcome": outcome,
-                                       "law": "15 USC §1681i(a)(5)(B)",
-                                       "note": "Previously removed — reinsertion without proper notice"})
+                                       "law": "15 USC section 1681i(a)(5)(B)",
+                                       "note": "Previously removed, reinsertion without proper notice"})
                     all_reinserted.append({**r2_acc, "bureau": bureau})
                 else:
                     outcome = OUTCOME_NEW
@@ -9597,7 +10192,7 @@ def build_comparison_report(
         f"{'='*60}",
         f"",
         f"OVERALL RESULTS",
-        f"{'─'*40}",
+        f"{'-'*40}",
         f"Negative accounts (Round {r_from}): {s['total_r1_negatives']}",
         f"Negative accounts (Round {r_to}): {s['total_r2_negatives']}",
         f"",
@@ -9606,7 +10201,7 @@ def build_comparison_report(
         f"  Remained (escalate):    {s['remained_count']}",
         f"  Worsened (escalate):    {s['worsened_count']}",
         f"  New items:              {s['new_count']}",
-        f"  Reinserted (⚠ ALERT):  {s['reinserted_count']}",
+        f"  Reinserted ([!] ALERT):  {s['reinserted_count']}",
         f"",
         f"  Removal rate:  {removal_rate}% ({grade})",
         f"  Net change:    {s['net_change']:+d} accounts",
@@ -9616,15 +10211,15 @@ def build_comparison_report(
     # Reinsertion alerts
     if comparison["reinsertion_alerts"]:
         lines += [
-            f"⚠ REINSERTION ALERT — §1681i(a)(5)(B) VIOLATION",
-            f"{'─'*40}",
+            f"[!] REINSERTION ALERT, section 1681i(a)(5)(B) VIOLATION",
+            f"{'-'*40}",
             f"The following accounts were previously removed but have",
             f"reappeared without proper notice. This is a willful FCRA",
             f"violation. File CFPB complaint and escalate immediately.",
             f"",
         ]
         for acc in comparison["reinsertion_alerts"]:
-            lines.append(f"  • {acc.get('name','')} — #{acc.get('account_number','')} [{acc.get('bureau','').title()}]")
+            lines.append(f"  * {acc.get('name','')}, #{acc.get('account_number','')} [{acc.get('bureau','').title()}]")
         lines.append("")
 
     # Per-bureau breakdown
@@ -9635,46 +10230,46 @@ def build_comparison_report(
 
         lines += [
             f"{bureau.upper()}",
-            f"{'─'*40}",
+            f"{'-'*40}",
         ]
 
         if data["removed"]:
-            lines.append(f"  ✓ REMOVED ({len(data['removed'])}):")
+            lines.append(f"  [OK] REMOVED ({len(data['removed'])}):")
             for acc in data["removed"]:
-                lines.append(f"    • {acc['name']} — #{acc['account_number']}")
+                lines.append(f"    * {acc['name']}, #{acc['account_number']}")
 
         if data["reinserted"]:
-            lines.append(f"  ⚠ REINSERTED ({len(data['reinserted'])}) — FILE CFPB COMPLAINT:")
+            lines.append(f"  [!] REINSERTED ({len(data['reinserted'])}), FILE CFPB COMPLAINT:")
             for acc in data["reinserted"]:
-                lines.append(f"    • {acc['name']} — #{acc['account_number']}")
+                lines.append(f"    * {acc['name']}, #{acc['account_number']}")
 
         if data["remained"]:
-            lines.append(f"  → REMAINED ({len(data['remained'])}) — send Round {r_to} letter:")
+            lines.append(f"  -> REMAINED ({len(data['remained'])}), send Round {r_to} letter:")
             for acc in data["remained"]:
-                bal_note = f" [balance: {acc.get('r1_balance','')} → {acc.get('balance','')}]" if acc.get("balance_change","").strip("+0.") else ""
-                lines.append(f"    • {acc['name']} — #{acc['account_number']}{bal_note}")
+                bal_note = f" [balance: {acc.get('r1_balance','')} -> {acc.get('balance','')}]" if acc.get("balance_change","").strip("+0.") else ""
+                lines.append(f"    * {acc['name']}, #{acc['account_number']}{bal_note}")
 
         if data["improved"]:
-            lines.append(f"  ↑ IMPROVED ({len(data['improved'])}) — monitor:")
+            lines.append(f"  ^ IMPROVED ({len(data['improved'])}), monitor:")
             for acc in data["improved"]:
-                lines.append(f"    • {acc['name']} — #{acc['account_number']} [was {acc.get('r1_status','')} → {acc.get('status','')}]")
+                lines.append(f"    * {acc['name']}, #{acc['account_number']} [was {acc.get('r1_status','')} -> {acc.get('status','')}]")
 
         if data["worsened"]:
-            lines.append(f"  ↓ WORSENED ({len(data['worsened'])}) — escalate:")
+            lines.append(f"  v WORSENED ({len(data['worsened'])}), escalate:")
             for acc in data["worsened"]:
-                lines.append(f"    • {acc['name']} — #{acc['account_number']} [balance change: {acc.get('balance_change','')}]")
+                lines.append(f"    * {acc['name']}, #{acc['account_number']} [balance change: {acc.get('balance_change','')}]")
 
         if data["new"]:
-            lines.append(f"  + NEW ({len(data['new'])}) — dispute if unauthorized:")
+            lines.append(f"  + NEW ({len(data['new'])}), dispute if unauthorized:")
             for acc in data["new"]:
-                lines.append(f"    • {acc['name']} — #{acc['account_number']}")
+                lines.append(f"    * {acc['name']}, #{acc['account_number']}")
 
         lines.append("")
 
     # Next steps
     lines += [
         f"RECOMMENDED NEXT STEPS",
-        f"{'─'*40}",
+        f"{'-'*40}",
     ]
     if s["reinserted_count"] > 0:
         lines.append(f"  1. FILE CFPB COMPLAINT immediately for reinserted items")
@@ -9682,11 +10277,11 @@ def build_comparison_report(
     if s["remained_count"] + s["worsened_count"] > 0:
         lines.append(f"  {'2' if s['reinserted_count'] > 0 else '1'}. Send Round {r_to} dispute letters for all 'Remained' and 'Worsened' accounts")
     if s["new_count"] > 0:
-        lines.append(f"  • Review new items — dispute any that should not have appeared")
+        lines.append(f"  * Review new items, dispute any that should not have appeared")
     if s["removed_count"] > 0:
-        lines.append(f"  • Monitor removed items — if any reappear, file reinsertion claim")
+        lines.append(f"  * Monitor removed items, if any reappear, file reinsertion claim")
     if s["remained_count"] + s["worsened_count"] == 0 and s["reinserted_count"] == 0:
-        lines.append(f"  • All disputed items resolved. Continue monitoring.")
+        lines.append(f"  * All disputed items resolved. Continue monitoring.")
 
     return "\n".join(lines)
 
@@ -9742,7 +10337,7 @@ def filter_remaining_for_r2(
                     kept.append(item_copy)
                 elif fp in escalation_fps:
                     kept.append(item)
-                # else: REMOVED — skip
+                # else: REMOVED, skip
 
             if kept:
                 filtered[bureau][group] = kept
@@ -9754,13 +10349,13 @@ def filter_remaining_for_r2(
 # IDENTITY THEFT BLOCK ENGINE
 # =========================
 #
-# §1681c-2 (FCRA §605B) — Block of Information Resulting from Identity Theft
+# section 1681c-2 (FCRA section 605B), Block of Information Resulting from Identity Theft
 #
 # This is NOT a dispute. It is a mandatory block.
-# Key differences from §1681i dispute:
+# Key differences from section 1681i dispute:
 #
-#   DISPUTE (§1681i):   Bureau has 30 days. May respond "verified." No guarantee of removal.
-#   BLOCK (§1681c-2):   Bureau MUST block within 4 BUSINESS DAYS. No verification defense.
+#   DISPUTE (section 1681i):   Bureau has 30 days. May respond "verified." No guarantee of removal.
+#   BLOCK (section 1681c-2):   Bureau MUST block within 4 BUSINESS DAYS. No verification defense.
 #                       Furnisher must not re-report the blocked information.
 #
 # Required documents the consumer must attach:
@@ -9774,8 +10369,8 @@ def filter_remaining_for_r2(
 #   DISPUTE: Accurate account with inaccurate information (wrong balance, status, etc.)
 #
 # Companion tools:
-#   §1681c-1 Fraud Alert — placed at one bureau, notified to all three. 1-year or 7-year.
-#   Credit Freeze — stronger than fraud alert. Stops new credit from being opened.
+#   section 1681c-1 Fraud Alert, placed at one bureau, notified to all three. 1-year or 7-year.
+#   Credit Freeze, stronger than fraud alert. Stops new credit from being opened.
 #
 # FTC report URL: https://www.identitytheft.gov/
 # Police report:  Optional but recommended. Some creditors require both.
@@ -9787,7 +10382,7 @@ def detect_potential_identity_theft_indicators(
 ) -> list[dict[str, Any]]:
     """
     Flag accounts that may indicate identity theft based on credit report data.
-    These are INDICATORS — not confirmations. Consumer must verify.
+    These are INDICATORS, not confirmations. Consumer must verify.
 
     Flags:
       - Account opened recently that consumer doesn't recognize
@@ -9848,7 +10443,7 @@ def build_identity_theft_block_letter(
     report_date: str = "",
 ) -> str:
     """
-    Generate a §1681c-2 identity theft block request letter.
+    Generate a section 1681c-2 identity theft block request letter.
 
     The consumer must attach to this letter:
       1. Copy of government-issued ID
@@ -9890,7 +10485,7 @@ def build_identity_theft_block_letter(
         if opened:  details.append(f"Opened: {opened}")
         if balance: details.append(f"Balance: {balance}")
         detail_str = f" ({', '.join(details)})" if details else ""
-        account_lines.append(f"  {i}. {name} — Account #{acct}{detail_str}")
+        account_lines.append(f"  {i}. {name}, Account #{mask_stars_to_x(acct)}{detail_str}")
 
     accounts_block = "\n".join(account_lines)
 
@@ -9903,15 +10498,15 @@ def build_identity_theft_block_letter(
 
 {date_str}
 
-RE: IDENTITY THEFT BLOCK REQUEST UNDER 15 U.S.C. §1681c-2 (FCRA §605B)
+RE: IDENTITY THEFT BLOCK REQUEST UNDER 15 U.S.C. section 1681c-2 (FCRA section 605B)
 
 To Whom It May Concern:
 
-I am writing to formally request that {bureau_name} block the fraudulent accounts and information listed below from my credit file under 15 U.S.C. §1681c-2 (Fair Credit Reporting Act §605B).
+I am writing to formally request that {bureau_name} block the fraudulent accounts and information listed below from my credit file under 15 U.S.C. section 1681c-2 (Fair Credit Reporting Act section 605B).
 
-I am a victim of identity theft. The accounts and items identified in this letter were opened or created without my knowledge or authorization. I am enclosing a copy of my FTC Identity Theft Report and proof of my identity as required by §1681c-2(a).
+I am a victim of identity theft. The accounts and items identified in this letter were opened or created without my knowledge or authorization. I am enclosing a copy of my FTC Identity Theft Report and proof of my identity as required by section 1681c-2(a).
 
-Under 15 U.S.C. §1681c-2(a), {bureau_name} is required to block the identified information from my credit file no later than 4 BUSINESS DAYS from the date of receipt of this letter and the required documentation. This block is mandatory under federal law — it is not subject to a 30-day reinvestigation period.
+Under 15 U.S.C. section 1681c-2(a), {bureau_name} is required to block the identified information from my credit file no later than 4 BUSINESS DAYS from the date of receipt of this letter and the required documentation. This block is mandatory under federal law, it is not subject to a 30-day reinvestigation period.
 
 {report_ref_block}
 
@@ -9923,15 +10518,15 @@ I certify that the information I have provided is accurate and that the items li
 
 Please also note the following legal requirements that apply to this block:
 
-1. BLOCK WITHIN 4 BUSINESS DAYS: Under §1681c-2(a), you must block this information no later than 4 business days after receiving this letter and the required documentation.
+1. BLOCK WITHIN 4 BUSINESS DAYS: Under section 1681c-2(a), you must block this information no later than 4 business days after receiving this letter and the required documentation.
 
-2. NOTIFY THE FURNISHER: Under §1681c-2(a), once the block is placed, you must notify the furnisher of the blocked accounts that the information has been blocked. The furnisher is then prohibited from re-reporting the blocked information under §1681s-2.
+2. NOTIFY THE FURNISHER: Under section 1681c-2(a), once the block is placed, you must notify the furnisher of the blocked accounts that the information has been blocked. The furnisher is then prohibited from re-reporting the blocked information under section 1681s-2.
 
-3. CONSUMER NOTICE: If you decline to block any item, you must notify me promptly in the same manner required for reinsertion notice under §1681i(a)(5)(B).
+3. CONSUMER NOTICE: If you decline to block any item, you must notify me promptly in the same manner required for reinsertion notice under section 1681i(a)(5)(B).
 
-4. NO VERIFICATION DEFENSE: The block procedure under §1681c-2 is distinct from the dispute reinvestigation procedure under §1681i. A finding that information is "accurate" does not override the mandatory block requirement — the standard is whether the information resulted from identity theft, not whether it is accurate.
+4. NO VERIFICATION DEFENSE: The block procedure under section 1681c-2 is distinct from the dispute reinvestigation procedure under section 1681i. A finding that information is "accurate" does not override the mandatory block requirement, the standard is whether the information resulted from identity theft, not whether it is accurate.
 
-Failure to comply with §1681c-2 may constitute a willful violation of the FCRA, subject to statutory damages of $100 to $1,000 per violation under §1681n, plus punitive damages and attorney fees.
+Failure to comply with section 1681c-2 may constitute a willful violation of the FCRA, subject to statutory damages of $100 to $1,000 per violation under section 1681n, plus punitive damages and attorney fees.
 
 Enclosed:
   [ ] Copy of government-issued photo ID
@@ -9959,31 +10554,31 @@ def build_fraud_alert_letter(
     report_date: str = "",
 ) -> str:
     """
-    Generate a fraud alert placement letter under §1681c-1.
+    Generate a fraud alert placement letter under section 1681c-1.
 
     alert_type:
-      "initial"  — 1 year, placed at one bureau (they notify the others)
-      "extended" — 7 years, requires Identity Theft Report, entitles to 2 free reports/year
+      "initial" , 1 year, placed at one bureau (they notify the others)
+      "extended", 7 years, requires Identity Theft Report, entitles to 2 free reports/year
 
-    The consumer only needs to contact ONE bureau — that bureau must notify the other two.
+    The consumer only needs to contact ONE bureau, that bureau must notify the other two.
     Recommended: contact TransUnion first (fastest processing).
     """
     date_str = _format_date_long(report_date)
 
     if alert_type == "extended":
         duration    = "seven (7) years"
-        law_cite    = "15 U.S.C. §1681c-1(b)"
+        law_cite    = "15 U.S.C. section 1681c-1(b)"
         entitlement = (
-            "As required by §1681c-1(b)(1)(B), please also provide me with "
+            "As required by section 1681c-1(b)(1)(B), please also provide me with "
             "two free copies of my credit report during the first twelve months "
             "following placement of this extended alert."
         )
         requires_report = True
     else:
         duration    = "one (1) year"
-        law_cite    = "15 U.S.C. §1681c-1(a)"
+        law_cite    = "15 U.S.C. section 1681c-1(a)"
         entitlement = (
-            "As required by §1681c-1(a)(2), please also provide me with "
+            "As required by section 1681c-1(a)(2), please also provide me with "
             "a free copy of my credit report."
         )
         requires_report = False
@@ -9993,7 +10588,7 @@ def build_fraud_alert_letter(
     if consumer_ssn_last4: identity_line += f"Last 4 of SSN: {consumer_ssn_last4}\n"
     if consumer_phone:  identity_line += f"Phone Number: {consumer_phone}\n"
 
-    # Only send to TransUnion — they notify the others
+    # Only send to TransUnion, they notify the others
     bureau_info    = BUREAU_ADDRESSES.get("transunion", {})
     bureau_name    = bureau_info.get("name", "TransUnion")
     bureau_address = bureau_info.get("address", "")
@@ -10047,19 +10642,19 @@ def build_identity_theft_action_guide(
     num_accounts = len(fraudulent_accounts)
     account_summary = (
         f"\n".join(
-            f"  • {acc.get('name', acc.get('furnisher_name','?'))} "
-            f"— #{acc.get('account_number','?')}"
+            f"  * {acc.get('name', acc.get('furnisher_name','?'))} "
+            f", #{acc.get('account_number','?')}"
             for acc in fraudulent_accounts
         )
-        if fraudulent_accounts else "  • (Accounts to be identified from your credit reports)"
+        if fraudulent_accounts else "  * (Accounts to be identified from your credit reports)"
     )
 
     state_note = ""
     if consumer_state.upper() in {"CA", "CALIFORNIA"}:
         state_note = (
-            "\nCALIFORNIA NOTE: California law (CA Civ. Code §1785.16) requires "
+            "\nCALIFORNIA NOTE: California law (CA Civ. Code section 1785.16) requires "
             "creditors and debt collectors to accept an FTC Identity Theft Report "
-            "alone — without a police report — as sufficient proof of identity theft."
+            "alone, without a police report, as sufficient proof of identity theft."
         )
 
     guide = f"""IDENTITY THEFT RECOVERY ACTION GUIDE
@@ -10071,103 +10666,103 @@ Fraudulent accounts identified: {num_accounts}
 {'='*60}
 
 UNDERSTAND YOUR RIGHTS
-{'─'*40}
+{'-'*40}
 You have TWO powerful tools under federal law:
 
-  1. FRAUD ALERT (§1681c-1)
-     • Flags your file so lenders must verify your identity before opening new accounts
-     • Place at ONE bureau — that bureau must notify the other two
-     • Initial: 1 year | Extended (with ID theft report): 7 years
-     • FREE to place
+  1. FRAUD ALERT (section 1681c-1)
+     * Flags your file so lenders must verify your identity before opening new accounts
+     * Place at ONE bureau, that bureau must notify the other two
+     * Initial: 1 year | Extended (with ID theft report): 7 years
+     * FREE to place
 
-  2. IDENTITY THEFT BLOCK (§1681c-2)
-     • Forces bureaus to REMOVE fraudulent information within 4 BUSINESS DAYS
-     • Stronger than a dispute — bureau cannot say "verified" as a defense
-     • Furnisher is prohibited from re-reporting the blocked item
-     • Requires: (a) ID, (b) FTC Identity Theft Report, (c) list of fraudulent items
+  2. IDENTITY THEFT BLOCK (section 1681c-2)
+     * Forces bureaus to REMOVE fraudulent information within 4 BUSINESS DAYS
+     * Stronger than a dispute, bureau cannot say "verified" as a defense
+     * Furnisher is prohibited from re-reporting the blocked item
+     * Requires: (a) ID, (b) FTC Identity Theft Report, (c) list of fraudulent items
 
-  3. CREDIT FREEZE (§1681c-1 / state law)
-     • Prevents any new credit from being opened in your name
-     • Must be placed at EACH bureau separately
-     • FREE under federal law
+  3. CREDIT FREEZE (section 1681c-1 / state law)
+     * Prevents any new credit from being opened in your name
+     * Must be placed at EACH bureau separately
+     * FREE under federal law
 
 STEP-BY-STEP PROCESS
-{'─'*40}
+{'-'*40}
 
 STEP 1: FILE FTC IDENTITY THEFT REPORT (Do this FIRST)
-  → Go to: https://www.identitytheft.gov/
-  → Fill out the online form — takes ~15 minutes
-  → Download and save your Identity Theft Report (PDF)
-  → Your FTC report number will be on the report
-  → This report is SUFFICIENT for §1681c-2 block requests (no police report required)
-  → TIME: Same day
+  -> Go to: https://www.identitytheft.gov/
+  -> Fill out the online form, takes ~15 minutes
+  -> Download and save your Identity Theft Report (PDF)
+  -> Your FTC report number will be on the report
+  -> This report is SUFFICIENT for section 1681c-2 block requests (no police report required)
+  -> TIME: Same day
 
 STEP 2: PLACE FRAUD ALERT
-  → Contact TransUnion ONLY — they must notify Experian and Equifax
-  → Use the enclosed Fraud Alert Letter or call: 1-800-680-7289
-  → Request EXTENDED fraud alert (7 years) if you have your FTC report
-  → TransUnion will send you free credit reports from all 3 bureaus
-  → TIME: Same day or next business day
+  -> Contact TransUnion ONLY, they must notify Experian and Equifax
+  -> Use the enclosed Fraud Alert Letter or call: 1-800-680-7289
+  -> Request EXTENDED fraud alert (7 years) if you have your FTC report
+  -> TransUnion will send you free credit reports from all 3 bureaus
+  -> TIME: Same day or next business day
 
 STEP 3: FILE POLICE REPORT (Recommended)
-  → Take your FTC Identity Theft Report to your local police department
-  → Ask them to attach the FTC report to the police file
-  → Get a copy of the police report with report number
-  → Note: FTC report alone is legally sufficient — police report strengthens the case
-  → TIME: 1-3 days
+  -> Take your FTC Identity Theft Report to your local police department
+  -> Ask them to attach the FTC report to the police file
+  -> Get a copy of the police report with report number
+  -> Note: FTC report alone is legally sufficient, police report strengthens the case
+  -> TIME: 1-3 days
   {state_note}
 
 STEP 4: SEND IDENTITY THEFT BLOCK LETTERS
-  → Use the enclosed block letters for each bureau
-  → Each letter must include:
-      ✓ Copy of government-issued photo ID
-      ✓ FTC Identity Theft Report (PDF)
-      ✓ Police report (if obtained)
-      ✓ Signed block request letter
-  → Send CERTIFIED MAIL to each bureau (keep tracking numbers)
-  → Bureau addresses:
+  -> Use the enclosed block letters for each bureau
+  -> Each letter must include:
+      [OK] Copy of government-issued photo ID
+      [OK] FTC Identity Theft Report (PDF)
+      [OK] Police report (if obtained)
+      [OK] Signed block request letter
+  -> Send CERTIFIED MAIL to each bureau (keep tracking numbers)
+  -> Bureau addresses:
       TransUnion:  PO Box 2000, Chester, PA 19016
       Experian:    P.O. Box 4500, Allen, TX 75013
       Equifax:     P.O. Box 740256, Atlanta, GA 30374
-  → TIME: Send within 24-48 hours of obtaining FTC report
+  -> TIME: Send within 24-48 hours of obtaining FTC report
 
 STEP 5: TRACK THE 4-BUSINESS-DAY DEADLINE
-  → Block must be placed within 4 BUSINESS DAYS of bureau receiving your package
-  → Mark your calendar: certified mail delivery date + 4 business days
-  → If block not confirmed by that deadline, send follow-up and file CFPB complaint
-  → CFPB complaint: https://www.consumerfinance.gov/complaint/
+  -> Block must be placed within 4 BUSINESS DAYS of bureau receiving your package
+  -> Mark your calendar: certified mail delivery date + 4 business days
+  -> If block not confirmed by that deadline, send follow-up and file CFPB complaint
+  -> CFPB complaint: https://www.consumerfinance.gov/complaint/
 
 STEP 6: CONTACT EACH FRAUDULENT CREDITOR DIRECTLY
-  → Call each creditor listed on your account summary
-  → Tell them the account was opened fraudulently — not your debt
-  → They must give you details about the account if you ask
-  → They must stop collecting and reporting once they receive block notification
-  → Request written confirmation from each creditor
+  -> Call each creditor listed on your account summary
+  -> Tell them the account was opened fraudulently, not your debt
+  -> They must give you details about the account if you ask
+  -> They must stop collecting and reporting once they receive block notification
+  -> Request written confirmation from each creditor
 
 STEP 7: PLACE CREDIT FREEZE (Optional but recommended)
-  → Contact each bureau separately to place a credit freeze
-  → Experian:    experian.com/freeze or 1-888-397-3742
-  → TransUnion:  transunion.com/credit-freeze or 1-888-909-8872
-  → Equifax:     equifax.com/personal/credit-report-services or 1-800-685-1111
-  → FREE under federal law (15 U.S.C. §1681c-1)
-  → You can temporarily lift the freeze when you need to apply for credit
+  -> Contact each bureau separately to place a credit freeze
+  -> Experian:    experian.com/freeze or 1-888-397-3742
+  -> TransUnion:  transunion.com/credit-freeze or 1-888-909-8872
+  -> Equifax:     equifax.com/personal/credit-report-services or 1-800-685-1111
+  -> FREE under federal law (15 U.S.C. section 1681c-1)
+  -> You can temporarily lift the freeze when you need to apply for credit
 
 STEP 8: MONITOR AND FOLLOW UP
-  → After 4 business days: call each bureau to confirm block is in place
-  → Pull new credit reports (you're entitled to free reports after fraud alert)
-  → If blocked items reappear: immediate reinsertion claim under §1681i(a)(5)(B)
-  → Keep all documentation: tracking numbers, call logs, written confirmations
+  -> After 4 business days: call each bureau to confirm block is in place
+  -> Pull new credit reports (you're entitled to free reports after fraud alert)
+  -> If blocked items reappear: immediate reinsertion claim under section 1681i(a)(5)(B)
+  -> Keep all documentation: tracking numbers, call logs, written confirmations
 
 IMPORTANT WARNINGS
-{'─'*40}
-  ⚠ Do NOT pay any of the fraudulent debts — paying may be interpreted as acknowledging the debt
-  ⚠ Do NOT close legitimate accounts — this can hurt your credit score
-  ⚠ Keep COPIES of everything — every letter sent, every confirmation received
-  ⚠ Watch for new fraudulent accounts — pull credit reports every 90 days for 1 year
-  ⚠ If a furnisher keeps reporting after the block: FCRA §1681s-2 violation — consult FCRA attorney
+{'-'*40}
+  [!] Do NOT pay any of the fraudulent debts, paying may be interpreted as acknowledging the debt
+  [!] Do NOT close legitimate accounts, this can hurt your credit score
+  [!] Keep COPIES of everything, every letter sent, every confirmation received
+  [!] Watch for new fraudulent accounts, pull credit reports every 90 days for 1 year
+  [!] If a furnisher keeps reporting after the block: FCRA section 1681s-2 violation, consult FCRA attorney
 
 TIMELINE SUMMARY
-{'─'*40}
+{'-'*40}
   Day 1:          File FTC report, place fraud alert
   Day 1-3:        File police report, send block letters via certified mail
   Day 4-7:        Bureaus receive letters
@@ -10176,11 +10771,11 @@ TIMELINE SUMMARY
   Ongoing:        Monitor every 90 days for 1 year
 
 LEGAL REMEDIES IF BUREAUS DON'T COMPLY
-{'─'*40}
-  • CFPB Complaint: consumerfinance.gov/complaint
-  • Willful violation of §1681c-2: $100–$1,000 per violation + punitive damages (§1681n)
-  • Negligent violation: actual damages + attorney fees (§1681o)
-  • FCRA attorney: National Association of Consumer Advocates — naca.net/find-an-attorney
+{'-'*40}
+  * CFPB Complaint: consumerfinance.gov/complaint
+  * Willful violation of section 1681c-2: $100-$1,000 per violation + punitive damages (section 1681n)
+  * Negligent violation: actual damages + attorney fees (section 1681o)
+  * FCRA attorney: National Association of Consumer Advocates, naca.net/find-an-attorney
 """
     return guide
 
@@ -10190,37 +10785,37 @@ LEGAL REMEDIES IF BUREAUS DON'T COMPLY
 # =========================
 #
 # The CFPB is a force multiplier, not the primary legal tool.
-# Our dispute letters use FCRA §1681i as the primary mechanism.
+# Our dispute letters use FCRA section 1681i as the primary mechanism.
 # The CFPB adds:
 #
-#   1. COMPLAINT LANGUAGE — citing a concurrent CFPB complaint in our
+#   1. COMPLAINT LANGUAGE, citing a concurrent CFPB complaint in our
 #      letters signals regulatory exposure to the bureau. Bureaus respond
 #      faster and more seriously when CFPB complaints are filed.
 #
-#   2. COMPLAINT TEMPLATE — structured guide for client to file at
+#   2. COMPLAINT TEMPLATE, structured guide for client to file at
 #      consumerfinance.gov. Covers every account disputed, with specific
 #      legal violation cited. Client files this alongside sending letters.
 #
-#   3. DATA CITATIONS — CFPB research and supervisory findings used to
+#   3. DATA CITATIONS, CFPB research and supervisory findings used to
 #      strengthen accuracy arguments. "The CFPB has documented that..."
-#      adds weight that a plain §1681e(b) argument lacks.
+#      adds weight that a plain section 1681e(b) argument lacks.
 #
-#   4. ESCALATION TRIGGER — after bureau response, CFPB complaint is
+#   4. ESCALATION TRIGGER, after bureau response, CFPB complaint is
 #      the escalation path before litigation. The complaint endpoint
 #      generates a filing guide for the specific response type.
 #
 # Current CFPB status (April 2026):
 #   - Core FCRA enforcement authority intact
-#   - Medical debt rule VACATED (July 2025) — do not cite
+#   - Medical debt rule VACATED (July 2025), do not cite
 #   - Consumer complaint portal still active and effective
 #   - FTC retains parallel enforcement authority
 
 
-# CFPB data points usable in letters — cited from published CFPB reports
+# CFPB data points usable in letters, cited from published CFPB reports
 _CFPB_DATA_POINTS = {
     "reinvestigation_quality": (
         "The CFPB has documented through supervisory examinations that credit bureau "
-        "reinvestigations are frequently automated rather than genuine — the bureau "
+        "reinvestigations are frequently automated rather than genuine, the bureau "
         "transmits dispute data electronically to the furnisher and accepts the "
         "furnisher's response without independent review."
     ),
@@ -10232,10 +10827,10 @@ _CFPB_DATA_POINTS = {
     "furnisher_duty": (
         "The CFPB has found through supervision that many furnishers fail to update "
         "account records after disputes are resolved, violating their ongoing duty "
-        "under 15 U.S.C. §1681s-2 to report accurate information."
+        "under 15 U.S.C. section 1681s-2 to report accurate information."
     ),
     "dispute_rights": (
-        "Under 12 U.S.C. §5511, the CFPB is empowered to enforce federal consumer "
+        "Under 12 U.S.C. section 5511, the CFPB is empowered to enforce federal consumer "
         "financial laws including FCRA. Willful violations are subject to civil "
         "money penalties in addition to damages available to the consumer."
     ),
@@ -10253,35 +10848,35 @@ def build_cfpb_complaint_language(response_type: str = "") -> str:
     """
     Return a paragraph to append to bureau dispute letters signaling
     that a concurrent CFPB complaint is being filed.
-    Tailored to response type — stronger for frivolous/no-response/reinsertion.
+    Tailored to response type, stronger for frivolous/no-response/reinsertion.
     """
     base = (
         "Please be advised that I am filing a concurrent complaint with the "
         "Consumer Financial Protection Bureau (CFPB) regarding this matter "
         f"at {CFPB_COMPLAINT_URL}. "
         "The CFPB has enforcement authority over consumer reporting under "
-        "15 U.S.C. §1681s and 12 U.S.C. §5511. "
+        "15 U.S.C. section 1681s and 12 U.S.C. section 5511. "
     )
 
     if response_type in (BUREAU_RESPONSE_NO_RESPONSE, "no_response_30_days"):
         return base + (
             "Failure to complete a reinvestigation within 30 days as required "
-            "by 15 U.S.C. §1681i(a)(1) is a willful violation subject to "
+            "by 15 U.S.C. section 1681i(a)(1) is a willful violation subject to "
             "statutory damages of $100 to $1,000 per account plus punitive "
-            "damages under 15 U.S.C. §1681n. I am preserving my right to "
+            "damages under 15 U.S.C. section 1681n. I am preserving my right to "
             "pursue all available remedies."
         )
     elif response_type in (BUREAU_RESPONSE_REINSERTION, "reinsertion"):
         return base + (
             "Reinsertion of a previously deleted item without following the "
-            "notice procedure in 15 U.S.C. §1681i(a)(5)(B) is among the "
-            "strongest willful violation claims under 15 U.S.C. §1681n. "
+            "notice procedure in 15 U.S.C. section 1681i(a)(5)(B) is among the "
+            "strongest willful violation claims under 15 U.S.C. section 1681n. "
             "I am preserving all rights to pursue statutory damages, "
             "punitive damages, and attorney fees."
         )
     elif response_type in (BUREAU_RESPONSE_FRIVOLOUS, "frivolous"):
         return base + (
-            "An improper frivolous designation under 15 U.S.C. §1681i(a)(3) "
+            "An improper frivolous designation under 15 U.S.C. section 1681i(a)(3) "
             "is itself a violation of the FCRA. I am resubmitting this dispute "
             "with full specificity and expect a legitimate reinvestigation. "
             "Continued refusal to process a properly stated dispute will be "
@@ -10289,7 +10884,7 @@ def build_cfpb_complaint_language(response_type: str = "") -> str:
         )
     elif response_type in (BUREAU_RESPONSE_VERIFIED, "verified"):
         return base + (
-            "I am specifically requesting, under 15 U.S.C. §1681i(a)(6)(B)(iii), "
+            "I am specifically requesting, under 15 U.S.C. section 1681i(a)(6)(B)(iii), "
             "a description of the procedure used in your reinvestigation, "
             "including the name and contact information of every person contacted. "
             "If the procedure consisted solely of an automated ACDV transmission "
@@ -10318,7 +10913,7 @@ def build_cfpb_complaint_template(
     Generate a structured CFPB complaint filing guide.
     The client uses this to file at consumerfinance.gov.
 
-    The complaint is not a letter — it is a plain-language description
+    The complaint is not a letter, it is a plain-language description
     of what happened and what was wrong, structured for the CFPB portal.
     """
     accounts = accounts or []
@@ -10351,7 +10946,7 @@ def build_cfpb_complaint_template(
         balance = acc.get("balance", "")
         bal_str = f" Balance: {balance}." if balance and balance not in ("$0.00", "0") else ""
         account_lines.append(
-            f"{i}. {name} — Account #{acct}.{bal_str} "
+            f"{i}. {name}, Account #{mask_stars_to_x(acct)}.{bal_str} "
             f"Issue: {at.replace('_', ' ').title()}."
         )
 
@@ -10396,10 +10991,10 @@ I submitted a formal dispute under the Fair Credit Reporting Act (FCRA) on {disp
 {_cfpb_narrative_for_response(response_type, bureau_name, response_date)}
 
 The following legal requirements apply:
-• 15 U.S.C. §1681i(a) — Bureau must complete reinvestigation within 30 days
-• 15 U.S.C. §1681e(b) — Bureau must maintain maximum possible accuracy
-• 15 U.S.C. §1681s-2 — Furnisher must report accurate information and investigate disputes
-• 15 U.S.C. §1681n — Willful violations subject to $100-$1,000 per account + punitive damages{state_note}
+* 15 U.S.C. section 1681i(a), Bureau must complete reinvestigation within 30 days
+* 15 U.S.C. section 1681e(b), Bureau must maintain maximum possible accuracy
+* 15 U.S.C. section 1681s-2, Furnisher must report accurate information and investigate disputes
+* 15 U.S.C. section 1681n, Willful violations subject to $100-$1,000 per account + punitive damages{state_note}
 
 WHAT I WANT THE COMPANY TO DO:
 Remove or correct all disputed accounts that cannot be verified with actual documentation. Provide written results of any reinvestigation including the name and contact information of every person or company contacted.
@@ -10407,12 +11002,12 @@ Remove or correct all disputed accounts that cannot be verified with actual docu
 {'='*60}
 IMPORTANT NOTES FOR FILING
 {'='*60}
-• Select company type: "Credit reporting company"
-• Select product: "Credit reporting, credit repair services, or other personal consumer reports"
-• Attach a copy of your dispute letter and any bureau response received
-• Attach copies of your credit reports showing the disputed accounts
-• Request a public response from the company (increases response pressure)
-• Keep your complaint reference number for follow-up
+* Select company type: "Credit reporting company"
+* Select product: "Credit reporting, credit repair services, or other personal consumer reports"
+* Attach a copy of your dispute letter and any bureau response received
+* Attach copies of your credit reports showing the disputed accounts
+* Request a public response from the company (increases response pressure)
+* Keep your complaint reference number for follow-up
 """
     return complaint
 
@@ -10428,7 +11023,7 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
             f"any description of the reinvestigation procedure used, the name "
             f"of the person or company contacted, or any documentation reviewed. "
             f"A purely automated ACDV process does not constitute a 'reasonable "
-            f"reinvestigation' as required by 15 U.S.C. §1681i(a). The disputed "
+            f"reinvestigation' as required by 15 U.S.C. section 1681i(a). The disputed "
             f"information remains on my report and continues to damage my credit."
         ),
         BUREAU_RESPONSE_FRIVOLOUS: (
@@ -10436,14 +11031,14 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
             f"'frivolous' and refusing to investigate. My dispute was specific, "
             f"identified the accounts by name and account number, and explained "
             f"the exact reason each item is inaccurate. Under 15 U.S.C. "
-            f"§1681i(a)(3), a bureau may only refuse to investigate if the "
-            f"dispute is 'frivolous or irrelevant' — which requires notice to "
+            f"section 1681i(a)(3), a bureau may only refuse to investigate if the "
+            f"dispute is 'frivolous or irrelevant', which requires notice to "
             f"the consumer and a specific explanation. An unjustified frivolous "
             f"designation is itself an FCRA violation."
         ),
         BUREAU_RESPONSE_NO_RESPONSE: (
             f"{bureau_name} has not responded to my dispute as of this filing. "
-            f"Under 15 U.S.C. §1681i(a)(1), the bureau must complete its "
+            f"Under 15 U.S.C. section 1681i(a)(1), the bureau must complete its "
             f"reinvestigation and notify me of the results within 30 days of "
             f"receiving my dispute. That period has elapsed without any response. "
             f"Failure to reinvestigate within 30 days is a clear violation of "
@@ -10452,7 +11047,7 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
         BUREAU_RESPONSE_REINSERTION: (
             f"After {bureau_name} deleted the disputed items{date_ref}, those "
             f"same items were reinserted on my credit report without the "
-            f"required notice under 15 U.S.C. §1681i(a)(5)(B). The law "
+            f"required notice under 15 U.S.C. section 1681i(a)(5)(B). The law "
             f"requires that before reinserting a previously deleted item, the "
             f"bureau must notify the consumer within 5 business days and "
             f"certify that the furnisher has verified the information. "
@@ -10463,8 +11058,8 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
             f"{bureau_name} responded{date_ref} by updating some information "
             f"but did not fully resolve my dispute. The accounts continue to "
             f"reflect inaccurate information despite the bureau's acknowledgment "
-            f"that updates were necessary. Under 15 U.S.C. §1681i(a)(5), "
-            f"if information cannot be verified it must be deleted — a partial "
+            f"that updates were necessary. Under 15 U.S.C. section 1681i(a)(5), "
+            f"if information cannot be verified it must be deleted, a partial "
             f"update is not sufficient when the underlying accuracy issue remains."
         ),
     }
@@ -10473,7 +11068,7 @@ def _cfpb_narrative_for_response(response_type: str, bureau_name: str, response_
         (
             f"I am disputing inaccurate information on my {bureau_name} credit "
             f"report and requesting that the bureau conduct a genuine "
-            f"reinvestigation under 15 U.S.C. §1681i(a)."
+            f"reinvestigation under 15 U.S.C. section 1681i(a)."
         )
     )
 
