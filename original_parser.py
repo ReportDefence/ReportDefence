@@ -3689,6 +3689,12 @@ _OPENING_TEMPLATES_R1 = [
         "You are also required to follow reasonable accuracy procedures under "
         "15 U.S.C. section 1681e(b). Please provide written results including the "
         "name and contact information of anyone you reached out to."
+        "\n\n"
+        "Once the reinvestigation is complete, please confirm in writing that each "
+        "remaining item was independently checked against source records held by "
+        "the furnisher, and that any item lacking that support was corrected or "
+        "deleted under 15 U.S.C. section 1681i(a)(5)(A) before the 30-day window "
+        "closed. An updated copy of my file should be sent along with those results."
     ),
     # Version E -- focuses on accuracy obligation
     (
@@ -3707,6 +3713,11 @@ _OPENING_TEMPLATES_R1 = [
         "cannot be verified with actual documentation, it must be corrected or "
         "deleted under 15 U.S.C. section 1681i(a)(5). Please send me written results "
         "including who you contacted and what they provided."
+        "\n\n"
+        "At the conclusion of your investigation, I expect an updated copy of my "
+        "file along with a clear indication of which furnishers confirmed each "
+        "disputed item, which did not respond within the statutory window, and "
+        "which items were removed as a result."
     ),
     # Version F -- focuses on deletion demand, strong closer
     (
@@ -3724,6 +3735,12 @@ _OPENING_TEMPLATES_R1 = [
         "these accounts provide complete documentation: original agreements, "
         "full payment records, and any assignment records if the debt was sold "
         "or transferred. Please send me your written investigation results."
+        "\n\n"
+        "Any entry that the reporting company cannot substantiate with its own "
+        "records does not belong on my file, and the written outcome you provide "
+        "should separately identify which items were verified, which were corrected, "
+        "and which were removed under 15 U.S.C. section 1681i(a)(5)(A) as part of "
+        "this reinvestigation."
     ),
 ]
 
@@ -3735,6 +3752,7 @@ _OPENING_TEMPLATES_R2 = [
         "with the outcome. I am writing again to push for a real investigation, "
         "not just a form response that the information was verified."
         "\n\n"
+        "{bureau_response_summary}"
         "Under 15 U.S.C. section 1681i(a), the law requires an actual reasonable "
         "reinvestigation, which means going back to the reporting company and "
         "reviewing documentation, not just sending an automated inquiry and "
@@ -3754,6 +3772,7 @@ _OPENING_TEMPLATES_R2 = [
         "enough, so I am asking that you take another look, this time with "
         "actual documentation from the reporting companies."
         "\n\n"
+        "{bureau_response_summary}"
         "I know under 15 U.S.C. section 1681i(a) that a reasonable reinvestigation "
         "is required and that just confirming the data with the furnisher is not "
         "enough. I want real records reviewed. Under 15 U.S.C. section 1681i(a)(6)(B)(iii) "
@@ -3771,6 +3790,7 @@ _OPENING_TEMPLATES_R2 = [
         "writing back because the issues were not resolved to my satisfaction. "
         "I am asking you to take a closer look at {count}."
         "\n\n"
+        "{bureau_response_summary}"
         "What I need is a real investigation, not an automated check where "
         "someone at the reporting company clicks confirm and nothing gets reviewed. "
         "The Fair Credit Reporting Act (15 U.S.C. section 1681i(a)) requires a "
