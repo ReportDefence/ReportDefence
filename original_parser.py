@@ -1188,7 +1188,22 @@ def normalize_negative_type(acc: dict[str, Any]) -> str | None:
     balance  = acc.get("balance", "")
     past_due = acc.get("past_due", "")
 
-    # -- 0. Child support, section 1681s-1 special rules ------------------------
+    # -- 0a. Paid collection (was-a-collection remark) takes priority ----
+    # A child-support / family-support tradeline that ALSO carries a
+    # "was a collection account" or "charged off" remark is functionally
+    # a paid_collection. The remark is more specific than the account_type.
+    # FCRA-wise this maps to paid_collection_still_derogatory in collections.
+    paid_collection_remarks = (
+        "was a collection", "collection account", "charged off",
+        "charge off", "chargeoff", "profit and loss",
+        "terminated for default", "settled for less", "deed in lieu",
+    )
+    if "paid" in status and any(k in (raw + " " + comments) for k in paid_collection_remarks):
+        return "paid_collection"
+
+    # -- 0b. Child support, section 1681s-1 special rules ------------------------
+    # Only after paid_collection check; otherwise a child-support account
+    # with a was-a-collection remark would never reach the collection branch.
     acct_detail = safe_lower(acc.get("account_type_detail", ""))
     if any(k in acct_detail for k in ["child support", "family support", "spousal support"]):
         return "child_support"
