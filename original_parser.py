@@ -5461,6 +5461,94 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"cannot be established, the late mark should come off."
             )
 
+    # -- DATA-DRIVEN SPECIFIC FALLBACK --------------------------------------
+    # Even when no specialized attack_type was assigned upstream, build a
+    # targeted accuracy argument from fields already present on the item, so
+    # the paragraph reads as specifically as a detected-attack paragraph
+    # instead of dropping straight into the generic pool below.
+    elif (
+        ("(original creditor:" in safe_lower(furnisher))
+        or is_collector_name(furnisher)
+        or neg_type in ("collection", "paid_collection")
+    ):
+        if v2 == 0:
+            reason = (
+                "What is being reported here appears to be a third-party collection, "
+                "which triggers heightened verification requirements. The agency "
+                "cannot satisfy those by pointing back at its own data, it has to "
+                "produce the original signed contract, a documented chain of transfer "
+                "from the original creditor, and the actual date of first delinquency "
+                "from the creditor's own files. Reporting without being able to "
+                "produce those records does not meet the accuracy standard under "
+                "15 U.S.C. section 1681e(b)."
+            )
+        else:
+            reason = (
+                "This account is being reported by what appears to be a collection "
+                "company. Before I accept it as accurate, I need proof they have the "
+                "legal right to report it: the original signed agreement, a complete "
+                "chain of assignment from the original creditor, and the original date "
+                "of first delinquency from the original creditor's records. Without "
+                "all of that, this account cannot be verified under 15 U.S.C. section "
+                "1681e(b)."
+            )
+
+    elif is_closed and _parse_dollar(balance) > 0 and neg_type not in (
+        "charge_off", "charge_off_deficiency", "collection", "paid_collection"
+    ):
+        if v2 == 0:
+            reason = (
+                f"This account shows a status of '{status or pay_status}' but is still "
+                f"reporting a balance{bal_str}. A closed account that is not in "
+                "collection or charged off should carry a zero balance; when the "
+                "account closed, the creditor relationship ended. I am asking that "
+                "this discrepancy be investigated and either the balance be corrected "
+                "to zero or the status be updated to accurately reflect why a balance "
+                "remains."
+            )
+        else:
+            reason = (
+                f"There is a discrepancy on this account: it is marked closed yet a "
+                f"balance{bal_str} is still being reported. Those two facts do not fit "
+                "together for an account that is not in collection or charge-off, and "
+                "they cannot both be accurate under 15 U.S.C. section 1681e(b). I am "
+                "asking that the balance be corrected to zero or the status be updated "
+                "to explain why a balance remains."
+            )
+
+    elif pay_status and "paid" in safe_lower(pay_status) and _parse_dollar(past_due) > 0:
+        reason = (
+            f"This account is reported as paid yet still shows a past-due amount of "
+            f"{past_due}. A paid account cannot carry a past-due balance; these two "
+            "fields contradict each other and cannot both be accurate under "
+            "15 U.S.C. section 1681e(b). I am asking that the past-due figure be "
+            "corrected or the account be removed."
+        )
+
+    elif [c for c in (late_codes or []) if not str(c).startswith("CO:")] or neg_type == "late_payment":
+        _real = [c for c in (late_codes or []) if not str(c).startswith("CO:")]
+        _nums = [c for c in _real if str(c).isdigit()]
+        _worst = max(_nums, key=lambda x: int(x)) if _nums else (_real[0] if _real else "")
+        _late_txt = f" ({_worst}-day late mark)" if _worst else ""
+        if v2 == 0:
+            reason = (
+                f"I am disputing the late-payment history being reported on this "
+                f"account{_late_txt}. Payment history is held to the same accuracy "
+                "standard as every other field under 15 U.S.C. section 1681e(b). I am "
+                "asking the furnisher to produce the actual payment ledger showing the "
+                "exact dates of any late payments. If those records do not match what "
+                "is being reported, the payment history must be corrected."
+            )
+        else:
+            reason = (
+                f"The payment history on this account{_late_txt} does not look right "
+                f"to me. A late mark is a factual claim that has to be backed by the "
+                "furnisher's own records under 15 U.S.C. section 1681e(b). I am asking "
+                "for the dated payment ledger that supports every late mark being "
+                "reported. Anything that cannot be documented needs to be corrected or "
+                "removed."
+            )
+
     # -- FALLBACK: requires_basic_verification -----------------------------
     else:
         # v8 selects the OPENING variant (already has bureau shift applied).
