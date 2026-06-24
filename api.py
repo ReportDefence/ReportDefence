@@ -57,6 +57,22 @@ def _serialize_letter_input(lie: dict) -> dict:
     return out
 
 
+def _resolve_letter_input(result: dict, negatives: dict) -> dict:
+    """Prefer the letter_input_engine the connector already built (it runs the
+    full original_parser pipeline, including a base_tradeline_engine so
+    cross-bureau attacks fire). Only if that came back empty (connector hit its
+    own except branch) do we recompute from negatives as a backstop."""
+    lie = result.get("letter_input_engine") or {}
+    has_items = any(
+        len(items) > 0 for groups in lie.values() for items in groups.values()
+    )
+    if has_items:
+        return _serialize_letter_input(lie)
+    return _serialize_letter_input(
+        _compute_letter_input(negatives, result.get("report_date", ""))
+    )
+
+
 # ─── Rate Limiting ────────────────────────────────────────────
 # In-memory store — resets on deploy, sufficient for brute force protection.
 # Key: sha256(endpoint:ip:email) → list of Unix timestamps
@@ -894,7 +910,7 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
                 "attacks":             result.get("attacks", []),
                 "inquiries":           result.get("inquiries", []),
                 "inquiry_attacks":     result.get("inquiry_attacks", []),
-                "letter_input_engine": _serialize_letter_input(_compute_letter_input(negatives, result.get("report_date", ""))),
+                "letter_input_engine": _resolve_letter_input(result, negatives),
                 "letters_generated":   False,
                 "letter_files":        [],
                 "response_history":    [],
