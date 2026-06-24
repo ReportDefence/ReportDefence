@@ -21,6 +21,42 @@ from pydantic import BaseModel
 import jwt as pyjwt
 from supabase import create_client, Client
 
+# ─── Shared detection helper ──────────────────────────────────────────────
+# Runs the SAME detection chain as original_parser.build_report on a plain
+# negatives_by_bureau dict, returning a real letter_input_engine with proper
+# attack_types + secondary_flags. The IdentityIQ connector intake paths and
+# the /generate-letters rebuild gate previously produced only the placeholder
+# attack_type="requires_basic_verification", which forced every account into
+# the generic dispute paragraph. This restores the specialized branches
+# (collector_original_creditor_self_declared, closed_with_balance, dofd, etc.).
+def _compute_letter_input(negatives_by_bureau: dict, report_date: str = "") -> dict:
+    from original_parser import (
+        build_dofd_engine, build_legal_detection_engine,
+        build_attack_scoring_engine, build_strategy_engine,
+        build_letter_input_engine,
+    )
+    enriched = build_dofd_engine(negatives_by_bureau or {}, report_date or "")
+    lde      = build_legal_detection_engine(
+        enriched, None, report_date=report_date or "", client_state=""
+    )
+    strat    = build_strategy_engine(build_attack_scoring_engine(lde))
+    return build_letter_input_engine(strat, enriched)
+
+
+def _serialize_letter_input(lie: dict) -> dict:
+    """Keep only JSON-serializable values so the structure can be stored."""
+    out = {}
+    for b, groups in (lie or {}).items():
+        out[b] = {}
+        for grp, items in groups.items():
+            out[b][grp] = [
+                {k: v for k, v in item.items()
+                 if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                for item in items
+            ]
+    return out
+
+
 # ─── Rate Limiting ────────────────────────────────────────────
 # In-memory store — resets on deploy, sufficient for brute force protection.
 # Key: sha256(endpoint:ip:email) → list of Unix timestamps
@@ -858,7 +894,7 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
                 "attacks":             result.get("attacks", []),
                 "inquiries":           result.get("inquiries", []),
                 "inquiry_attacks":     result.get("inquiry_attacks", []),
-                "letter_input_engine": {b: {} for b in ["transunion", "experian", "equifax"]},
+                "letter_input_engine": _serialize_letter_input(_compute_letter_input(negatives, result.get("report_date", ""))),
                 "letters_generated":   False,
                 "letter_files":        [],
                 "response_history":    [],
@@ -986,6 +1022,18 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
           - recommended_round
           + all optional date/balance fields _account_reason uses
         """
+        # PRIMARY: run the real detection chain so letters get specific
+        # attack_types instead of the generic placeholder. report_date is
+        # captured from the enclosing /generate-letters scope.
+        try:
+            _real = _compute_letter_input(negatives_by_bureau, report_date)
+            if any(len(items) > 0
+                   for groups in _real.values() for items in groups.values()):
+                return _real
+        except Exception as _e:
+            print(f"[generate-letters] detection rebuild failed, "
+                  f"falling back to basic verification: {_e}")
+        # FALLBACK (only reached if detection produced nothing):
         # Map from category key → singular negative_type value the engine expects
         _CAT_TO_NEG_TYPE = {
             "collections":      "collection",
