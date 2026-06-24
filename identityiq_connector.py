@@ -347,6 +347,35 @@ _PAY_HISTORY_CHAR_MAP = {
     "-": "--",
 }
 
+# Chars IdentityIQ uses to say "no data was reported for this month".
+_PAY_NO_DATA_CHARS = {"U", "N", "-"}
+
+
+def _resolve_pay_value(status_char: str) -> str:
+    """Map a MonthlyPayStatus @status char to a grid value.
+
+    Guarantee: a month that HAS an entry is never rendered as a bare dash.
+    - Known delinquency chars -> their code (30..180 / CO)
+    - Current / paid-as-agreed ("0","C") -> "OK"
+    - Explicit no-data markers (U / N / -) -> "ND"  (frontend shows a dash)
+    - Anything else present (blank or unknown char) -> "OK"
+      (an entry exists = the month was reported; if it is not a known
+      delinquency or an explicit no-data marker, it is a current month)
+    Only a month with NO entry at all, or value == "ND", should render as
+    a dash in the UI.
+    """
+    s = (status_char or "").strip().upper()
+    if s in ("0", "C"):
+        return "OK"
+    if s in ("1", "2", "3", "4", "5", "6"):
+        return _PAY_HISTORY_CHAR_MAP[s]
+    if s in ("7", "8", "9"):
+        return "CO"
+    if s in _PAY_NO_DATA_CHARS:
+        return "ND"
+    return "OK"
+
+
 _MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -484,7 +513,7 @@ def _parse_pay_status_history(gt: dict) -> tuple[list[dict], list[str]]:
     for entry in entries_chronological:
         date_iso = _safe(entry.get("@date"))
         status_char = _safe(entry.get("@status"))
-        value = _PAY_HISTORY_CHAR_MAP.get(status_char, status_char or "--")
+        value = _resolve_pay_value(status_char)
 
         month_abbr = ""
         year_str = ""
@@ -505,7 +534,7 @@ def _parse_pay_status_history(gt: dict) -> tuple[list[dict], list[str]]:
             "date":  date_iso,
         })
 
-        if value not in ("OK", "ND", "--", ""):
+        if value not in ("OK", "ND"):
             if month_abbr and year_str:
                 late_codes.append(f"{value}:{month_abbr}/{year_str}")
 
