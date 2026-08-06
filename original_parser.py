@@ -7881,6 +7881,7 @@ SOURCE_BUREAU_DIRECT_EXP= "bureau_direct_exp"
 SOURCE_BUREAU_DIRECT_EQ = "bureau_direct_eq"
 SOURCE_MYFICO           = "myfico"
 SOURCE_SMARTCREDIT      = "smartcredit"
+SOURCE_THREE_BUREAU     = "three_bureau"   # MyFreeScore / SmartCredit / ScoreSense
 SOURCE_UNKNOWN          = "unknown"
 
 
@@ -7900,7 +7901,9 @@ def detect_source(text: str) -> str:
         return SOURCE_MYFICO
 
     if "smartcredit" in t or "smart credit" in t:
-        return SOURCE_SMARTCREDIT
+        return SOURCE_THREE_BUREAU
+    if "three bureau credit report" in t:
+        return SOURCE_THREE_BUREAU
 
     # Bureau-direct signatures
     if "transunion" in t and "experian" not in t and "equifax" not in t:
@@ -9018,6 +9021,9 @@ def _is_boilerplate_ngram(ngram: tuple) -> bool:
 
 def build_report(pdf_path: str) -> dict[str, Any]:
     raw_text = extract_text_from_pdf(pdf_path)
+    if detect_source(raw_text[:3000]) == SOURCE_THREE_BUREAU:
+        import threebureau_adapter
+        return threebureau_adapter.build_report_threebureau(pdf_path)
     clean_text = normalize_text(raw_text)
     lines = split_lines(clean_text)
 
