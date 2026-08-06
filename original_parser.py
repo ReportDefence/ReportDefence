@@ -2607,11 +2607,496 @@ def detect_cross_bureau_late_date_conflict(
         ))
     return attacks
 
+def detect_transferred_sold_nonzero_balance_attacks(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Flag accounts where status/comments indicate the debt was sold or
+    transferred to a different entity, yet the originating furnisher
+    continues to report a non-zero balance on its own tradeline.
+
+    Under Metro 2 reporting standards, when an account is sold or
+    transferred, the original furnisher must report the balance as $0
+    on its tradeline (the new owner reports the live balance on a
+    separate tradeline). A non-zero balance combined with a transfer
+    status indicates inaccurate reporting under 15 U.S.C. section
+    1681e(b) and 15 U.S.C. section 1681s-2(a)(1).
+    """
+    TRANSFER_MARKERS = (
+        "transferred", "sold", "purchased by another lender",
+        "purchased by another", "account transferred to another",
+        "transferred to another lender", "account sold",
+        "sold to another lender", "account included in bankruptcy",
+    )
+
+    attacks: list[dict[str, Any]] = []
+    for acc in accounts:
+        # Combine all text-bearing fields, lowered, for keyword search.
+        status_text   = (acc.get("status", "") or "").lower()
+        payment_text  = (acc.get("payment_status", "") or "").lower()
+        comments_text = (acc.get("comments", "") or "").lower()
+        haystack = " ".join([status_text, payment_text, comments_text])
+
+        if not any(marker in haystack for marker in TRANSFER_MARKERS):
+            continue
+
+        balance = _parse_dollar(acc.get("balance", ""))
+        if balance <= 0:
+            continue
+
+        name     = acc.get("name", "")
+        acct_num = acc.get("account_number", "")
+        attacks.append(build_attack_record(
+            attack_type="transferred_sold_nonzero_balance",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681e_b", "FCRA_1681s_2_a_1", "metro_2_balance_post_transfer"],
+            reason=(
+                f"{name} (account {acct_num}) is reported with status or comments "
+                f"indicating the account was transferred or sold, yet it continues "
+                f"to show a non-zero balance of ${balance:.2f} on this furnisher's "
+                f"tradeline. Under Metro 2 reporting standards, a furnisher that "
+                f"sells or transfers an account must report the balance as zero on "
+                f"its own tradeline, the new owner reports the live balance on a "
+                f"separate tradeline. The current reporting overstates the consumer's "
+                f"outstanding debt and violates 15 U.S.C. section 1681e(b) and 15 "
+                f"U.S.C. section 1681s-2(a)(1). The balance must be corrected to "
+                f"zero or this tradeline must be deleted."
+            ),
+        ))
+    return attacks
+
+
+def detect_deceased_indicator_attacks(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Flag tradelines reporting the consumer as deceased when the consumer
+    is alive. The Metro 2 "X" code in the account status field, or the
+    word "deceased" appearing in status, payment_status, or comments,
+    triggers this detector.
+
+    Once any tradeline reports the consumer as deceased, downstream
+    systems (FICO scoring, automated lending, employment screening)
+    suppress the entire file. This is one of the most damaging single
+    errors that can appear on a credit report. The remedy is immediate
+    deletion and request that the bureau prevent reinsertion of the
+    deceased indicator.
+
+    Citations: 15 U.S.C. section 1681e(b) (maximum possible accuracy)
+    and 15 U.S.C. section 1681i(a) (reinvestigation duty).
+
+    NOTE: When this attack fires, the operator should treat the case
+    as priority. The operator confirms with the consumer that they are
+    alive before generating the bundle, since false-positive on this
+    flag could indicate a parsing artifact rather than a real X code.
+    """
+    DECEASED_MARKERS = ("deceased", "consumer deceased", "account holder deceased")
+    # Metro 2 status code "X" means deceased. We match it only when it
+    # appears as a standalone token in account_status, not when it is a
+    # substring of something else (e.g. "XB", "XC", "EXEMPT").
+    import re as _re_d
+    X_CODE_RE = _re_d.compile(r"(?:^|[^A-Za-z0-9])X(?:$|[^A-Za-z0-9])")
+
+    attacks: list[dict[str, Any]] = []
+    for acc in accounts:
+        status_text   = (acc.get("status", "") or "").lower()
+        payment_text  = (acc.get("payment_status", "") or "").lower()
+        comments_text = (acc.get("comments", "") or "").lower()
+        haystack = " ".join([status_text, payment_text, comments_text])
+
+        fired = False
+        if any(marker in haystack for marker in DECEASED_MARKERS):
+            fired = True
+        else:
+            # X code check on raw (not lowered) status / payment fields.
+            raw_status  = acc.get("status", "") or ""
+            raw_payment = acc.get("payment_status", "") or ""
+            if X_CODE_RE.search(raw_status) or X_CODE_RE.search(raw_payment):
+                fired = True
+
+        if not fired:
+            continue
+
+        name     = acc.get("name", "")
+        acct_num = acc.get("account_number", "")
+        attacks.append(build_attack_record(
+            attack_type="deceased_indicator_present",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681e_b", "FCRA_1681i_a", "deceased_indicator"],
+            reason=(
+                f"{name} (account {acct_num}) is reported with a deceased "
+                f"indicator on the consumer's credit file. The consumer is "
+                f"alive. A deceased indicator suppresses the entire credit "
+                f"file from scoring systems and triggers automatic adverse "
+                f"action on loan, housing, and employment applications. Under "
+                f"15 U.S.C. section 1681e(b), this bureau is required to "
+                f"maintain reasonable procedures to assure maximum possible "
+                f"accuracy. Reporting a living consumer as deceased fails "
+                f"that standard. The deceased indicator must be removed "
+                f"immediately and the bureau must implement procedures under "
+                f"15 U.S.C. section 1681i(a)(5) to prevent reinsertion."
+            ),
+        ))
+    return attacks
+
+
+def detect_dispute_active_unresolved_attacks(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Flag tradelines whose comments confirm a prior dispute is on file
+    yet the account remains classified as derogatory. The phrase
+    "ITEM IN DISPUTE BY CONSUMER", "CONSUMER STATEMENT", or "Account
+    was in dispute" appearing in tradeline comments confirms that the
+    bureau or furnisher processed a dispute via e-OSCAR. When such a
+    dispute marker coexists with a derogatory payment status (Late,
+    Collection, Charge-off, Derogatory), the bureau and furnisher have
+    failed to resolve the dispute in the consumer's favor under 15
+    U.S.C. section 1681i(a) and 15 U.S.C. section 1681s-2(b).
+
+    The attack frames the unresolved dispute as the failure point:
+    a dispute was raised, the consumer statement persists, yet the
+    derogatory mark stands without verifying documentation.
+    """
+    DISPUTE_MARKERS = (
+        "item in dispute by consumer",
+        "consumer statement",
+        "account was in dispute",
+        "account in dispute",
+        "dispute resolved",
+        "now resolved - reported by",
+        "dispute investigation",
+    )
+
+    # Status / payment_status patterns considered derogatory enough
+    # to require resolution. A "current" or "paid" status with a
+    # dispute marker is a different attack (covered elsewhere or not
+    # actionable as 1681i failure).
+    DEROGATORY_PAYMENT_PATTERNS = (
+        "late", "collection", "chargeoff", "charge-off",
+        "charge off", "derogatory", "collection/chargeoff",
+    )
+
+    attacks: list[dict[str, Any]] = []
+    for acc in accounts:
+        comments_text = (acc.get("comments", "") or "").lower()
+        if not any(m in comments_text for m in DISPUTE_MARKERS):
+            continue
+
+        payment_text = (acc.get("payment_status", "") or "").lower()
+        if not any(p in payment_text for p in DEROGATORY_PAYMENT_PATTERNS):
+            continue
+
+        name     = acc.get("name", "")
+        acct_num = acc.get("account_number", "")
+        # Capture which marker fired for the reason narrative.
+        fired_marker = next((m for m in DISPUTE_MARKERS if m in comments_text), "dispute marker")
+        attacks.append(build_attack_record(
+            attack_type="dispute_active_unresolved",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681i_a", "FCRA_1681e_b", "FCRA_1681s_2_b",
+                           "consumer_statement_dispute"],
+            reason=(
+                f"{name} (account {acct_num}) carries a tradeline comment "
+                f"confirming a prior consumer dispute is on file (the comment "
+                f"includes language such as \"{fired_marker}\"), and the "
+                f"account continues to be classified as derogatory in the "
+                f"payment status field. Under 15 U.S.C. section 1681i(a), "
+                f"once a dispute is raised the bureau is required to conduct "
+                f"a reasonable reinvestigation and either correct or delete "
+                f"the disputed information. The persistence of derogatory "
+                f"reporting alongside an unresolved consumer statement "
+                f"indicates that the reinvestigation either did not occur "
+                f"or was inadequate. The furnisher's parallel duty under 15 "
+                f"U.S.C. section 1681s-2(b) likewise requires investigation "
+                f"and correction of any information that cannot be verified. "
+                f"This tradeline must be deleted or fully corrected."
+            ),
+        ))
+    return attacks
+
+
+def detect_pay_for_delete_evidence_pattern_attacks(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Flag tradelines whose comments show simultaneous markers of (a) a
+    payment having been applied after a charge-off or collection event,
+    and (b) a dispute resolution by the grantor. This combination is
+    the e-OSCAR audit trail of a pay-for-delete or settled-with-
+    derogatory pattern: the consumer paid, the dispute was processed,
+    yet the tradeline still reflects a derogatory historical status
+    instead of being corrected to a clean paid status with zero
+    derogatory payment history.
+
+    Citations: 15 U.S.C. section 1681e(b), 1681s-2(a)(1), 1681s-2(b).
+    """
+    POST_PAYMENT_MARKERS = (
+        "payment after charge off",
+        "payment after collection",
+        "payment after charge off/collection",
+        "paid after charge off",
+        "paid after collection",
+    )
+    GRANTOR_RESOLUTION_MARKERS = (
+        "dispute resolved",
+        "reported by grantor",
+        "reported by subscriber",
+        "now resolved - reported by",
+    )
+
+    attacks: list[dict[str, Any]] = []
+    for acc in accounts:
+        comments_text = (acc.get("comments", "") or "").lower()
+        has_post_payment   = any(m in comments_text for m in POST_PAYMENT_MARKERS)
+        has_grantor_resolv = any(m in comments_text for m in GRANTOR_RESOLUTION_MARKERS)
+        if not (has_post_payment and has_grantor_resolv):
+            continue
+
+        name     = acc.get("name", "")
+        acct_num = acc.get("account_number", "")
+        payment_status = acc.get("payment_status", "")
+        status         = acc.get("status", "")
+        attacks.append(build_attack_record(
+            attack_type="pay_for_delete_evidence_pattern",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681e_b", "FCRA_1681s_2_a_1", "FCRA_1681s_2_b",
+                           "post_payment_unresolved"],
+            reason=(
+                f"{name} (account {acct_num}) carries tradeline comments that "
+                f"document, simultaneously, a payment having been applied "
+                f"after a charge-off or collection event, and a dispute "
+                f"resolution reported by the grantor. The account currently "
+                f"reports status \"{status}\" and payment status "
+                f"\"{payment_status}\". Once a payment is applied after a "
+                f"charge-off and the grantor processes the dispute, the "
+                f"furnisher is obligated under 15 U.S.C. section "
+                f"1681s-2(a)(1) to report only complete and accurate "
+                f"information. The continued derogatory status is "
+                f"inconsistent with the post-payment grantor resolution "
+                f"recorded in the same tradeline. Under 15 U.S.C. section "
+                f"1681e(b) and 1681s-2(b), this tradeline must be updated "
+                f"to reflect the resolution or deleted entirely."
+            ),
+        ))
+    return attacks
+
+
+def detect_disputed_status_not_flagged_attacks(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+    confirmed_dispute_records: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Flag tradelines where the consumer has confirmed sending a direct
+    dispute to the furnisher or to the bureau, yet the tradeline does
+    not show a dispute marker in its comments. Under 15 U.S.C. section
+    1681s-2(a)(3), a furnisher that receives notice of a consumer
+    dispute is required to notify the consumer reporting agency that
+    the information is disputed. Under FDCPA 15 U.S.C. section 1692e(8),
+    a debt collector may not communicate credit information that the
+    collector knows or should know to be disputed without disclosing
+    the dispute.
+
+    This detector requires explicit input from the operator: the list
+    of confirmed prior disputes for this consumer (e.g., dispute date,
+    target furnisher name, target bureau, account number prefix). If
+    no records are provided, the detector is a no-op and returns an
+    empty list. This guarantees zero regression on cases where the
+    operator has not confirmed any prior disputes.
+
+    Parameter:
+        confirmed_dispute_records: list of dicts, each shaped as:
+            {
+                "furnisher_name":   str,  # name as it appears on report
+                "account_number":   str,  # last 4 or masked form acceptable
+                "bureau":           str,  # transunion | experian | equifax
+                "dispute_date":     str,  # informational; not used for match
+            }
+    """
+    if not confirmed_dispute_records:
+        return []
+
+    DISPUTE_MARKERS_LOWER = (
+        "item in dispute by consumer",
+        "consumer statement",
+        "account was in dispute",
+        "account in dispute",
+        "dispute resolved",
+        "xb",  # Metro 2 compliance condition code for dispute by consumer
+    )
+
+    attacks: list[dict[str, Any]] = []
+    for acc in accounts:
+        acc_name = (acc.get("name", "") or "")
+        acc_num  = (acc.get("account_number", "") or "")
+
+        # Find any operator record that targets THIS bureau + furnisher
+        # + account (account number match is suffix-based since the
+        # operator may pass last 4 digits and we have masked form).
+        def _matches(rec: dict[str, Any]) -> bool:
+            if rec.get("bureau", "").lower() != bureau.lower():
+                return False
+            rec_name = (rec.get("furnisher_name", "") or "").upper()
+            if rec_name and rec_name not in acc_name.upper():
+                return False
+            rec_acct = (rec.get("account_number", "") or "")
+            if not rec_acct:
+                return True  # name-only match
+            # suffix match on last 4 digits (strip non-digits)
+            rec_digits = "".join(c for c in rec_acct if c.isdigit())
+            acc_digits = "".join(c for c in acc_num    if c.isdigit())
+            if rec_digits and acc_digits and rec_digits[-4:] != acc_digits[-4:]:
+                return False
+            return True
+
+        if not any(_matches(r) for r in confirmed_dispute_records):
+            continue
+
+        comments_text = (acc.get("comments", "") or "").lower()
+        if any(m in comments_text for m in DISPUTE_MARKERS_LOWER):
+            # The dispute IS flagged; no violation here.
+            continue
+
+        # Operator confirms dispute was sent, but tradeline carries no
+        # dispute marker. That is the violation.
+        dispute_date = next(
+            (r.get("dispute_date", "") for r in confirmed_dispute_records if _matches(r)),
+            "",
+        )
+        attacks.append(build_attack_record(
+            attack_type="disputed_status_not_flagged",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681s_2_a_3", "FDCPA_1692e_8",
+                           "compliance_condition_code_missing"],
+            reason=(
+                f"{acc_name} (account {acc_num}) is reported without any "
+                f"dispute indicator in the tradeline comments, even though "
+                f"the consumer submitted a formal dispute regarding this "
+                f"account"
+                + (f" on {dispute_date}" if dispute_date else "")
+                + f". Under 15 U.S.C. section 1681s-2(a)(3), a furnisher "
+                f"that receives notice of a consumer dispute is required "
+                f"to notify each consumer reporting agency that the "
+                f"information is disputed. The absence of a dispute "
+                f"compliance condition code (such as XB) on this tradeline "
+                f"indicates the furnisher failed that statutory duty. For "
+                f"any portion of this account that was placed for "
+                f"collection, the corresponding requirement under FDCPA 15 "
+                f"U.S.C. section 1692e(8) is also implicated. The dispute "
+                f"status must be added to the tradeline immediately or the "
+                f"account must be deleted as unverifiable."
+            ),
+        ))
+    return attacks
+
+
+def detect_mixed_file_contamination_attacks(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+    contamination_signals: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Flag tradelines, aliases, or addresses on the consumer's file that
+    the consumer does not recognize, suggesting the bureau's matching
+    logic has folded another consumer's data into this consumer's file.
+    Mixed-file errors violate 15 U.S.C. section 1681e(b) at the file
+    level, not just at the tradeline level. Under TransUnion v.
+    Ramirez (2021) and progeny, mixed-file harm establishes Article
+    III standing for FCRA claims.
+
+    This detector requires explicit confirmation from the operator
+    that the consumer has reviewed and rejected specific items as
+    not belonging to them. If contamination_signals is None or empty,
+    the detector is a no-op and returns an empty list.
+
+    Parameter:
+        contamination_signals: dict of the form:
+            {
+                "unrecognized_furnishers":  [str, ...],  # furnisher names
+                "unrecognized_account_numbers": [str, ...],
+                "unrecognized_aliases":     [str, ...],
+                "unrecognized_addresses":   [str, ...],
+            }
+        Only the keys provided are used; missing keys are ignored.
+    """
+    if not contamination_signals:
+        return []
+
+    unrecognized_furnishers = {
+        f.upper().strip() for f in (contamination_signals.get("unrecognized_furnishers") or [])
+        if f
+    }
+    unrecognized_accounts = {
+        "".join(c for c in (a or "") if c.isdigit())[-4:]
+        for a in (contamination_signals.get("unrecognized_account_numbers") or [])
+        if a
+    }
+
+    attacks: list[dict[str, Any]] = []
+    for acc in accounts:
+        name_upper = (acc.get("name", "") or "").upper().strip()
+        acct_num   = acc.get("account_number", "") or ""
+        acct_last4 = "".join(c for c in acct_num if c.isdigit())[-4:]
+
+        flagged_by_furnisher = name_upper in unrecognized_furnishers
+        flagged_by_account   = bool(acct_last4) and acct_last4 in unrecognized_accounts
+
+        if not (flagged_by_furnisher or flagged_by_account):
+            continue
+
+        reason_parts = []
+        if flagged_by_furnisher:
+            reason_parts.append(
+                f"the consumer does not recognize the furnisher \"{acc.get('name','')}\""
+            )
+        if flagged_by_account:
+            reason_parts.append(
+                f"the consumer does not recognize the account number ending in {acct_last4}"
+            )
+        why = " and ".join(reason_parts)
+
+        attacks.append(build_attack_record(
+            attack_type="mixed_file_contamination",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681e_b", "FCRA_1681i_a", "mixed_file",
+                           "file_level_accuracy"],
+            reason=(
+                f"{acc.get('name','')} (account {acct_num}) appears on the "
+                f"consumer's credit file but {why}. This indicates a mixed "
+                f"or merged file: the bureau's automated matching logic has "
+                f"folded another consumer's tradeline data into this "
+                f"consumer's file. Under 15 U.S.C. section 1681e(b), the "
+                f"bureau is required to maintain reasonable procedures to "
+                f"assure maximum possible accuracy of all information in "
+                f"the consumer's report. Matching logic that conflates two "
+                f"different consumers fails that standard at the file level. "
+                f"This tradeline must be removed from the consumer's file, "
+                f"and the bureau must implement procedures under 15 U.S.C. "
+                f"section 1681i(a) to prevent the same matching error from "
+                f"reinserting the data."
+            ),
+        ))
+    return attacks
+
+
 def build_legal_detection_engine(
     negatives_by_bureau: dict[str, list[dict[str, Any]]],
     base_tradelines: list[dict[str, Any]] | None = None,
     report_date: str = "",
     client_state: str = "",
+    confirmed_dispute_records: list[dict[str, Any]] | None = None,
+    contamination_signals: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
 
@@ -2627,15 +3112,28 @@ def build_legal_detection_engine(
         bureau_attacks.extend(
             detect_single_bureau_collector_pattern(bureau, accounts, negatives_by_bureau)
         )
-        bureau_attacks.extend(
-            detect_absent_bureau_inconsistency(bureau, accounts, negatives_by_bureau)
-        )
+        # detect_absent_bureau_inconsistency disabled: no FCRA provision
+        # requires furnishers to report to all 3 bureaus. Selective bureau
+        # reporting is legal and common, so flagging it as an attack risks
+        # frivolous-dispute determinations from the bureaus, blocking
+        # downstream legitimate disputes. The detector function remains
+        # in the module for future reference but is not invoked.
 
         # --- DOFD attacks: section 1681c obsolete + re-aging + unknown ---
         bureau_attacks.extend(detect_obsolete_account_attacks(bureau, accounts))
         bureau_attacks.extend(detect_re_aging_attacks(bureau, accounts))
         bureau_attacks.extend(detect_dofd_unknown_attacks(bureau, accounts))
         bureau_attacks.extend(detect_late_payment_attacks(bureau, accounts))
+        bureau_attacks.extend(detect_transferred_sold_nonzero_balance_attacks(bureau, accounts))
+        bureau_attacks.extend(detect_deceased_indicator_attacks(bureau, accounts))
+        bureau_attacks.extend(detect_dispute_active_unresolved_attacks(bureau, accounts))
+        bureau_attacks.extend(detect_pay_for_delete_evidence_pattern_attacks(bureau, accounts))
+        bureau_attacks.extend(detect_disputed_status_not_flagged_attacks(
+            bureau, accounts, confirmed_dispute_records=confirmed_dispute_records,
+        ))
+        bureau_attacks.extend(detect_mixed_file_contamination_attacks(
+            bureau, accounts, contamination_signals=contamination_signals,
+        ))
         bureau_attacks.extend(
             detect_cross_bureau_late_date_conflict(bureau, accounts, negatives_by_bureau)
         )
@@ -2754,6 +3252,13 @@ def get_attack_severity_score(attack_type: str) -> int:
         "repossession_proceeds_not_credited": 92,
         "charge_off_balance_inflated": 88,
         "paid_collection_still_derogatory": 86,
+        # Tier 1 additions (2026-05)
+        "transferred_sold_nonzero_balance": 90,
+        "deceased_indicator_present": 99,
+        "dispute_active_unresolved": 87,
+        "pay_for_delete_evidence_pattern": 88,
+        "disputed_status_not_flagged": 90,
+        "mixed_file_contamination": 99,
     }
     return mapping.get(attack_type, 70)
 
@@ -2795,20 +3300,15 @@ def get_attack_priority(severity_score: int) -> str:
 
 
 def get_recommended_round(severity_score: int, attack_type: str) -> str:
-    # -------------------------------------------------------------------------
     # RULE: Every negative account starts at Round 1, always.
-    #
     # Round escalation (Round 2 -> Round 3 -> CFPB) is determined by the
     # bureau's response to a prior dispute, not by the attack type.
     # The attack type tells us HOW to argue, not WHEN to send.
-    #
     # Round 1  -> first dispute, no prior bureau response on record
     # Round 2  -> bureau responded "verified" or did not respond in 30 days
     # Round 3  -> bureau verified again without real documentation
     # CFPB     -> reinsertion, ignored disputes, bad-faith pattern
-    #
     # Escalation is handled by compare_rounds() when a prior result exists.
-    # -------------------------------------------------------------------------
     return "round_1"
 
 
@@ -3175,6 +3675,34 @@ def get_laws_for_attack(attack_type: str) -> list[str]:
             "15 USC 1681s-2(a)(1)",
             "15 USC 1681s-2(b)",
         ],
+        # Tier 1 additions (2026-05)
+        "transferred_sold_nonzero_balance": [
+            "15 USC 1681e(b)",
+            "15 USC 1681s-2(a)(1)",
+        ],
+        "deceased_indicator_present": [
+            "15 USC 1681e(b)",
+            "15 USC 1681i(a)",
+            "15 USC 1681i(a)(5)",
+        ],
+        "dispute_active_unresolved": [
+            "15 USC 1681i(a)",
+            "15 USC 1681e(b)",
+            "15 USC 1681s-2(b)",
+        ],
+        "pay_for_delete_evidence_pattern": [
+            "15 USC 1681e(b)",
+            "15 USC 1681s-2(a)(1)",
+            "15 USC 1681s-2(b)",
+        ],
+        "disputed_status_not_flagged": [
+            "15 USC 1681s-2(a)(3)",
+            "15 USC 1692e(8)",
+        ],
+        "mixed_file_contamination": [
+            "15 USC 1681e(b)",
+            "15 USC 1681i(a)",
+        ],
     }
     return mapping.get(attack_type, ["15 USC 1681e(b)", "15 USC 1681i(a)"])
 
@@ -3423,6 +3951,24 @@ def get_attack_rank_for_letter_input(attack_type: str) -> int:
         "late_collection_conflict":             85,
         "absent_bureau_reporting_inconsistency": 80,
         "requires_basic_verification":          40,
+        # Tier 1 additions (2026-05)
+        # deceased_indicator dominates everything: single most damaging mark.
+        "deceased_indicator_present":           102,
+        # transferred/sold balance > 0 is a clean Metro 2 violation,
+        # ranked just above generic accuracy attacks.
+        "transferred_sold_nonzero_balance":      91,
+        # pay_for_delete evidence is documented audit-trail material,
+        # stronger than generic dispute_active_unresolved.
+        "pay_for_delete_evidence_pattern":       89,
+        # dispute_active_unresolved is the broad coverage attack; ranks
+        # above paid_collection_still_derogatory (86) so it surfaces as
+        # primary when both apply.
+        "dispute_active_unresolved":             88,
+        # disputed_status_not_flagged is operator-confirmed, very strong.
+        "disputed_status_not_flagged":           93,
+        # mixed_file_contamination dominates everything below deceased:
+        # file-level error voids the basis of the entire tradeline.
+        "mixed_file_contamination":             101,
     }
     return rank.get(attack_type, 50)
 
@@ -3449,7 +3995,11 @@ def build_letter_input_engine(
             "collections":      [],   # collection + paid_collection (misma carta)
             "charge_offs":      [],   # charge_off + charge_off_deficiency
             "late_payments":    [],   # late_payment
-            "other_derogatory": [],   # repossession, bankruptcy, child_support, etc.
+            "repossessions":    [],   # repossession (UCC Art.9)
+            "bankruptcies":     [],   # bankruptcy / included-in-BK (1681c)
+            "child_support":    [],   # child/family/spousal support (1681s-1)
+            "other_derogatory": [],   # fallback: student_loan, derogatory, judgment,
+                                      # foreclosure, tax_lien (dormant until a case appears)
         }
 
         dedupe_map: dict[tuple[str, str], dict[str, Any]] = {}
@@ -3500,6 +4050,16 @@ def build_letter_input_engine(
                     "credit_limit":          account.get("credit_limit", ""),
                     "monthly_payment":       account.get("monthly_payment", ""),
                     "late_payment_codes":    account.get("late_payment_codes", []),
+                    # State medical-debt protection metadata (only populated
+                    # by detect_medical_debt_attacks for medical_debt_state_law
+                    # attacks; absent/empty for everything else). Carried
+                    # forward so _account_reason can render the specific
+                    # statute citation rather than a generic state-law line.
+                    "state_protection_law_name":   account.get("state_protection_law_name", ""),
+                    "state_protection_statute":    account.get("state_protection_statute", ""),
+                    "state_protection_state_name": account.get("state_protection_state_name", ""),
+                    "state_protection_effective":  account.get("state_protection_effective", ""),
+                    "state_protection_scope":      account.get("state_protection_scope", ""),
                 }
                 key = (entry["furnisher_name"], entry["account_number"])
                 existing = dedupe_map.get(key)
@@ -3582,6 +4142,12 @@ def build_letter_input_engine(
                 grouped["charge_offs"].append(entry)
             elif negative_type == "late_payment":
                 grouped["late_payments"].append(entry)
+            elif negative_type == "repossession":
+                grouped["repossessions"].append(entry)
+            elif negative_type == "bankruptcy":
+                grouped["bankruptcies"].append(entry)
+            elif negative_type == "child_support":
+                grouped["child_support"].append(entry)
             else:
                 grouped["other_derogatory"].append(entry)
 
@@ -4105,8 +4671,33 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     late_codes   = item.get("late_payment_codes", [])
     is_closed    = any(k in status.lower() for k in ("closed","paid","refinanced","settled"))
 
+    # Defensive: only obsolete_account_7yr_limit and potential_re_aging use
+    # {dofd} and {fcra_exp} directly in narrative variants. If the caller
+    # tagged an item with one of those attack_types but did not populate the
+    # date fields (e.g. compare_rounds upstream did not produce a DOFD
+    # estimate yet), fall through to the generic fallback narrative rather
+    # than rendering literal "around None. That pushes the FCRA expiration
+    # past None." in the letter. The legal argument cannot be made without
+    # the dates, so a generic "the reporting does not feel right" narrative
+    # is the safe default.
+    if attack_type in {"obsolete_account_7yr_limit", "potential_re_aging"} and (
+        not dofd or not fcra_exp
+    ):
+        attack_type = ""
+
+    # Retired attack types: forced to generic fallback so any stale
+    # snapshot tagged with one of these still produces a clean,
+    # defensible letter rather than a weak narrative. The detectors
+    # for these types have been disabled in build_legal_detection_engine
+    # and detect_inquiry_attacks respectively.
+    if attack_type in {
+        "absent_bureau_reporting_inconsistency",
+        "inquiry_multi_bureau_same_day",
+    }:
+        attack_type = ""
+
     # Build contextual detail strings used across multiple attack types
-    bal_str   = f" of ${balance}"   if balance and balance not in ("0","0.0","$0.00","") else ""
+    bal_str   = f" of ${str(balance).replace('$','').strip()}"   if balance and balance not in ("0","0.0","$0.00","") else ""
     _last4 = last_four_digits(acct)
     acct_str  = f" (account ending {_last4})" if _last4 else (f" (account {acct})" if acct else "")
     open_str  = f" opened {date_opened}" if date_opened else ""
@@ -4118,14 +4709,12 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     # pools (the tightest constraint), we rely on the item's hash to ensure
     # the three bureaus don't all collide: TU and EQF take opposite slots
     # based on account parity, while EXP always shifts by 1.
-    #
     # Why this works:
     #   - 2-variant pool: EXP differs from TU by 1. EQF differs from both
     #     (when possible) by using account-level parity.
     #   - 3-variant pool: TU=0, EXP=1, EQF=2, all three guaranteed different.
     #   - 4-variant pool: TU=0, EXP=1, EQF=3, all three guaranteed different.
     #   - 8-variant pool: TU=0, EXP=3, EQF=5, large spacing, all different.
-    #
     # The result: cross-bureau duplicate variants are impossible regardless
     # of the attack pool's size.
     if bureau:
@@ -5213,15 +5802,69 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- MEDICAL DEBT STATE LAW --------------------------------------------
     elif attack_type == "medical_debt_state_law":
-        reason = (
-            f"This medical collection from them is being reported "
-            f"for a consumer in a state that has enacted legal protections "
-            f"specifically prohibiting medical debt from appearing on consumer credit "
-            f"reports. Reporting this account violates applicable state law. Under "
-            f"15 U.S.C. section 1681e(b), the bureau must maintain maximum possible "
-            f"accuracy, which includes compliance with state-level restrictions. "
-            f"I am requesting immediate removal of this account."
-        )
+        # Read state-law metadata from item; embedded by
+        # detect_medical_debt_attacks when the attack qualifies.
+        sp_law       = item.get("state_protection_law_name", "")
+        sp_statute   = item.get("state_protection_statute", "")
+        sp_state     = item.get("state_protection_state_name", "")
+        sp_effective = item.get("state_protection_effective", "")
+        sp_scope     = item.get("state_protection_scope", "all_medical_debt")
+
+        # Scope phrasing: laws like Connecticut P.A. 24-148 cover only
+        # hospital medical debt. Reflect that in the narrative.
+        if sp_scope == "hospital_medical_debt_only":
+            scope_phrase = (
+                f"hospital medical debt from being reported on consumer "
+                f"credit reports"
+            )
+        else:
+            scope_phrase = (
+                f"medical debt from being reported on consumer credit reports"
+            )
+
+        # Defensive fallback: if for any reason the metadata did not
+        # propagate (e.g., legacy snapshot, upstream change), fall back
+        # to a generic-but-honest narrative rather than rendering "None"
+        # or empty placeholders.
+        if not sp_law or not sp_state:
+            reason = (
+                f"This medical collection from them is being "
+                f"reported for a consumer in a state that has enacted a law "
+                f"prohibiting medical debt from being reported on consumer "
+                f"credit reports. The reporting of this account is contrary "
+                f"to that state-level prohibition. I am asking that the "
+                f"reporting be reviewed against the applicable state law "
+                f"and the entry removed if the prohibition applies."
+            )
+        else:
+            if v3 == 0:
+                reason = (
+                    f"This medical collection from them is "
+                    f"being reported for a consumer in {sp_state}. "
+                    f"{sp_state} enacted {sp_law}, codified at "
+                    f"{sp_statute}, effective {sp_effective}, which "
+                    f"prohibits {scope_phrase}. The reporting of this "
+                    f"account is in direct violation of that statute. I am "
+                    f"asking for its removal from my credit file."
+                )
+            elif v3 == 1:
+                reason = (
+                    f"Under {sp_law} ({sp_statute}), in effect "
+                    f"in {sp_state} since {sp_effective}, this medical "
+                    f"collection from them is not permitted on a "
+                    f"consumer credit report. The state statute prohibits "
+                    f"{scope_phrase}, and this account falls within that "
+                    f"prohibition. I am asking that it be removed."
+                )
+            else:
+                reason = (
+                    f"{sp_state} law, specifically {sp_law} "
+                    f"({sp_statute}, effective {sp_effective}), prohibits "
+                    f"{scope_phrase}. This medical collection from them "
+                    f"is being reported in violation of that prohibition. "
+                    f"I am requesting that the entry be removed from my "
+                    f"credit file in compliance with the statute."
+                )
 
     # -- MEDICAL DEBT ACCURACY ---------------------------------------------
     elif attack_type == "medical_debt_accuracy":
@@ -5303,45 +5946,10 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             f"notation be removed."
         )
 
-    # -- ABSENT BUREAU REPORTING INCONSISTENCY -----------------------------
-    elif attack_type == "absent_bureau_reporting_inconsistency":
-        if v4 == 0:
-            reason = (
-                f"This account is showing as a negative "
-                f"item here but does not appear consistently across all three bureaus. "
-                f"If the information is accurate and verifiable, I would expect it to "
-                f"be reported the same way everywhere. The inconsistency makes me "
-                f"question whether this reporting is accurate. I am asking that it be "
-                f"verified, and if it cannot be confirmed as accurate and complete, removed."
-            )
-        elif v4 == 1:
-            reason = (
-                f"I noticed this account appears here "
-                f"as a negative item but is not showing up the same way at all bureaus. "
-                f"Under 15 U.S.C. section 1681e(b), every bureau must maintain maximum "
-                f"possible accuracy. An item that cannot be reported consistently "
-                f"raises serious concerns about its accuracy and needs to be "
-                f"fully verified or removed."
-            )
-        elif v4 == 2:
-            reason = (
-                f"The reporting on this account is not "
-                f"consistent. It shows as a derogatory item at this bureau but "
-                f"not at others in the same way. That inconsistency suggests the "
-                f"furnisher may be selectively reporting or reporting information "
-                f"that cannot be verified across all three bureaus. I am asking "
-                f"for full verification and removal if it cannot be confirmed "
-                f"as accurate at all bureaus."
-            )
-        else:
-            reason = (
-                f"This account appears as a negative here "
-                f"but the reporting is inconsistent across bureaus. A furnisher "
-                f"who reports to one bureau but not others, or reports different "
-                f"information, creates an accuracy problem. Under 15 U.S.C. "
-                f"section 1681e(b), I am requesting verification and deletion if the "
-                f"account cannot be reported accurately and consistently."
-            )
+    # -- ABSENT BUREAU REPORTING INCONSISTENCY (RETIRED) -------------------
+    # Detector disabled. Forced to generic fallback above the if/elif
+    # chain (see defensive attack_type clearing block). This branch
+    # remains as documentation only and is unreachable in normal flow.
 
     # -- LATE PAYMENT HISTORY DISPUTE --------------------------------------
     elif attack_type == "late_payment_history_dispute":
@@ -5461,93 +6069,306 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"cannot be established, the late mark should come off."
             )
 
-    # -- DATA-DRIVEN SPECIFIC FALLBACK --------------------------------------
-    # Even when no specialized attack_type was assigned upstream, build a
-    # targeted accuracy argument from fields already present on the item, so
-    # the paragraph reads as specifically as a detected-attack paragraph
-    # instead of dropping straight into the generic pool below.
-    elif (
-        ("(original creditor:" in safe_lower(furnisher))
-        or is_collector_name(furnisher)
-        or neg_type in ("collection", "paid_collection")
-    ):
-        if v2 == 0:
+    # ATTACK NARRATIVES, GROUP 2 (added in audit cycle)
+    # Each of these attack_types previously fell through to the generic
+    # requires_basic_verification fallback, losing the specific legal
+    # anchor. Adding dedicated narratives so the detected attack actually
+    # reaches the bureau in the letter.
+
+    # -- BANKRUPTCY: included but still showing active ---------------------
+    elif attack_type == "bankruptcy_included_still_active":
+        if v3 == 0:
             reason = (
-                "What is being reported here appears to be a third-party collection, "
-                "which triggers heightened verification requirements. The agency "
-                "cannot satisfy those by pointing back at its own data, it has to "
-                "produce the original signed contract, a documented chain of transfer "
-                "from the original creditor, and the actual date of first delinquency "
-                "from the creditor's own files. Reporting without being able to "
-                "produce those records does not meet the accuracy standard under "
-                "15 U.S.C. section 1681e(b)."
+                f"This account from them was included in my "
+                f"bankruptcy and discharged{bal_str}, yet it continues to report "
+                f"with an active balance and a derogatory status. The bankruptcy "
+                f"discharge under 11 U.S.C. section 524 wiped out my personal "
+                f"liability for this debt, and the furnisher is required to update "
+                f"the reporting to show 'Included in Bankruptcy' with a zero "
+                f"balance. Continuing to show this as an active derogatory account "
+                f"misrepresents my legal obligation and violates 15 U.S.C. section "
+                f"1681e(b). I am asking for the discharge documentation to be "
+                f"reflected and the account corrected or deleted."
+            )
+        elif v3 == 1:
+            reason = (
+                f"This debt from them was discharged in my "
+                f"bankruptcy proceeding. Under 11 U.S.C. section 524, the discharge "
+                f"is a permanent injunction against any attempt to collect or report "
+                f"the debt as still owed. The current reporting{bal_str} shows the "
+                f"account as if I still owe it, which directly contradicts the "
+                f"discharge order. Federal law requires this to be updated to reflect "
+                f"the discharge and the account zeroed out. I am asking that the "
+                f"reporting be corrected or the entry deleted."
             )
         else:
             reason = (
-                "This account is being reported by what appears to be a collection "
-                "company. Before I accept it as accurate, I need proof they have the "
-                "legal right to report it: the original signed agreement, a complete "
-                "chain of assignment from the original creditor, and the original date "
-                "of first delinquency from the original creditor's records. Without "
-                "all of that, this account cannot be verified under 15 U.S.C. section "
-                "1681e(b)."
+                f"This account from them was part of my "
+                f"bankruptcy and was discharged. The reporting still shows{bal_str} "
+                f"with a derogatory active status. After a discharge, 15 U.S.C. "
+                f"section 1681e(b) requires accurate reporting of the post-discharge "
+                f"status: included in bankruptcy, balance zero, no further past-due. "
+                f"What is on my report does not match the legal reality. I am asking "
+                f"for verification of the discharge and correction of the reporting."
             )
 
-    elif is_closed and _parse_dollar(balance) > 0 and neg_type not in (
-        "charge_off", "charge_off_deficiency", "collection", "paid_collection"
-    ):
+    # -- BANKRUPTCY: reporting period exceeded -----------------------------
+    elif attack_type == "bankruptcy_reporting_period_exceeded":
         if v2 == 0:
             reason = (
-                f"This account shows a status of '{status or pay_status}' but is still "
-                f"reporting a balance{bal_str}. A closed account that is not in "
-                "collection or charged off should carry a zero balance; when the "
-                "account closed, the creditor relationship ended. I am asking that "
-                "this discrepancy be investigated and either the balance be corrected "
-                "to zero or the status be updated to accurately reflect why a balance "
-                "remains."
+                f"This bankruptcy entry has been on my credit "
+                f"report longer than the period permitted under 15 U.S.C. section "
+                f"1681c(a)(1), which limits bankruptcy reporting to 10 years from "
+                f"the date of filing or order for relief. The age of this filing "
+                f"places it outside that window. The Fair Credit Reporting Act "
+                f"prohibits a consumer reporting agency from continuing to report "
+                f"this information past the statutory cutoff. I am asking that the "
+                f"entry be removed."
             )
         else:
             reason = (
-                f"There is a discrepancy on this account: it is marked closed yet a "
-                f"balance{bal_str} is still being reported. Those two facts do not fit "
-                "together for an account that is not in collection or charge-off, and "
-                "they cannot both be accurate under 15 U.S.C. section 1681e(b). I am "
-                "asking that the balance be corrected to zero or the status be updated "
-                "to explain why a balance remains."
+                f"This bankruptcy filing is older than the "
+                f"reporting period allowed under 15 U.S.C. section 1681c(a)(1). "
+                f"That section sets a 10-year ceiling on bankruptcy reporting "
+                f"running from the filing date. The age of this entry on my "
+                f"report has crossed that line and the bureau is required to "
+                f"stop reporting it. I am asking for its removal."
             )
 
-    elif pay_status and "paid" in safe_lower(pay_status) and _parse_dollar(past_due) > 0:
+    # -- CHARGE-OFF: balance inflated post-charge-off ----------------------
+    elif attack_type == "charge_off_balance_inflated":
+        if v3 == 0:
+            reason = (
+                f"This charge-off from them is reporting{bal_str}, "
+                f"but a charge-off balance is supposed to be frozen at the moment the "
+                f"creditor charged the account off. After charge-off the creditor "
+                f"removes the receivable from active accounts and stops accruing "
+                f"interest as if the loan were still performing. Continuing to grow "
+                f"the balance after charge-off misrepresents what is actually owed "
+                f"and violates 15 U.S.C. section 1681s-2(a)(1). I am asking for the "
+                f"original charge-off amount and date, with all post-charge-off "
+                f"increases removed."
+            )
+        elif v3 == 1:
+            reason = (
+                f"The balance on this charge-off from them is "
+                f"showing{bal_str} and appears to have grown beyond the amount that "
+                f"existed when the account was charged off. Under 15 U.S.C. section "
+                f"1681e(b), the reported balance must be accurate. A charge-off "
+                f"balance freezes at the date of the charge-off; only payments and "
+                f"valid post-charge-off fees can change it. I am requesting an "
+                f"itemized accounting of the balance as of charge-off and any "
+                f"adjustments made since, with documentation."
+            )
+        else:
+            reason = (
+                f"This charge-off from them shows a balance{bal_str} "
+                f"that does not appear consistent with how a charge-off should be "
+                f"reported. Once an account is charged off the lender writes off the "
+                f"loss for accounting purposes and the figure should not continue to "
+                f"climb as if the account were performing. I am asking for the "
+                f"original charge-off date, the balance on that date, and an "
+                f"itemized record of any legitimate adjustments since."
+            )
+
+    # -- CHILD SUPPORT: derogatory entry -----------------------------------
+    elif attack_type == "child_support_derogatory":
+        if v2 == 0:
+            reason = (
+                f"This child support entry from them is being "
+                f"reported as a derogatory item on my credit file. Child support "
+                f"reporting is governed by 15 U.S.C. section 1681s-1, which sets "
+                f"specific requirements for how such information may be furnished, "
+                f"including verification through the appropriate state child "
+                f"support enforcement entity. I am asking for verification of how "
+                f"this information was sourced, the current status as confirmed by "
+                f"the state agency, and correction or removal if the reporting "
+                f"does not match the official record."
+            )
+        else:
+            reason = (
+                f"This child support entry from them must "
+                f"comply with the special handling rules in 15 U.S.C. section "
+                f"1681s-1. The data must be confirmed through the state agency "
+                f"of record and must reflect the current status of the obligation. "
+                f"I am requesting verification with the state child support "
+                f"enforcement entity and correction of any inaccurate status, or "
+                f"removal of the entry if it cannot be verified."
+            )
+
+    # -- COLLECTOR / ORIGINAL CREDITOR PATTERN -----------------------------
+    # Note: collector_original_creditor_pattern and
+    # collector_original_creditor_self_declared are handled earlier in the
+    # if/elif chain (see attack_type in {...} block above). No additional
+    # branch needed here.
+
+    # -- DUPLICATE ACCOUNT NUMBER ------------------------------------------
+    # Note: duplicate_account_number and same_account_number_same_balance
+    # are handled earlier in the if/elif chain (see attack_type in {...}
+    # block above). No additional branch needed here.
+
+    # -- CROSS-BUREAU FURNISHER IDENTITY SHIFT -----------------------------
+    elif attack_type == "cross_bureau_furnisher_identity_shift":
+        if v2 == 0:
+            reason = (
+                f"This account is showing under one furnisher "
+                f"name here and under a different furnisher name at another bureau, "
+                f"even though the underlying account is the same. A creditor's "
+                f"identity is one of the basic accuracy elements under 15 U.S.C. "
+                f"section 1681e(b), and an account cannot have two different "
+                f"reporting companies at the same time. Either the account was "
+                f"transferred and the bureau is not in sync, or one of the entries "
+                f"is wrong. I am asking for verification of the current legal "
+                f"holder of this account and consistent reporting across bureaus, "
+                f"or removal of the entry that does not reflect the actual furnisher."
+            )
+        else:
+            reason = (
+                f"The same account number on my file is "
+                f"appearing with one company name at this bureau and a different "
+                f"company name at another. The current legal holder of an account "
+                f"is a single party at any one time. Under 15 U.S.C. section "
+                f"1681e(b) the bureaus must report this consistently. I am asking "
+                f"for verification of who actually holds this account today and "
+                f"for the inconsistent furnisher entry to be corrected or removed."
+            )
+
+    # -- DUPLICATE ACCOUNT NUMBER ------------------------------------------
+    # Already handled earlier in the chain. No additional branch.
+
+    # -- PAID COLLECTION STILL DEROGATORY ----------------------------------
+    elif attack_type == "paid_collection_still_derogatory":
+        if v2 == 0:
+            reason = (
+                f"This collection from them shows as paid{bal_str}, "
+                f"yet the account continues to be classified as a derogatory item "
+                f"on my report. After a collection account is paid, the furnisher "
+                f"is required to update the status to reflect the resolution. "
+                f"Continuing to report it as actively derogatory after payment "
+                f"misrepresents the current state of the obligation and violates "
+                f"15 U.S.C. section 1681s-2(a)(1), which requires furnishers to "
+                f"correct and update reporting promptly when the underlying "
+                f"information changes. I am asking that the status be corrected "
+                f"to paid in full or the account removed."
+            )
+        else:
+            reason = (
+                f"This collection from them was paid, and yet the "
+                f"reporting still shows it as a derogatory account. The Fair Credit "
+                f"Reporting Act requires furnishers to provide accurate, current "
+                f"information under 15 U.S.C. section 1681s-2(a)(1). After "
+                f"satisfaction the account should not continue to be reported as "
+                f"actively derogatory. I am asking for verification that the payment "
+                f"was processed, an updated status reflecting resolution, or removal "
+                f"of the inaccurate derogatory classification."
+            )
+
+    # -- REPOSSESSION DEFICIENCY UNVERIFIED --------------------------------
+    elif attack_type == "repossession_deficiency_unverified":
+        if v2 == 0:
+            reason = (
+                f"This repossession from them is reporting a "
+                f"deficiency balance{bal_str}. A deficiency on a secured loan can "
+                f"only exist if the lender first conducted a commercially reasonable "
+                f"sale of the collateral and applied the proceeds to the loan, as "
+                f"required by Uniform Commercial Code Article 9 (sections 9-610 and "
+                f"9-615). Without documentation of that sale, the proceeds, and how "
+                f"the deficiency was calculated, the balance is not verifiable. "
+                f"Under 15 U.S.C. section 1681e(b) and 1681s-2(b), the furnisher "
+                f"must be able to support the reported figure. I am asking for the "
+                f"sale records, proceeds, and the deficiency calculation, or removal."
+            )
+        else:
+            reason = (
+                f"The deficiency balance from them on this "
+                f"repossession{bal_str} requires documentation. Under UCC Article 9 "
+                f"the lender must dispose of the collateral in a commercially "
+                f"reasonable manner, credit the proceeds to the loan, and only then "
+                f"can a deficiency be claimed. I am requesting the post-repossession "
+                f"sale paperwork, the amount obtained, the calculation of the "
+                f"remaining balance, and the notice to me of the sale. If those "
+                f"records cannot be produced, the reported balance is not verifiable "
+                f"under 15 U.S.C. section 1681s-2(b)."
+            )
+
+    # -- REPOSSESSION PROCEEDS NOT CREDITED --------------------------------
+    elif attack_type == "repossession_proceeds_not_credited":
         reason = (
-            f"This account is reported as paid yet still shows a past-due amount of "
-            f"{past_due}. A paid account cannot carry a past-due balance; these two "
-            "fields contradict each other and cannot both be accurate under "
-            "15 U.S.C. section 1681e(b). I am asking that the past-due figure be "
-            "corrected or the account be removed."
+            f"This repossession from them appears to be reporting "
+            f"a balance{bal_str} that does not reflect the proceeds of the sale of "
+            f"the collateral. Under Uniform Commercial Code section 9-615(a) and "
+            f"15 U.S.C. section 1681s-2(a)(1), the lender must credit the proceeds "
+            f"of the sale to the loan and the resulting balance is what may be "
+            f"reported. If the vehicle was sold and the proceeds were not "
+            f"applied, the reported amount is overstated. I am asking for the "
+            f"sale records, the amount realized, and the corrected balance, or "
+            f"deletion if the figures cannot be reconciled."
         )
 
-    elif [c for c in (late_codes or []) if not str(c).startswith("CO:")] or neg_type == "late_payment":
-        _real = [c for c in (late_codes or []) if not str(c).startswith("CO:")]
-        _nums = [c for c in _real if str(c).isdigit()]
-        _worst = max(_nums, key=lambda x: int(x)) if _nums else (_real[0] if _real else "")
-        _late_txt = f" ({_worst}-day late mark)" if _worst else ""
+    # -- SAME ACCOUNT NUMBER, DIFFERENT FURNISHER --------------------------
+    elif attack_type == "same_account_number_different_furnisher":
         if v2 == 0:
             reason = (
-                f"I am disputing the late-payment history being reported on this "
-                f"account{_late_txt}. Payment history is held to the same accuracy "
-                "standard as every other field under 15 U.S.C. section 1681e(b). I am "
-                "asking the furnisher to produce the actual payment ledger showing the "
-                "exact dates of any late payments. If those records do not match what "
-                "is being reported, the payment history must be corrected."
+                f"This account number is appearing on my report "
+                f"under two different furnisher names. The same obligation cannot "
+                f"legitimately be reported by two separate companies at the same "
+                f"time, only the current legal holder of the debt may report. "
+                f"This pattern usually means a transferred or sold account where "
+                f"the prior holder did not stop reporting, which violates 15 U.S.C. "
+                f"section 1681s-2(b). I am asking that one of the two duplicate "
+                f"tradelines be removed and the remaining entry verified."
             )
         else:
             reason = (
-                f"The payment history on this account{_late_txt} does not look right "
-                f"to me. A late mark is a factual claim that has to be backed by the "
-                "furnisher's own records under 15 U.S.C. section 1681e(b). I am asking "
-                "for the dated payment ledger that supports every late mark being "
-                "reported. Anything that cannot be documented needs to be corrected or "
-                "removed."
+                f"I have an account number that is appearing on "
+                f"two different tradelines from two different companies on my "
+                f"report. One account, one furnisher at a time. Whichever company "
+                f"is no longer the legal holder of this debt must stop reporting "
+                f"it. Under 15 U.S.C. section 1681s-2(b), I am asking for "
+                f"verification of which furnisher is the current holder, and "
+                f"removal of the duplicate."
             )
+
+    # -- SAME ACCOUNT NUMBER, SAME BALANCE ---------------------------------
+    # Already handled earlier in the chain. No additional branch.
+
+    # -- STUDENT LOAN MULTIPLE SERVICER ------------------------------------
+    elif attack_type == "student_loan_multiple_servicer":
+        if v2 == 0:
+            reason = (
+                f"This student loan from them appears to be the "
+                f"same loan that is also reporting under another servicer's name "
+                f"on my file. Federal student loans are commonly transferred "
+                f"between servicers, and after a transfer only the current "
+                f"servicer should be reporting. Two active tradelines for the "
+                f"same loan inflates my apparent obligations and violates 15 "
+                f"U.S.C. section 1681e(b). I am asking for verification of which "
+                f"servicer currently holds this loan and removal of the duplicate "
+                f"tradeline."
+            )
+        else:
+            reason = (
+                f"I am seeing what looks like the same student "
+                f"loan reporting under more than one servicer on my credit file. "
+                f"Servicer transfers are common but the prior servicer is "
+                f"required to stop reporting after the transfer. Under 15 U.S.C. "
+                f"section 1681s-2(b), I am asking for verification of the current "
+                f"servicer of record and removal of the stale duplicate."
+            )
+
+    # -- STUDENT LOAN STATUS INACCURATE ------------------------------------
+    elif attack_type == "student_loan_status_inaccurate":
+        reason = (
+            f"The status being reported on this student loan "
+            f"from them does not appear to match what the current servicer or "
+            f"the Department of Education has on record. Federal student loan "
+            f"status, in deferment, in forbearance, in repayment, in default, "
+            f"discharged, paid in full, is something the servicer must keep "
+            f"current under 15 U.S.C. section 1681s-2(a)(1). I am asking that "
+            f"the current status be verified directly with the servicer and "
+            f"that the reporting be brought into alignment, or the inaccurate "
+            f"status entry be removed."
+        )
 
     # -- FALLBACK: requires_basic_verification -----------------------------
     else:
@@ -5557,7 +6378,6 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         # rotate the detail pool independently from the opening variant.
         # This dramatically reduces intra-letter collisions when many
         # accounts fall into the fallback path.
-        #
         # pool_idx uses a different modulus (coprime with 8) so that as
         # attempts advance variation_idx, v8 and pool_idx walk through
         # different cycles, the product of the two gives 8 x 11 = 88
@@ -6002,7 +6822,9 @@ def build_dispute_letter_engine(
     def _tpl_idx(bureau: str, group: str, round_key: str, n_templates: int) -> int:
         # bureau_offset: TU=0, EXP=3, EQF=6, stride of 3 spreads evenly across 8 slots
         _bureau_offset = {"transunion": 0, "experian": 3, "equifax": 6}
-        group_pos      = {"collections": 0, "charge_offs": 1, "late_payments": 2, "other_derogatory": 3}
+        group_pos      = {"collections": 0, "charge_offs": 1, "late_payments": 2,
+                          "repossessions": 3, "bankruptcies": 4, "child_support": 5,
+                          "other_derogatory": 6}
         bureau_off = _bureau_offset.get(bureau, 0)
         round_pos  = 0 if round_key == "round_1" else 1
         g          = group_pos.get(group, 0)
@@ -6012,7 +6834,9 @@ def build_dispute_letter_engine(
         slot = (bureau_off + g + round_pos * 4 + variation_seed) % n_templates
         return slot
 
-    group_order = ["collections", "charge_offs", "late_payments", "other_derogatory"]
+    group_order = ["collections", "charge_offs", "late_payments",
+                   "repossessions", "bankruptcies", "child_support",
+                   "other_derogatory"]
 
     for bureau, groups in letter_input_engine.items():
         bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
@@ -6236,6 +7060,9 @@ def _group_context(group_key: str) -> str:
         "collections":      "collection accounts",
         "charge_offs":      "charged-off accounts",
         "late_payments":    "late payment accounts",
+        "repossessions":    "repossession accounts",
+        "bankruptcies":     "accounts included in bankruptcy",
+        "child_support":    "child support accounts",
         "other_derogatory": "derogatory accounts",
     }.get(group_key, "accounts")
 # =========================
@@ -6538,43 +7365,179 @@ def detect_student_loan_complex_attacks(
 # =========================
 # MEDICAL DEBT ENGINE
 # =========================
-#
+# MEDICAL DEBT ENGINE (ported from project for parity)
+# =========================
+
+
+
+# MEDICAL DEBT ENGINE
 # Legal basis hierarchy (April 2026):
-#
 #   Tier 1, Bureau voluntary policy (strongest argument)
 #     * Under $500:      prohibited since April 11, 2023 (all 3 bureaus)
 #     * Paid medical:    removed since July 2022 (all 3 bureaus)
 #     * Under 12 months: not reportable since 2022 (all 3 bureaus)
-#
 #   Tier 2, State law (applies where client lives)
 #     * 15+ states have enacted medical debt credit reporting bans (2023-2025)
 #     * CA, CO, IL, CT, NJ, NY, MD, VA, WA, OR, MN, ME, VT, RI, DE
-#
 #   Tier 3, FCRA section 1681e(b) accuracy (universal, always applies)
 #     * Medical billing has documented systemic inaccuracy problem
 #     * Insurance disputes, No Surprises Act violations, billing errors
-#
 #   CFPB rule (Jan 2025), VACATED July 11, 2025. Not citable.
 #   Bureau voluntary policies, still in effect. Primary dispute vehicle.
 
 # States with active medical debt credit reporting restrictions (as of April 2026)
-MEDICAL_DEBT_PROTECTED_STATES: set[str] = {
-    "CA", "CALIFORNIA",
-    "CO", "COLORADO",
-    "IL", "ILLINOIS",
-    "CT", "CONNECTICUT",
-    "NJ", "NEW JERSEY",
-    "NY", "NEW YORK",
-    "MD", "MARYLAND",
-    "VA", "VIRGINIA",
-    "WA", "WASHINGTON",
-    "OR", "OREGON",
-    "MN", "MINNESOTA",
-    "ME", "MAINE",
-    "VT", "VERMONT",
-    "RI", "RHODE ISLAND",
-    "DE", "DELAWARE",
+MEDICAL_DEBT_STATE_PROTECTIONS: dict[str, dict[str, Any]] = {
+    # State protections against medical debt on credit reports.
+    # Used by detect_medical_debt_attacks to fire medical_debt_state_law
+    # only when the report date is on or after the law's effective date,
+    # and (for limited-scope laws) only when the account matches scope.
+    # Notes on accuracy of these citations:
+    #   - "law_name" is the colloquial / commonly cited name of the bill.
+    #   - "statute_cite" is the public act number or session law identifier
+    #     when the codified section is not yet stable or widely cited.
+    #     The detector and narrative prefer law_name when statute_cite is
+    #     uncertain, since the law name is the most defensible reference.
+    #   - "effective" is ISO YYYY-MM-DD; reports dated before this are
+    #     not flagged for the state-law attack (general accuracy still applies).
+    #   - "scope" controls which accounts qualify:
+    #       all_medical_debt          - any medical collection
+    #       hospital_medical_debt_only - only hospital-related furnishers
+    "CA": {
+        "name": "California",
+        "law_name": "SB 1061 (Medical Debt Relief Act)",
+        "statute_cite": "California Civil Code section 1785.13",
+        "effective": "2025-01-01",
+        "scope": "all_medical_debt",
+    },
+    "NY": {
+        "name": "New York",
+        "law_name": "Fair Medical Debt Reporting Act",
+        "statute_cite": "New York General Business Law section 380-l",
+        "effective": "2023-12-13",
+        "scope": "all_medical_debt",
+    },
+    "CO": {
+        "name": "Colorado",
+        "law_name": "Senate Bill 23-093",
+        "statute_cite": "Colorado Senate Bill 23-093",
+        "effective": "2023-08-07",
+        "scope": "all_medical_debt",
+    },
+    "IL": {
+        "name": "Illinois",
+        "law_name": "Medical Debt Relief Act (HB 4408)",
+        "statute_cite": "Illinois Public Act 103-0867",
+        "effective": "2025-01-01",
+        "scope": "all_medical_debt",
+    },
+    "CT": {
+        "name": "Connecticut",
+        "law_name": "Public Act 24-148",
+        "statute_cite": "Connecticut Public Act 24-148",
+        "effective": "2024-07-01",
+        "scope": "hospital_medical_debt_only",
+    },
+    "NJ": {
+        "name": "New Jersey",
+        "law_name": "Louisa Carman Medical Debt Relief Act",
+        "statute_cite": "New Jersey P.L. 2024, c. 47",
+        "effective": "2024-07-22",
+        "scope": "all_medical_debt",
+    },
+    "MD": {
+        "name": "Maryland",
+        "law_name": "SB 357 (Medical Debt Protection Act)",
+        "statute_cite": "Maryland SB 357 (2024)",
+        "effective": "2024-10-01",
+        "scope": "all_medical_debt",
+    },
+    "VA": {
+        "name": "Virginia",
+        "law_name": "HB 1370 / SB 1119",
+        "statute_cite": "Virginia HB 1370 (2024 Session)",
+        "effective": "2025-07-01",
+        "scope": "all_medical_debt",
+    },
+    "WA": {
+        "name": "Washington",
+        "law_name": "Patient Bill of Rights amendments",
+        "statute_cite": "Washington Revised Code chapter 19.16",
+        "effective": "2023-07-23",
+        "scope": "all_medical_debt",
+    },
+    "OR": {
+        "name": "Oregon",
+        "law_name": "SB 484 (Medical Debt Reporting amendments)",
+        "statute_cite": "Oregon SB 484 (2023, as amended)",
+        "effective": "2024-01-01",
+        "scope": "all_medical_debt",
+    },
+    "MN": {
+        "name": "Minnesota",
+        "law_name": "Debt Fairness Act (HF 4757)",
+        "statute_cite": "Minnesota Session Laws 2024, chapter 114",
+        "effective": "2024-10-01",
+        "scope": "all_medical_debt",
+    },
+    "VT": {
+        "name": "Vermont",
+        "law_name": "Act 73 of 2024 (H.514)",
+        "statute_cite": "Vermont Act 73 (2024)",
+        "effective": "2025-01-01",
+        "scope": "all_medical_debt",
+    },
+    "RI": {
+        "name": "Rhode Island",
+        "law_name": "H 7223 / Medical Debt Reporting amendments",
+        "statute_cite": "Rhode Island H 7223 (2024)",
+        "effective": "2024-09-01",
+        "scope": "all_medical_debt",
+    },
+    "DE": {
+        "name": "Delaware",
+        "law_name": "SB 11 (Medical Debt Reporting)",
+        "statute_cite": "Delaware SB 11 (2024)",
+        "effective": "2024-08-01",
+        "scope": "all_medical_debt",
+    },
+    "ME": {
+        "name": "Maine",
+        "law_name": "LD 1948 (Medical Debt Reporting amendments)",
+        "statute_cite": "Maine LD 1948 (2024)",
+        "effective": "2024-08-09",
+        "scope": "all_medical_debt",
+    },
 }
+
+# Full-name aliases so callers can pass either "CA" or "CALIFORNIA"
+_FULL_NAME_TO_ABBR: dict[str, str] = {
+    v["name"].upper(): k for k, v in MEDICAL_DEBT_STATE_PROTECTIONS.items()
+}
+
+
+def _resolve_state_protection(state: str) -> dict[str, Any] | None:
+    """
+    Look up state medical-debt protection metadata by either 2-letter
+    code or full state name. Returns None if the state has no current
+    protection or the input is empty/unknown.
+    """
+    if not state:
+        return None
+    s = state.strip().upper()
+    if s in MEDICAL_DEBT_STATE_PROTECTIONS:
+        return MEDICAL_DEBT_STATE_PROTECTIONS[s]
+    if s in _FULL_NAME_TO_ABBR:
+        return MEDICAL_DEBT_STATE_PROTECTIONS[_FULL_NAME_TO_ABBR[s]]
+    return None
+
+
+# Backward-compat: flat set of every accepted spelling (abbr + full name).
+# Kept so existing references (e.g., _CFPB_MEDICAL_STATES) keep working
+# without rewrites. New code should use _resolve_state_protection().
+MEDICAL_DEBT_PROTECTED_STATES: set[str] = (
+    set(MEDICAL_DEBT_STATE_PROTECTIONS.keys())
+    | set(_FULL_NAME_TO_ABBR.keys())
+)
 
 # Known medical provider name patterns, used to identify medical collections
 _MEDICAL_KEYWORDS: tuple[str, ...] = (
@@ -6602,6 +7565,21 @@ _MEDICAL_BUSINESS_TYPES: tuple[str, ...] = (
 )
 
 
+# Precompiled regex with word boundaries (no-word-char before/after).
+# Substring matching was too permissive: keyword "er " matched inside
+# "amer honda" and flagged auto leases as medical debt. Lookbehind/lookahead
+# (?<!\w) / (?!\w) ensure each keyword is matched only as a whole token,
+# regardless of whether it starts or ends with a word char.
+_MEDICAL_KEYWORDS_PATTERN = re.compile(
+    r"(?<!\w)(?:" + "|".join(re.escape(k.strip()) for k in _MEDICAL_KEYWORDS) + r")(?!\w)",
+    re.IGNORECASE,
+)
+_MEDICAL_BUSINESS_TYPES_PATTERN = re.compile(
+    r"(?<!\w)(?:" + "|".join(re.escape(k.strip()) for k in _MEDICAL_BUSINESS_TYPES) + r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
 def _is_medical_account(acc: dict[str, Any]) -> bool:
     """
     Determine if an account is a medical collection based on:
@@ -6609,19 +7587,19 @@ def _is_medical_account(acc: dict[str, Any]) -> bool:
     - Account type / business type matching medical categories
     - Comments mentioning medical context
     """
-    name    = acc.get("name", "").lower()
-    acct_det= acc.get("account_type_detail", "").lower()
-    biz_type= acc.get("business_type", "").lower()
+    name    = acc.get("name", "")
+    acct_det= acc.get("account_type_detail", "")
+    biz_type= acc.get("business_type", "")
     comments= acc.get("comments", "").lower()
     raw     = " ".join(acc.get("raw_lines", [])).lower()
 
-    # Check name against medical keywords
-    if any(k in name for k in _MEDICAL_KEYWORDS):
+    # Check name against medical keywords (word-boundary match).
+    if _MEDICAL_KEYWORDS_PATTERN.search(name):
         return True
-    # Check account type
-    if any(k in acct_det for k in _MEDICAL_BUSINESS_TYPES):
+    # Check account type / business type (word-boundary match).
+    if _MEDICAL_BUSINESS_TYPES_PATTERN.search(acct_det):
         return True
-    if any(k in biz_type for k in _MEDICAL_BUSINESS_TYPES):
+    if _MEDICAL_BUSINESS_TYPES_PATTERN.search(biz_type):
         return True
     # Check comments/raw for medical context
     if any(k in comments for k in ("medical", "health", "hospital", "physician")):
@@ -6629,6 +7607,43 @@ def _is_medical_account(acc: dict[str, Any]) -> bool:
     if "medical collection" in raw or "healthcare" in raw:
         return True
 
+    return False
+
+
+# Hospital-specific keywords. Used by Connecticut scope check (P.A. 24-148
+# only covers hospital medical debt, not all medical debt). Distinct from
+# _MEDICAL_KEYWORDS which is broader (clinics, dentists, etc.).
+_HOSPITAL_KEYWORDS: tuple[str, ...] = (
+    "hospital", "medical center", "regional medical", "memorial hospital",
+    "county hospital", "community hospital", "general hospital",
+    "saint ", "st. ", "sacred heart", "mercy ", "providence",
+    "kaiser", "intermountain", "ascension", "hca ", "tenet health",
+    "banner health", "dignity health", "geisinger", "ssm health",
+    "baycare", "piedmont", "spectrum health", "commonspirit",
+    "nursing home", "skilled nursing", "hospice",
+)
+
+_HOSPITAL_KEYWORDS_PATTERN = re.compile(
+    r"(?<!\w)(?:" + "|".join(re.escape(k.strip()) for k in _HOSPITAL_KEYWORDS) + r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _is_hospital_account(acc: dict[str, Any]) -> bool:
+    """
+    Determine whether a medical account is specifically hospital-related.
+    Used for narrow-scope state laws (e.g., Connecticut P.A. 24-148 covers
+    only hospital medical debt; non-hospital medical does not qualify).
+    """
+    name     = acc.get("name", "")
+    acct_det = acc.get("account_type_detail", "")
+    comments = acc.get("comments", "").lower()
+    raw      = " ".join(acc.get("raw_lines", [])).lower()
+
+    if _HOSPITAL_KEYWORDS_PATTERN.search(name):
+        return True
+    if "hospital" in acct_det.lower() or "hospital" in comments or "hospital" in raw:
+        return True
     return False
 
 
@@ -6734,42 +7749,104 @@ def detect_medical_debt_attacks(
             ))
 
         # -- ATTACK 4: State law ----------------------------------------
-        elif client_state and client_state.upper() in MEDICAL_DEBT_PROTECTED_STATES:
-            state_name = client_state.upper()
-            attacks.append(build_attack_record(
-                attack_type="medical_debt_state_law",
-                bureau=bureau,
-                accounts=[acc],
-                strategy_tags=["state_law", "FCRA_1681e_b"],
-                reason=(
-                    f"{name} (Account #{acct_num}) is a medical collection "
-                    f"being reported for a consumer in {state_name}. That state "
-                    f"has enacted a law prohibiting medical debt from appearing "
-                    f"on consumer credit reports. Reporting this account violates "
-                    f"applicable state consumer protection law. I am requesting "
-                    f"its removal from my credit file."
-                ),
-            ))
-
-        # -- ATTACK 5: General accuracy (all other medical debt) --------
+        # Three guards before firing the state-law attack:
+        #   1. Resolve the protection (must be a state we recognize)
+        #   2. Effective date check: if the report predates the law's
+        #      effective date, the account is not yet covered. Fall through
+        #      to the general accuracy attack instead.
+        #   3. Scope check: laws like Connecticut P.A. 24-148 only cover
+        #      hospital medical debt. Non-hospital medical accounts in
+        #      Connecticut fall through to general accuracy.
         else:
-            attacks.append(build_attack_record(
-                attack_type="medical_debt_accuracy",
-                bureau=bureau,
-                accounts=[acc],
-                strategy_tags=["FCRA_1681e_b", "FCRA_1681i_a"],
-                reason=(
-                    f"{name} (Account #{acct_num}) is a medical collection. "
-                    f"Medical debt is uniquely prone to inaccuracy, billing "
-                    f"errors, incorrect insurance applications, disputed charges, "
-                    f"and balance inflation are documented systemic problems in "
-                    f"healthcare billing. Under 15 U.S.C. section 1681e(b), this bureau "
-                    f"must maintain maximum possible accuracy. I am disputing the "
-                    f"accuracy of this medical collection and requesting full "
-                    f"verification: itemized bill, proof of insurance applied, "
-                    f"original creditor name, and the exact amount owed."
-                ),
-            ))
+            protection = _resolve_state_protection(client_state) if client_state else None
+            qualifies_for_state_law = False
+
+            if protection:
+                # Effective dates in MEDICAL_DEBT_STATE_PROTECTIONS are
+                # ISO YYYY-MM-DD. parse_date_field does not accept ISO with
+                # dashes in this codebase, so parse directly with strptime.
+                try:
+                    effective_dt = _dt.datetime.strptime(
+                        protection["effective"], "%Y-%m-%d"
+                    )
+                except (ValueError, KeyError):
+                    effective_dt = None
+                report_dt_local = report_dt or parse_date_field(report_date)
+
+                # If we have both dates, enforce the effective-date guard.
+                # If we lack a report date, we fall through (we cannot prove
+                # the law applies on the relevant date, so skip this attack).
+                date_ok = (
+                    effective_dt is not None
+                    and report_dt_local is not None
+                    and report_dt_local >= effective_dt
+                )
+
+                # Scope check
+                scope = protection.get("scope", "all_medical_debt")
+                if scope == "all_medical_debt":
+                    scope_ok = True
+                elif scope == "hospital_medical_debt_only":
+                    scope_ok = _is_hospital_account(acc)
+                else:
+                    scope_ok = False
+
+                qualifies_for_state_law = bool(date_ok and scope_ok)
+
+            if qualifies_for_state_law:
+                law_name      = protection["law_name"]
+                statute_cite  = protection["statute_cite"]
+                state_display = protection["name"]
+                effective_str = protection["effective"]
+                scope_str     = protection.get("scope", "all_medical_debt")
+
+                # Embed metadata in the account dict so build_letter_input_engine
+                # can propagate it through to the entry consumed by
+                # _account_reason. These keys are namespaced with state_protection_
+                # to avoid colliding with anything else in the account schema.
+                acc_with_meta = dict(acc)
+                acc_with_meta["state_protection_law_name"]     = law_name
+                acc_with_meta["state_protection_statute"]      = statute_cite
+                acc_with_meta["state_protection_state_name"]   = state_display
+                acc_with_meta["state_protection_effective"]    = effective_str
+                acc_with_meta["state_protection_scope"]        = scope_str
+
+                attacks.append(build_attack_record(
+                    attack_type="medical_debt_state_law",
+                    bureau=bureau,
+                    accounts=[acc_with_meta],
+                    strategy_tags=["state_law", "FCRA_1681e_b", state_display.replace(" ", "_").lower()],
+                    reason=(
+                        f"{name} (Account #{acct_num}) is a medical "
+                        f"collection being reported for a consumer in "
+                        f"{state_display}. {state_display} enacted "
+                        f"{law_name} ({statute_cite}), effective "
+                        f"{effective_str}, which prohibits medical debt "
+                        f"from being reported on consumer credit reports. "
+                        f"This account is being reported in violation of "
+                        f"that law. I am requesting its removal."
+                    ),
+                ))
+
+            # -- ATTACK 5: General accuracy (all other medical debt) ------
+            else:
+                attacks.append(build_attack_record(
+                    attack_type="medical_debt_accuracy",
+                    bureau=bureau,
+                    accounts=[acc],
+                    strategy_tags=["FCRA_1681e_b", "FCRA_1681i_a"],
+                    reason=(
+                        f"{name} (Account #{acct_num}) is a medical collection. "
+                        f"Medical debt is uniquely prone to inaccuracy, billing "
+                        f"errors, incorrect insurance applications, disputed charges, "
+                        f"and balance inflation are documented systemic problems in "
+                        f"healthcare billing. Under 15 U.S.C. section 1681e(b), this bureau "
+                        f"must maintain maximum possible accuracy. I am disputing the "
+                        f"accuracy of this medical collection and requesting full "
+                        f"verification: itemized bill, proof of insurance applied, "
+                        f"original creditor name, and the exact amount owed."
+                    ),
+                ))
 
     return attacks
 
@@ -8302,7 +9379,7 @@ def build_furnisher_letter_engine(
                 opening = (
                     f"To Whom It May Concern,\n\n"
                     f"I am writing to formally dispute the account(s) listed below "
-                    f"and to request validation of the alleged debt(s) pursuant to "
+                    f"and to request validation of the alleged debt(s) under "
                     f"the Fair Debt Collection Practices Act, 15 U.S.C. section 1692g(b). "
                     f"I also dispute the accuracy and completeness of the information "
                     f"you are reporting to the credit bureaus under the Fair Credit "
@@ -10729,7 +11806,7 @@ RE: FRAUD ALERT PLACEMENT REQUEST UNDER {law_cite}
 
 To Whom It May Concern:
 
-I am requesting that you place a {alert_type.upper()} fraud alert on my credit file pursuant to {law_cite}.
+I am requesting that you place a {alert_type.upper()} fraud alert on my credit file under {law_cite}.
 
 I am a victim of identity theft (or have reason to believe I may become a victim). A fraud alert requires that any user of my credit report take reasonable steps to verify my identity before extending credit in my name.
 
@@ -10974,7 +12051,7 @@ def build_cfpb_complaint_language(response_type: str = "") -> str:
     Tailored to response type, stronger for frivolous/no-response/reinsertion.
     """
     base = (
-        "Please be advised that I am filing a concurrent complaint with the "
+        "I am filing a concurrent complaint with the "
         "Consumer Financial Protection Bureau (CFPB) regarding this matter "
         f"at {CFPB_COMPLAINT_URL}. "
         "The CFPB has enforcement authority over consumer reporting under "
