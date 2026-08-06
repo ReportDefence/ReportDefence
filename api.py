@@ -998,6 +998,9 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         "Collections":               "collections",
         "Charge Offs":               "charge_offs",
         "Late Payments":             "late_payments",
+        "Repossessions":             "repossessions",
+        "Bankruptcies":              "bankruptcies",
+        "Child Support":             "child_support",
         "Other Derogatory":          "other_derogatory",
         # Legacy labels kept for backward compatibility
         "Collections & Chargeoffs":  "collections",
@@ -1055,6 +1058,9 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
             "collections":      "collection",
             "charge_offs":      "charge_off",
             "late_payments":    "late_payment",
+            "repossessions":    "repossession",
+            "bankruptcies":     "bankruptcy",
+            "child_support":    "child_support",
             "other_derogatory": "derogatory",
         }
 
@@ -1064,6 +1070,9 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
                 "collections":      [],
                 "charge_offs":      [],
                 "late_payments":    [],
+                "repossessions":    [],
+                "bankruptcies":     [],
+                "child_support":    [],
                 "other_derogatory": [],
             }
             for acc in accounts:
@@ -1188,26 +1197,82 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         except Exception as _e:
             print(f"[generate-letters] Failed to parse bureau response: {_e}")
 
-    dispute_letters = build_dispute_letter_engine(
-        letter_input_to_use,
-        consumer_name=consumer_name,
-        report_date=report_date,
-        variation_seed=body.variation_seed or 0,
-        target_round=body.round or "round_1",
-        bureau_response_parsed=bureau_response_parsed,
-    )
+    # ── e-OSCAR verification gate: regenerate until every letter passes ───────
+    # Critical checks (ascii / forbidden_phrases / fidelity) MUST pass — a letter
+    # that fails one is never delivered. length / structure / overlap are INFO
+    # only (a multi-account letter legitimately exceeds the word window) and do
+    # not block. On each failed attempt we bump variation_seed to reshuffle the
+    # opening templates and closers, up to _EOSCAR_MAX_ATTEMPTS. Anything still
+    # failing after that is excluded from the response and reported in "blocked".
+    from original_parser import validate_eoscar_compliance
 
-    # Flatten letters for response
+    _EOSCAR_MAX_ATTEMPTS = 5
+
+    def _eoscar_check(text: str) -> dict:
+        v = validate_eoscar_compliance(text, letter_type="bureau_dispute")
+        c = v["checks"]
+        critical_ok = (
+            c["ascii"]["pass"]
+            and not c["forbidden_phrases"]["found"]
+            and c.get("fidelity_to_report", {}).get("pass", True)
+        )
+        return {
+            "critical_ok": critical_ok,
+            "passed":      v["passed"],
+            "score":       v["score"],
+            "ascii":       c["ascii"]["pass"],
+            "forbidden":   c["forbidden_phrases"]["found"],
+            "warnings":    v.get("warnings", []),
+        }
+
+    seed = body.variation_seed or 0
+    dispute_letters = {}
+    for attempt in range(_EOSCAR_MAX_ATTEMPTS):
+        dispute_letters = build_dispute_letter_engine(
+            letter_input_to_use,
+            consumer_name=consumer_name,
+            report_date=report_date,
+            variation_seed=seed,
+            target_round=body.round or "round_1",
+            bureau_response_parsed=bureau_response_parsed,
+        )
+        any_fail = False
+        for b, groups in dispute_letters.items():
+            for grp, rounds in groups.items():
+                for rnd, text in rounds.items():
+                    if not _eoscar_check(text)["critical_ok"]:
+                        any_fail = True
+        if not any_fail:
+            break
+        print(f"[generate-letters] e-OSCAR critical fail on attempt "
+              f"{attempt + 1}/{_EOSCAR_MAX_ATTEMPTS}, regenerating (seed={seed + 1})")
+        seed += 1
+
+    # Flatten letters for response — deliver only letters that pass criticals.
     letters_out = []
+    blocked     = []
     letter_text = ""
     for b, groups in dispute_letters.items():
         for grp, rounds in groups.items():
             for rnd, text in rounds.items():
+                chk = _eoscar_check(text)
+                if not chk["critical_ok"]:
+                    # Never deliver a non-compliant letter.
+                    blocked.append({
+                        "bureau": b, "category": grp, "round": rnd,
+                        "reason": "eoscar_critical_fail",
+                        "forbidden": chk["forbidden"],
+                        "ascii": chk["ascii"],
+                    })
+                    print(f"[generate-letters] BLOCKED {b}/{grp}/{rnd}: "
+                          f"forbidden={chk['forbidden']} ascii={chk['ascii']}")
+                    continue
                 letters_out.append({
                     "bureau": b,
                     "category": grp,
                     "round": rnd,
                     "text": text,
+                    "eoscar": chk,   # verification summary for the operator
                 })
                 letter_text = text  # last one for simple preview
 
@@ -1215,7 +1280,12 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         "letters_generated": True,
     }).eq("job_id", body.job_id).execute()
 
-    return {"letter_text": letter_text, "letters": letters_out, "job_id": body.job_id}
+    return {
+        "letter_text": letter_text,
+        "letters": letters_out,
+        "blocked": blocked,
+        "job_id": body.job_id,
+    }
 
 # ═══════════════════════════════════════════════════════════════
 #  PORTAL (client-facing)
