@@ -811,7 +811,20 @@ def _build_inventory(raw_accounts: list[dict]) -> dict[str, list[dict]]:
                 "has_90_in_history":    data.get("has_90_in_history", late_90 > 0),
                 "has_co_in_history":    data.get("has_co_in_history", False),
                 "possible_duplicate_group": "",
-                "raw_lines":            [],
+                # Synthesize raw_lines from the fields that carry the keyword
+                # signals original_parser's classifiers/detectors scan for
+                # (repossession, bankruptcy, sold/transferred, deceased, paid
+                # collection, etc.). The PDF path gets these from the report
+                # text; the JSON path must build an equivalent blob so
+                # is_negative / normalize_negative_type and the keyword-based
+                # attack detectors behave identically on both paths.
+                "raw_lines": [
+                    name,
+                    f"Account Status: {data['status']}",
+                    f"Payment Status: {data['payment_status']}",
+                    f"Account Type - Detail: {data['account_type_detail']}",
+                    f"Comments: {data['comments']}",
+                ],
             })
 
     return inventory
@@ -899,14 +912,32 @@ def parse_identityiq_json(data: dict) -> dict:
     raw_accounts = _parse_tradelines(merge)
     inventory    = _build_inventory(raw_accounts)
 
-    # Negatives — basic detection
+    # Negatives — classified by original_parser's engine so the JSON path
+    # produces identical negative_type values (repossession, bankruptcy,
+    # child_support, paid_collection, etc.) to the PDF path. The local
+    # _is_negative/_negative_type helpers are only a fallback if the import
+    # is unavailable.
     negatives_by_bureau: dict[str, list] = {b: [] for b in BUREAUS}
-    for bureau, accts in inventory.items():
-        for acc in accts:
-            if _is_negative(acc):
-                enriched = dict(acc)
-                enriched["negative_type"] = _negative_type(acc)
-                negatives_by_bureau[bureau].append(enriched)
+    try:
+        from original_parser import (
+            is_negative as _op_is_negative,
+            normalize_negative_type as _op_negative_type,
+        )
+        for bureau, accts in inventory.items():
+            for acc in accts:
+                if _op_is_negative(acc):
+                    enriched = dict(acc)
+                    enriched["negative_type"] = _op_negative_type(acc) or "derogatory"
+                    negatives_by_bureau[bureau].append(enriched)
+    except Exception as _e:
+        print(f"[IIQ Parser] original_parser classifier unavailable, "
+              f"using local fallback: {_e}")
+        for bureau, accts in inventory.items():
+            for acc in accts:
+                if _is_negative(acc):
+                    enriched = dict(acc)
+                    enriched["negative_type"] = _negative_type(acc)
+                    negatives_by_bureau[bureau].append(enriched)
 
     # ── Run full FCRA attack pipeline from original_parser ────────────────
     try:
@@ -931,6 +962,7 @@ def parse_identityiq_json(data: dict) -> dict:
         base_tradeline_engine = []
         for acct in raw_accounts:
             bureau_entries = {}
+            bt_raw_lines = [acct["name"]]
             for bureau, bd in acct["bureau_data"].items():
                 bureau_entries[bureau] = {
                     "account_number":        bd["account_number"],
@@ -941,11 +973,16 @@ def parse_identityiq_json(data: dict) -> dict:
                     "past_due":              bd["past_due"],
                     "comments":              bd["comments"],
                 }
+                # Carry keyword-bearing text so cross-bureau keyword detectors
+                # behave identically to the PDF path.
+                bt_raw_lines.append(
+                    f"{bd['status']} {bd['payment_status']} {bd['comments']}"
+                )
             base_tradeline_engine.append({
                 "base_tradeline_id": acct["block_id"],
                 "furnisher_name":    acct["name"],
                 "bureau_entries":    bureau_entries,
-                "raw_lines":         [],
+                "raw_lines":         bt_raw_lines,
             })
 
         # Legal detection
