@@ -1543,6 +1543,140 @@ async def get_progress(client_id: str, user=Depends(get_current_user)):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  CIR SUMMARY PDF  (requiere reportlab en requirements.txt)
+#  Pegar después del endpoint /progress (antes de la sección PORTAL).
+# ═══════════════════════════════════════════════════════════════
+import io as _cir_io
+
+def build_cir_summary_pdf(cir: dict) -> bytes:
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import inch
+    from reportlab.lib.colors import HexColor
+    from reportlab.pdfgen import canvas as _canvas
+    NAVY = HexColor('#00364F'); GOLD = HexColor('#C9A24B'); CREAM = HexColor('#F4EEE2')
+    INK = HexColor('#1b2b34'); MUT = HexColor('#5c6975'); REDC = HexColor('#8C2A2A')
+    BUR = ('transunion', 'experian', 'equifax')
+    BLAB = {'transunion': 'TRANSUNION', 'experian': 'EXPERIAN', 'equifax': 'EQUIFAX'}
+    buf = _cir_io.BytesIO()
+    c = _canvas.Canvas(buf, pagesize=LETTER)
+    W, H = LETTER
+    M = 0.8 * inch
+
+    def line(x, y, txt, font="Helvetica", size=10, color=INK):
+        c.setFillColor(color); c.setFont(font, size); c.drawString(x, y, txt)
+
+    def wrap(x, y, txt, width, font="Helvetica", size=9.5, color=INK, leading=13):
+        c.setFillColor(color); c.setFont(font, size)
+        linew = ""
+        for w in (txt or "").split():
+            t = (linew + " " + w).strip()
+            if c.stringWidth(t, font, size) <= width:
+                linew = t
+            else:
+                c.drawString(x, y, linew); y -= leading; linew = w
+        if linew:
+            c.drawString(x, y, linew); y -= leading
+        return y
+
+    # header band
+    c.setFillColor(NAVY); c.rect(0, H - 1.35 * inch, W, 1.35 * inch, stroke=0, fill=1)
+    c.setFillColor(GOLD); c.rect(0, H - 1.39 * inch, W, 0.04 * inch, stroke=0, fill=1)
+    line(M, H - 0.62 * inch, "REPORT DEFENCE", "Helvetica-Bold", 15, CREAM)
+    line(M, H - 0.82 * inch, "PROTECTING YOUR CREDIT. DEFENDING YOUR FUTURE.", "Helvetica", 7.5, GOLD)
+    c.setFillColor(GOLD); c.setFont("Helvetica-Bold", 10)
+    c.drawRightString(W - M, H - 0.6 * inch, "CREDIT INVESTIGATION REPORT")
+    c.setFillColor(CREAM); c.setFont("Helvetica", 9)
+    c.drawRightString(W - M, H - 0.78 * inch, "Summary")
+    c.drawRightString(W - M, H - 0.96 * inch, f"Round {cir.get('round', 1)}")
+
+    y = H - 1.72 * inch
+    line(M, y, f"Client: {cir.get('client', '')}", "Helvetica-Bold", 12, INK)
+    c.setFillColor(MUT); c.setFont("Helvetica", 9)
+    c.drawRightString(W - M, y, f"Source: {str(cir.get('source', '')).upper()}   -   Report date: {cir.get('report_date', '')}")
+    y -= 0.34 * inch
+
+    # scores
+    sc = cir.get("scores", {})
+    cw = (W - 2 * M - 2 * (0.2 * inch)) / 3.0
+    x = M
+    for b in BUR:
+        s = sc.get(b, {})
+        c.setLineWidth(1); c.setStrokeColor(HexColor("#d8dce0")); c.setFillColor(HexColor("#faf7f0"))
+        c.roundRect(x, y - 0.9 * inch, cw, 0.9 * inch, 8, stroke=1, fill=1)
+        c.setFillColor(GOLD); c.rect(x, y - 0.06 * inch, cw, 0.06 * inch, stroke=0, fill=1)
+        c.setFillColor(MUT); c.setFont("Helvetica-Bold", 8); c.drawCentredString(x + cw / 2, y - 0.28 * inch, BLAB[b])
+        c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 26); c.drawCentredString(x + cw / 2, y - 0.66 * inch, str(s.get("score", "")))
+        c.setFillColor(GOLD); c.setFont("Helvetica-Bold", 8.5); c.drawCentredString(x + cw / 2, y - 0.82 * inch, str(s.get("rating", "")))
+        x += cw + 0.2 * inch
+    y -= 1.22 * inch
+
+    def head(label):
+        nonlocal y
+        line(M, y, label, "Helvetica-Bold", 10, GOLD); y -= 0.06 * inch
+        c.setStrokeColor(GOLD); c.setLineWidth(1.2); c.line(M, y, M + 0.9 * inch, y); y -= 0.2 * inch
+
+    head("EXECUTIVE SUMMARY")
+    y = wrap(M, y, cir.get("executive_summary", ""), W - 2 * M, size=9.5, leading=13) - 0.16 * inch
+
+    counts = cir.get("counts", {}); total = cir.get("total_findings", 0)
+    head("FINDINGS")
+    line(M, y, f"{total} negative findings   -   TransUnion {counts.get('transunion', 0)}   -   "
+               f"Experian {counts.get('experian', 0)}   -   Equifax {counts.get('equifax', 0)}",
+         "Helvetica-Bold", 9.5, INK)
+    y -= 0.2 * inch
+    findings = cir.get("findings", [])
+    for f in findings[:6]:
+        c.setFillColor(MUT); c.setFont("Helvetica", 8.5)
+        bal = f"  {f.get('balance', '')}" if f.get('balance') else ""
+        c.drawString(M + 0.1 * inch, y, f"- [{str(f.get('bureau', ''))[:3].upper()}] {f.get('type', '')}: {f.get('furnisher', '')}{bal}")
+        y -= 0.155 * inch
+    if len(findings) > 6:
+        c.setFillColor(MUT); c.setFont("Helvetica-Oblique", 8)
+        c.drawString(M + 0.1 * inch, y, f"+ {len(findings) - 6} more (see full report)"); y -= 0.155 * inch
+    y -= 0.1 * inch
+
+    risks = cir.get("risks", [])[:5]
+    if risks and y > 2.1 * inch:
+        head("KEY RISKS & ANGLES")
+        for r in risks:
+            dot = REDC if (r.get("severity") or "").lower() == "high" else GOLD
+            c.setFillColor(dot); c.circle(M + 0.06 * inch, y + 0.03 * inch, 0.035 * inch, stroke=0, fill=1)
+            line(M + 0.2 * inch, y, r.get("title", ""), "Helvetica-Bold", 9, INK)
+            y -= 0.185 * inch
+
+    c.setFillColor(HexColor("#eef0f2")); c.rect(0, 0, W, 0.7 * inch, stroke=0, fill=1)
+    wrap(M, 0.5 * inch, cir.get("disclaimer", ""), W - 2 * M, size=7, color=MUT, leading=9)
+
+    c.showPage(); c.save()
+    return buf.getvalue()
+
+
+@app.get("/cir/{job_id}/pdf")
+async def get_cir_pdf(job_id: str, user=Depends(get_current_user)):
+    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
+    if not res.data or len(res.data) == 0:
+        raise HTTPException(404, "Job not found")
+    job = res.data[0]
+    round_num = 1
+    cid = job.get("client_id")
+    if cid:
+        ordered = _client_jobs_ordered(cid)
+        for idx, jj in enumerate(ordered, 1):
+            if jj.get("job_id") == job_id:
+                round_num = idx
+                break
+    cir = compose_cir(job, round_num=round_num)
+    pdf = build_cir_summary_pdf(cir)
+    safe = (cir.get("client") or "client").replace(" ", "_")
+    fname = f"CIR_Summary_{safe}_R{round_num}.pdf"
+    return StreamingResponse(
+        _cir_io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 #  PORTAL (client-facing)
 # ═══════════════════════════════════════════════════════════════
 
