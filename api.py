@@ -1288,6 +1288,261 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
     }
 
 # ═══════════════════════════════════════════════════════════════
+#  CIR  +  PROGRESS  (pegar este bloque en api.py, ej. justo ANTES
+#  de la sección "PORTAL (client-facing)")
+#  No requiere cambios en la base ni en otros endpoints.
+#  Usa datos que /upload-report y /connect-identityiq ya guardan.
+# ═══════════════════════════════════════════════════════════════
+import re as _cir_re
+
+_CIR_BUR = ("transunion", "experian", "equifax")
+
+_NEG_LABEL = {
+    "collection": "Collection", "paid_collection": "Paid Collection",
+    "charge_off": "Charge-off", "charge_off_deficiency": "Charge-off",
+    "late_payment": "Late Payment", "repossession": "Repossession",
+    "bankruptcy": "Bankruptcy", "student_loan": "Student Loan",
+    "child_support": "Child Support", "derogatory": "Derogatory",
+}
+_ATTACK_TITLE = {
+    "dofd_unknown_verification_required": "Missing Date of First Delinquency",
+    "balance_exceeds_credit_limit": "Balance exceeds credit limit",
+    "closed_with_balance": "Closed account reporting a balance",
+    "same_account_number_same_balance": "Same account number & balance in separate blocks",
+    "multi_furnisher_same_balance": "Same balance across multiple furnishers",
+    "duplicate_account_number": "Duplicate account number",
+    "collector_original_creditor_self_declared": "Collector self-declares original creditor",
+    "re_aging": "Re-aging of delinquency date",
+    "obsolete_account": "Obsolete account still reporting",
+    "cross_bureau_account_status_conflict": "Account status conflicts across bureaus",
+    "cross_bureau_payment_status_conflict": "Payment status conflicts across bureaus",
+    "medical_debt_accuracy": "Medical debt accuracy",
+}
+_PI_TITLE = {
+    "ssn_inconsistency": "Divergent SSN across bureaus",
+    "dob_inconsistency": "Date of birth reported differently",
+    "name_inconsistency": "Name reported differently across bureaus",
+    "unknown_former_name": "Unrecognized former name",
+    "unrecognized_aka": "Unrecognized alias (AKA)",
+    "current_address_inconsistency": "Inconsistent current address",
+    "multiple_previous_addresses": "Multiple previous addresses",
+}
+_CIR_DISCLAIMER = (
+    "This document is an analysis of the content of the credit report, not the reinvestigation "
+    "a bureau performs under 15 U.S.C. section 1681i. Report Defence does not guarantee results or "
+    "the removal of accurate information, does not negotiate debt, and does not provide legal advice. "
+    "The consumer signs and mails all letters."
+)
+_MIXED_FILE_TYPES = {"ssn_inconsistency", "dob_inconsistency", "name_inconsistency",
+                     "unknown_former_name", "current_address_inconsistency",
+                     "multiple_previous_addresses", "unrecognized_aka"}
+
+
+def _cir_int(v):
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+def _cir_rating(s):
+    s = _cir_int(s)
+    if s <= 0:
+        return ""
+    if s < 580:
+        return "Poor"
+    if s < 670:
+        return "Fair"
+    if s < 740:
+        return "Good"
+    if s < 800:
+        return "Very Good"
+    return "Exceptional"
+
+def _cir_mask(a):
+    d = _cir_re.sub(r"\D", "", a or "")
+    return ("XXXX" + d[-4:]) if len(d) >= 4 else (a or "")
+
+def _cir_fp(n):
+    name = _cir_re.sub(r"[^a-z0-9]", "", (n.get("name", "") or "").lower())[:14]
+    acct = _cir_re.sub(r"\D", "", (n.get("account_number", "") or ""))[-4:]
+    return f"{name}:{acct}"
+
+
+def compose_cir(job: dict, round_num: int = 1) -> dict:
+    """Build the CIR (Credit Investigation Report) content from a stored job."""
+    scores = job.get("scores", {}) or {}
+    negs = job.get("negatives_by_bureau", {}) or {}
+    lie = job.get("letter_input_engine", {}) or {}
+    attacks = job.get("attacks", []) or []
+    pii = job.get("personal_info_issues", []) or []
+
+    counts = {b: len(negs.get(b, []) or []) for b in _CIR_BUR}
+    total = sum(counts.values())
+
+    group_counts = {}
+    for _b, groups in lie.items():
+        for g, items in (groups or {}).items():
+            group_counts[g] = group_counts.get(g, 0) + len(items or [])
+
+    findings = []
+    for b, items in negs.items():
+        for n in (items or []):
+            findings.append({
+                "bureau": b,
+                "type": _NEG_LABEL.get(n.get("negative_type"), "Derogatory"),
+                "furnisher": n.get("name", ""),
+                "account": _cir_mask(n.get("account_number", "")),
+                "balance": n.get("balance", ""),
+            })
+
+    risks, seen = [], set()
+    for a in attacks:
+        at = a.get("attack_type", "")
+        if at and at not in seen:
+            seen.add(at)
+            risks.append({
+                "severity": a.get("severity", "medium"),
+                "category": "Reporting",
+                "title": _ATTACK_TITLE.get(at, at.replace("_", " ").title()),
+                "description": a.get("reason", ""),
+            })
+    mixed = False
+    for i in pii:
+        t = i.get("type")
+        if t in _MIXED_FILE_TYPES:
+            mixed = True
+        risks.append({
+            "severity": i.get("severity", "medium"),
+            "category": "Personal info",
+            "title": _PI_TITLE.get(t, (t or "").replace("_", " ").title()),
+            "description": i.get("description", ""),
+        })
+
+    parts = []
+    if group_counts.get("collections"):
+        parts.append(f"{group_counts['collections']} collections")
+    if group_counts.get("charge_offs"):
+        parts.append(f"{group_counts['charge_offs']} charge-offs")
+    if group_counts.get("late_payments"):
+        parts.append(f"{group_counts['late_payments']} late payments")
+    breakdown = ", ".join(parts) if parts else "several derogatory items"
+    summary = (f"The analysis identified {total} negative findings distributed as follows: "
+               f"TransUnion {counts['transunion']}, Experian {counts['experian']}, "
+               f"Equifax {counts['equifax']} - {breakdown}.")
+    if mixed:
+        summary += (" Signals of a possible mixed file were also detected (divergent identity "
+                    "information across bureaus), which strengthen the accuracy disputes under the "
+                    "FCRA (15 U.S.C. section 1681e(b) / 1681i).")
+
+    strategy = [f"Round {round_num}: accuracy disputes to all reporting bureaus on the {total} "
+                "listed accounts (15 U.S.C. section 1681i / 1681e(b))."]
+    top = [r["title"] for r in risks if r["category"] == "Reporting"][:4]
+    if top:
+        strategy.append("Prioritize the detected angles: " + ", ".join(top) + ".")
+    if mixed:
+        strategy.append("Personal-information update letters for the mixed file, attaching ID + "
+                        "proof of address.")
+    strategy.append("Wait 30 days from the Return Receipt; whatever survives advances to the next "
+                    "round via method-of-verification.")
+
+    return {
+        "client": job.get("consumer_name", ""),
+        "source": job.get("source", ""),
+        "report_date": job.get("report_date", ""),
+        "round": round_num,
+        "scores": {b: {"score": _cir_int(scores.get(b)), "rating": _cir_rating(scores.get(b))}
+                   for b in _CIR_BUR},
+        "counts": counts,
+        "total_findings": total,
+        "executive_summary": summary,
+        "findings": findings,
+        "risks": risks,
+        "strategy": strategy,
+        "disclaimer": _CIR_DISCLAIMER,
+    }
+
+
+def compute_progress(prev: dict, now: dict) -> dict:
+    """Compare two rounds (previous vs current job) -> deletions + score deltas."""
+    sp = prev.get("scores", {}) or {}
+    sn = now.get("scores", {}) or {}
+
+    def _fps(job):
+        s = {}
+        for b, items in (job.get("negatives_by_bureau", {}) or {}).items():
+            for n in (items or []):
+                s[(b, _cir_fp(n))] = n
+        return s
+
+    P, N = _fps(prev), _fps(now)
+
+    def _row(n, b):
+        return {"bureau": b, "furnisher": n.get("name", ""),
+                "type": _NEG_LABEL.get(n.get("negative_type"), "Derogatory"),
+                "account": _cir_mask(n.get("account_number", ""))}
+
+    deleted = [_row(n, b) for (b, f), n in P.items() if (b, f) not in N]
+    survived = [_row(n, b) for (b, f), n in P.items() if (b, f) in N]
+    new = [_row(n, b) for (b, f), n in N.items() if (b, f) not in P]
+
+    return {
+        "client": now.get("consumer_name", ""),
+        "scores_prev": {b: _cir_int(sp.get(b)) for b in _CIR_BUR},
+        "scores_now": {b: _cir_int(sn.get(b)) for b in _CIR_BUR},
+        "deltas": {b: _cir_int(sn.get(b)) - _cir_int(sp.get(b)) for b in _CIR_BUR},
+        "deleted": deleted,
+        "survived": survived,
+        "new_or_reinserted": new,
+        "deleted_count": len(deleted),
+        "survived_count": len(survived),
+    }
+
+
+def _client_jobs_ordered(client_id: str) -> list:
+    """Return the client's full jobs sorted oldest -> newest."""
+    cr = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
+    if not cr.data:
+        return []
+    ids = cr.data[0].get("job_ids") or []
+    if not ids:
+        return []
+    jr = sb.table("api_jobs").select("*").in_("job_id", ids).execute()
+    jobs = jr.data or []
+    jobs.sort(key=lambda j: j.get("created_at", ""))
+    return jobs
+
+
+@app.get("/cir/{job_id}")
+async def get_cir(job_id: str, user=Depends(get_current_user)):
+    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
+    if not res.data or len(res.data) == 0:
+        raise HTTPException(404, "Job not found")
+    job = res.data[0]
+    # infer round number from the client's job order (1 = first report)
+    round_num = 1
+    cid = job.get("client_id")
+    if cid:
+        ordered = _client_jobs_ordered(cid)
+        for idx, jj in enumerate(ordered, 1):
+            if jj.get("job_id") == job_id:
+                round_num = idx
+                break
+    return compose_cir(job, round_num=round_num)
+
+
+@app.get("/progress/{client_id}")
+async def get_progress(client_id: str, user=Depends(get_current_user)):
+    jobs = _client_jobs_ordered(client_id)
+    if len(jobs) < 2:
+        raise HTTPException(400, "Need at least two reports (rounds) to build a progress report.")
+    prev, now = jobs[-2], jobs[-1]
+    out = compute_progress(prev, now)
+    out["round_prev"] = len(jobs) - 1
+    out["round_now"] = len(jobs)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════
 #  PORTAL (client-facing)
 # ═══════════════════════════════════════════════════════════════
 
