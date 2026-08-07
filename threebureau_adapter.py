@@ -426,12 +426,28 @@ def build_report_threebureau(pdf_path: str) -> dict:
     except ImportError:
         import original_parser as RP
     pages = _load(pdf_path)
-    scores = _scores(pages)
-    report_date = _report_date(pages)
-    tradelines = _tradelines(pages)
-    collections = _collections(pages)
-    inquiries = _inquiries(pages)
-    personal_info, ssn_by_bureau = _personal_info(pages)
+    import ultra4k as U4
+    if U4.is_ultra4k(pages):
+        # SmartCredit "Ultra 4k 3B Report" (label-arriba / valores-abajo)
+        _al = U4._all_lines(pages)
+        _xs = U4._anchors(_al)
+        scores = U4.scores(pages)
+        report_date = U4.report_date(pages)
+        inventory = U4.build_inventory(U4.accounts(_al, _xs))
+        inquiries = U4.inquiries(pages)
+        personal_info = U4.personal_info(pages, _al, _xs)
+        ssn_by_bureau = {}
+        _rawn = sum(len(v) for v in inventory.values())
+    else:
+        # "Three Bureau Credit Report" (MyFreeScore / SmartCredit clasico)
+        scores = _scores(pages)
+        report_date = _report_date(pages)
+        tradelines = _tradelines(pages)
+        collections = _collections(pages)
+        inquiries = _inquiries(pages)
+        personal_info, ssn_by_bureau = _personal_info(pages)
+        inventory = _build_inventory(tradelines, collections)
+        _rawn = len(tradelines)
     personal_info_issues = RP.detect_personal_info_issues(personal_info)
     _ssns = {v for v in ssn_by_bureau.values() if v}
     if len(_ssns) > 1:
@@ -444,7 +460,6 @@ def build_report_threebureau(pdf_path: str) -> dict:
                 "15 U.S.C. section 1681e(b)."),
         })
 
-    inventory = _build_inventory(tradelines, collections)
     negatives = RP.build_negative_inventory_by_bureau(inventory)
     negatives = RP.build_dofd_engine(negatives, report_date)
     legal = RP.build_legal_detection_engine(negatives, {}, report_date=report_date, client_state="")
@@ -477,5 +492,5 @@ def build_report_threebureau(pdf_path: str) -> dict:
         "dispute_letters": dispute_letters,
         "furnisher_letters": furnisher_letters,
         "expanded_accounts_found": sum(len(v) for v in inventory.values()),
-        "raw_accounts": len(tradelines),
+        "raw_accounts": _rawn,
     }
