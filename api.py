@@ -1957,3 +1957,57 @@ async def portal_letters(user=Depends(get_current_user)):
 @app.get("/health")
 async def health():
     return {"status": "ok", "storage": "supabase", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  TEMPORAL — DRY-RUN DE POSTALOCITY DESDE EL NAVEGADOR
+#  Pegar al FINAL de api.py (antes de nada raro, cualquier lugar sirve).
+#  Corre el pipeline hasta la cotizacion (NO aprueba, NO paga, NO manda)
+#  y devuelve el log + el resultado como JSON.
+#  >>> BORRAR este bloque despues de usarlo. <<<
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/debug/postalocity-dryrun")
+async def debug_postalocity_dryrun(key: str = ""):
+    import os, io, contextlib, traceback
+    # candado simple: cambia el valor por defecto o pon POSTALOCITY_DEBUG_KEY en Railway
+    expected = os.environ.get("POSTALOCITY_DEBUG_KEY", "reportdefence-2026")
+    if key != expected:
+        raise HTTPException(403, "bad key")
+
+    buf = io.StringIO()
+    result = {}
+    with contextlib.redirect_stdout(buf):
+        try:
+            from postalocity_dispatch import (Address, send_certified_letter,
+                                              BUREAU_ADDRESSES, ENV, BASE)
+            print(f"ENV={ENV}  BASE={BASE}")
+
+            # PDF de prueba (no depende de archivos externos)
+            from reportlab.lib.pagesizes import LETTER
+            from reportlab.lib.units import inch
+            from reportlab.pdfgen import canvas as _cv
+            pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
+            cc = _cv.Canvas(pdf_path, pagesize=LETTER)
+            W, H = LETTER
+            y = H - 1 * inch
+            for ln in ["Cliente Prueba", "123 Main St", "Orlando, FL 32801", "",
+                       "August 11, 2026", "",
+                       "Equifax Information Services LLC", "P.O. Box 740256",
+                       "Atlanta, GA 30374", "",
+                       "TEST letter - pipeline validation only.",
+                       "Not approved, not mailed."]:
+                cc.setFont("Times-Roman", 11); cc.drawString(1 * inch, y, ln); y -= 15
+            cc.showPage(); cc.save()
+
+            res = send_certified_letter(
+                pdf_path,
+                sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
+                recipient=BUREAU_ADDRESSES["equifax"],
+            )
+            result = res
+        except Exception as e:
+            print("ERROR:", e)
+            print(traceback.format_exc())
+
+    return {"log": buf.getvalue(), "result": result}
