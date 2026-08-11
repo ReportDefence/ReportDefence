@@ -1437,6 +1437,105 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
             "count": len(letters_out)}
 
 # ═══════════════════════════════════════════════════════════════
+#  TASK 2 — POSTALOCITY INTEGRATION (USPS Certified Mail)
+#  Envía una carta ya generada por Certified Mail vía Postalocity.
+#  Se detiene en la COTIZACIÓN (no aprueba / no cobra / no manda).
+#  Requiere: postalocity_dispatch.py en la misma carpeta, reportlab,
+#  y env vars POSTALOCITY_ENV(dev|prod)/POSTALOCITY_USER/POSTALOCITY_PASS.
+#  Probar SIEMPRE primero con POSTALOCITY_ENV=dev (no cobra).
+# ═══════════════════════════════════════════════════════════════
+
+class DispatchLetterBody(BaseModel):
+    job_id: str
+    letter_text: str                       # el texto de la carta (de /generate-letters)
+    client_id: str                         # remitente = el cliente (dinámico por job)
+    recipient_name: str                    # destinatario (buró o collector)
+    recipient_line1: str
+    recipient_line2: Optional[str] = ""
+    recipient_city: str
+    recipient_state: str
+    recipient_zip: str
+
+def _letter_text_to_pdf(text: str, out_path: str) -> str:
+    """Renderiza el texto de la carta a un PDF mailable (Times-Roman 11pt,
+    block-style, márgenes 1 pulgada)."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas as _canvas
+    c = _canvas.Canvas(out_path, pagesize=LETTER)
+    W, H = LETTER
+    M = 1 * inch
+    x, y = M, H - M
+    c.setFont("Times-Roman", 11)
+    max_w = W - 2 * M
+    for raw in (text or "").split("\n"):
+        line = ""
+        for word in raw.split(" "):
+            t = (line + " " + word).strip()
+            if c.stringWidth(t, "Times-Roman", 11) <= max_w:
+                line = t
+            else:
+                c.drawString(x, y, line); y -= 15; line = word
+                if y < M:
+                    c.showPage(); c.setFont("Times-Roman", 11); y = H - M
+        c.drawString(x, y, line); y -= 15
+        if y < M:
+            c.showPage(); c.setFont("Times-Roman", 11); y = H - M
+    c.showPage(); c.save()
+    return out_path
+
+@app.post("/dispatch-letter")
+async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_user)):
+    # 1) remitente = el cliente (dirección dinámica por job)
+    cr = sb.table("api_clients").select("*").eq("id", body.client_id).execute()
+    if not cr.data:
+        raise HTTPException(404, "Client not found")
+    cl = cr.data[0]
+
+    # 2) validar que la carta no tenga placeholders de dirección sin resolver
+    if "[Address]" in body.letter_text or "[Collector Address]" in body.letter_text:
+        raise HTTPException(400, "Letter still contains address placeholders. "
+                                 "Fill the client address and recipient address before mailing.")
+
+    # 3) texto -> PDF
+    pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
+    _letter_text_to_pdf(body.letter_text, pdf_path)
+
+    # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
+    try:
+        from postalocity_dispatch import Address, send_certified_letter
+        sender = Address(
+            cl.get("full_name", ""),
+            cl.get("address", ""),
+            cl.get("city", ""),
+            cl.get("state", ""),
+            cl.get("zip_code", ""),
+        )
+        recipient = Address(
+            body.recipient_name, body.recipient_line1,
+            body.recipient_city, body.recipient_state, body.recipient_zip,
+            body.recipient_line2 or "",
+        )
+        result = send_certified_letter(pdf_path, sender=sender, recipient=recipient)
+    except Exception as e:
+        raise HTTPException(502, f"Postalocity dispatch failed: {e}\n{traceback.format_exc()[:800]}")
+
+    # 5) guardar tracking en el job (opcional, no rompe si falla)
+    try:
+        job = sb.table("api_jobs").select("response_history").eq("job_id", body.job_id).execute()
+        hist = (job.data[0].get("response_history") if job.data else []) or []
+        hist.append({"type": "postalocity_dispatch", "recipient": body.recipient_name,
+                     "result": result if isinstance(result, dict) else str(result)})
+        sb.table("api_jobs").update({"response_history": hist}).eq("job_id", body.job_id).execute()
+    except Exception:
+        pass
+
+    # NOTA: llega hasta la cotización. La APROBACIÓN/PAGO es un paso manual
+    # aparte (dashboard de Postalocity), NO se hace en este endpoint.
+    return {"status": "quoted", "quote": result, "note":
+            "Stopped at quote. Approve & pay manually in the Postalocity dashboard."}
+
+# ═══════════════════════════════════════════════════════════════
 #  CIR  +  PROGRESS  (pegar este bloque en api.py, ej. justo ANTES
 #  de la sección "PORTAL (client-facing)")
 #  No requiere cambios en la base ni en otros endpoints.
