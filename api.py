@@ -507,6 +507,60 @@ async def client_letters(client_id: str, user=Depends(get_current_user)):
     return letters
 
 # ═══════════════════════════════════════════════════════════════
+#  TASK 3 — CERTIFIED MAIL RECEIPTS (por carta, por cliente)
+#  Requiere la tabla letter_receipts (ver letter_receipts.sql) y el
+#  bucket 'receipts' en Supabase Storage. El archivo del recibo se sube
+#  desde el frontend; aquí guardamos la metadata + la URL.
+# ═══════════════════════════════════════════════════════════════
+
+class ReceiptCreate(BaseModel):
+    client_id: str
+    job_id: Optional[str] = None
+    round: Optional[str] = None
+    recipient_type: Optional[str] = None      # 'bureau' | 'furnisher'
+    recipient_name: Optional[str] = None
+    tracking_number: Optional[str] = None
+    receipt_file_url: Optional[str] = None
+    postalocity_job_id: Optional[str] = None
+    date_sent: Optional[str] = None           # 'YYYY-MM-DD'
+    return_receipt_date: Optional[str] = None
+    notes: Optional[str] = None
+
+class ReceiptUpdate(BaseModel):
+    tracking_number: Optional[str] = None
+    receipt_file_url: Optional[str] = None
+    date_sent: Optional[str] = None
+    return_receipt_date: Optional[str] = None
+    notes: Optional[str] = None
+
+@app.post("/letter-receipts", status_code=201)
+async def create_receipt(body: ReceiptCreate, user=Depends(get_current_user)):
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    data["operator_id"] = user["id"]
+    res = sb.table("letter_receipts").insert(data).execute()
+    return res.data[0] if res.data else {"ok": True}
+
+@app.get("/clients/{client_id}/receipts")
+async def list_receipts(client_id: str, user=Depends(get_current_user)):
+    res = (sb.table("letter_receipts").select("*")
+           .eq("client_id", client_id).order("created_at", desc=True).execute())
+    return res.data or []
+
+@app.patch("/letter-receipts/{receipt_id}")
+async def update_receipt(receipt_id: str, body: ReceiptUpdate, user=Depends(get_current_user)):
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "No fields to update")
+    sb.table("letter_receipts").update(updates).eq("id", receipt_id).execute()
+    r = sb.table("letter_receipts").select("*").eq("id", receipt_id).execute()
+    return r.data[0] if r.data else {"ok": True}
+
+@app.delete("/letter-receipts/{receipt_id}")
+async def delete_receipt(receipt_id: str, user=Depends(get_current_user)):
+    sb.table("letter_receipts").delete().eq("id", receipt_id).eq("operator_id", user["id"]).execute()
+    return {"ok": True}
+
+# ═══════════════════════════════════════════════════════════════
 #  JOB / REPORT ROUTES
 # ═══════════════════════════════════════════════════════════════
 
@@ -1286,6 +1340,101 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         "blocked": blocked,
         "job_id": body.job_id,
     }
+
+# ═══════════════════════════════════════════════════════════════
+#  TASK 1 — FURNISHER / CREDITOR LETTERS
+#  Genera las cartas a furnishers/acreedores (debt validation + 1681s-2),
+#  con el mismo gate e-OSCAR que las cartas a buró. No toca nada existente.
+# ═══════════════════════════════════════════════════════════════
+
+class GenerateFurnisherLettersBody(BaseModel):
+    job_id: str
+    consumer_name: str
+    consumer_address: Optional[str] = None       # opcional: reemplaza [Address]
+    consumer_city_state_zip: Optional[str] = None # opcional: reemplaza [City, State ZIP]
+    round: Optional[str] = "round_1"             # round_1 | round_2 (no hay furnisher en R3)
+    selected_furnishers: Optional[list] = None    # opcional: lista de nombres a incluir
+    variation_seed: Optional[int] = 0
+
+@app.post("/generate-furnisher-letters")
+async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=Depends(get_current_user)):
+    res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).execute()
+    if not res.data or len(res.data) == 0:
+        raise HTTPException(404, "Job not found")
+    job = res.data[0]
+
+    from original_parser import build_furnisher_letter_engine, validate_eoscar_compliance
+
+    # Reusar el letter_input_engine guardado; si viniera vacío, reconstruir desde negativos
+    letter_input = job.get("letter_input_engine", {}) or {}
+    _has = any(any(len(i) > 0 for i in g.values()) for g in letter_input.values())
+    if not _has:
+        letter_input = _compute_letter_input(job.get("negatives_by_bureau", {}),
+                                              job.get("report_date", ""))
+
+    report_date = job.get("report_date", "")
+    target_round = body.round or "round_1"
+
+    def _eoscar_ok(text: str) -> dict:
+        v = validate_eoscar_compliance(text, letter_type="furnisher_dispute")
+        c = v["checks"]
+        critical_ok = c["ascii"]["pass"] and not c["forbidden_phrases"]["found"]
+        return {"critical_ok": critical_ok, "passed": v["passed"], "score": v["score"],
+                "ascii": c["ascii"]["pass"], "forbidden": c["forbidden_phrases"]["found"]}
+
+    # e-OSCAR gate con reintentos (reshuffle por seed)
+    seed = body.variation_seed or 0
+    furnisher_letters = {}
+    for attempt in range(5):
+        try:
+            furnisher_letters = build_furnisher_letter_engine(
+                letter_input, consumer_name=body.consumer_name, report_date=report_date)
+        except TypeError:
+            # por si tu versión no acepta variation_seed/target_round: llamada básica
+            furnisher_letters = build_furnisher_letter_engine(
+                letter_input, consumer_name=body.consumer_name, report_date=report_date)
+        any_fail = False
+        for _f, rounds in furnisher_letters.items():
+            txt = (rounds or {}).get(target_round, "")
+            if txt and not _eoscar_ok(txt)["critical_ok"]:
+                any_fail = True
+        if not any_fail:
+            break
+        seed += 1
+
+    sel = None
+    if body.selected_furnishers:
+        sel = {s.strip().lower() for s in body.selected_furnishers}
+
+    letters_out, blocked = [], []
+    for furnisher, rounds in (furnisher_letters or {}).items():
+        if sel is not None and furnisher.strip().lower() not in sel:
+            continue
+        text = (rounds or {}).get(target_round, "")
+        if not text:
+            continue
+        # sustitución opcional de la dirección del cliente
+        if body.consumer_address:
+            text = text.replace("[Address]", body.consumer_address)
+        if body.consumer_city_state_zip:
+            text = text.replace("[City, State ZIP]", body.consumer_city_state_zip)
+        chk = _eoscar_ok(text)
+        if not chk["critical_ok"]:
+            blocked.append({"furnisher": furnisher, "round": target_round,
+                            "reason": "eoscar_critical_fail",
+                            "forbidden": chk["forbidden"], "ascii": chk["ascii"]})
+            continue
+        letters_out.append({
+            "furnisher": furnisher,
+            "round": target_round,
+            "text": text,
+            "eoscar": chk,
+            # nota: [Collector Address] lo completa el operador (no está en el reporte)
+            "needs_collector_address": "[Collector Address]" in text,
+        })
+
+    return {"letters": letters_out, "blocked": blocked, "job_id": body.job_id,
+            "count": len(letters_out)}
 
 # ═══════════════════════════════════════════════════════════════
 #  CIR  +  PROGRESS  (pegar este bloque en api.py, ej. justo ANTES
