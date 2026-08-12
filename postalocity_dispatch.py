@@ -463,6 +463,61 @@ BUREAU_ADDRESSES = {
 }
 
 
+def dryrun_addsource(url: str, recipient: "Address | None" = None,
+                     sender: "Address | None" = None) -> dict:
+    """Diagnóstico: prueba la ruta AddSource (URL descargable + deliveryAddress
+    explícito). Instrumentado, no aborta: registra cada paso y devuelve el job."""
+    c = PostalocityClient()
+    rcpt = recipient or BUREAU_ADDRESSES["equifax"]
+    snd = sender or Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801")
+
+    job_id = c.create_job()
+    print(f"  [ok] job creado: {job_id}")
+    try:
+        c.configure_certified(job_id, return_addr=snd, receipt=True)
+        print("  [ok] perfil certificado configurado")
+    except Exception as e:
+        print(f"  [aviso] configure_certified fallo: {e}")
+
+    try:
+        r = c.add_source(job_id, upload_url=url, delivery=rcpt)
+        print(f"  [ok] AddSource OK: {r}")
+    except Exception as e:
+        print(f"  [aviso] AddSource fallo: {e}")
+
+    fn = os.path.basename((url or "").split("?")[0]) or "source.pdf"
+    try:
+        c.split_source(job_id, filename=fn)
+        print(f"  [ok] SplitSource OK (filename={fn})")
+    except Exception as e:
+        print(f"  [aviso] SplitSource fallo: {e}")
+
+    try:
+        c.job_start(job_id)
+        print("  [ok] run disparado")
+    except Exception as e:
+        print(f"  [aviso] run fallo: {e}")
+
+    job = {}
+    for _ in range(8):
+        time.sleep(4)
+        job = c.get_job(job_id)
+        if not isinstance(job, dict):
+            job = {"id": job}
+        if job.get("mailPieceCount") or job.get("totalPrice") or job.get("errorReason") or job.get("mailTo"):
+            break
+    return {
+        "job_id": job_id,
+        "state": job.get("state"),
+        "total_price": job.get("totalPrice"),
+        "mail_piece_count": job.get("mailPieceCount"),
+        "source_count": job.get("sourceCount"),
+        "error_reason": job.get("errorReason"),
+        "detected_recipient": job.get("mailTo"),
+        "raw": job,
+    }
+
+
 # ----------------------------------------------------------------------------
 # Puente con Elitte Solutions / Supabase
 # ----------------------------------------------------------------------------
