@@ -1970,7 +1970,8 @@ async def health():
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/debug/postalocity-dryrun")
-async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str = "", jobid: str = ""):
+async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str = "",
+                                   jobid: str = "", zone: str = ""):
     import os, io, contextlib, traceback
     expected = os.environ.get("POSTALOCITY_DEBUG_KEY", "reportdefence-2026")
     if key != expected:
@@ -1983,7 +1984,7 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
             from postalocity_dispatch import (Address, send_certified_letter,
                                               dryrun_addsource, BUREAU_ADDRESSES,
                                               ENV, BASE, write_text_pdf, PostalocityClient)
-            print(f"ENV={ENV}  BASE={BASE}  mode={mode}  jobid={jobid}")
+            print(f"ENV={ENV}  BASE={BASE}  mode={mode}  jobid={jobid}  zone={zone}")
 
             if jobid:
                 # Inspeccionar un job existente (ya procesado): precio + destinatario.
@@ -1991,6 +1992,7 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
                 job = c.get_job(int(jobid))
                 if not isinstance(job, dict):
                     job = {"id": job}
+                jp = job.get("jobProfile", {}) if isinstance(job, dict) else {}
                 result = {
                     "job_id": int(jobid),
                     "state": job.get("state"),
@@ -2002,8 +2004,38 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
                     "error_reason": job.get("errorReason"),
                     "sample_address": job.get("sampleAddress"),
                     "detected_recipient": job.get("mailTo"),
+                    "addressZone_usado": jp.get("addressZone"),
+                    "mailingClass": jp.get("mailingClass"),
                     "raw": job,
                 }
+            elif mode == "full":
+                # CALIBRACIÓN: carta con FORMATO REAL (cliente arriba, buró debajo,
+                # cuerpo) + addressZone tomado del query ?zone=x,y,w,h. Sirve para
+                # probar valores de zona SIN redeploy: solo cambia la URL.
+                letter = ("Nolberto Valdez Pinales\n"
+                          "4809 Windsor Rd, Lot G20 (Unit G20)\n"
+                          "Champaign, IL 61822\n\n"
+                          "TransUnion\n"
+                          "PO Box 2000\n"
+                          "Chester, PA 19016\n\n"
+                          "August 12, 2026\n\n"
+                          "Hi,\n\n"
+                          "I recently went through my credit report and found 8 accounts "
+                          "I do not believe are being reported correctly.\n\n"
+                          "Nolberto Valdez Pinales")
+                pdf_path = os.path.join(UPLOAD_DIR, "dryrun_full.pdf")
+                write_text_pdf(pdf_path, letter, font="Helvetica", size=11)
+                print(f"addressZone de prueba = {zone or '(vacío -> auto)'}")
+                res = send_certified_letter(
+                    pdf_path,
+                    sender=Address("Nolberto Valdez Pinales", "4809 Windsor Rd, Lot G20 (Unit G20)",
+                                   "Champaign", "IL", "61822"),
+                    recipient=None,
+                    address_zone=zone,   # "" => no fija zona (auto). Un valor => la fija.
+                )
+                result = res
+                print("\n>>> Ahora consulta el job con &jobid=%s para ver a quién le puso "
+                      "la dirección (sample_address / addressZone)." % res.get("job_id"))
             elif mode == "addsource":
                 # Ruta AddSource: Postalocity descarga la URL + dirección explícita.
                 test_url = url or "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
