@@ -1944,7 +1944,7 @@ async def health():
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/debug/postalocity-dryrun")
-async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str = ""):
+async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str = "", jobid: str = ""):
     import os, io, contextlib, traceback
     expected = os.environ.get("POSTALOCITY_DEBUG_KEY", "reportdefence-2026")
     if key != expected:
@@ -1956,10 +1956,29 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
         try:
             from postalocity_dispatch import (Address, send_certified_letter,
                                               dryrun_addsource, BUREAU_ADDRESSES,
-                                              ENV, BASE, write_text_pdf)
-            print(f"ENV={ENV}  BASE={BASE}  mode={mode}")
+                                              ENV, BASE, write_text_pdf, PostalocityClient)
+            print(f"ENV={ENV}  BASE={BASE}  mode={mode}  jobid={jobid}")
 
-            if mode == "addsource":
+            if jobid:
+                # Inspeccionar un job existente (ya procesado): precio + destinatario.
+                c = PostalocityClient()
+                job = c.get_job(int(jobid))
+                if not isinstance(job, dict):
+                    job = {"id": job}
+                result = {
+                    "job_id": int(jobid),
+                    "state": job.get("state"),
+                    "progress": job.get("progress"),
+                    "total_price": job.get("totalPrice"),
+                    "total_postage": job.get("totalPostage"),
+                    "mail_piece_count": job.get("mailPieceCount"),
+                    "source_count": job.get("sourceCount"),
+                    "error_reason": job.get("errorReason"),
+                    "sample_address": job.get("sampleAddress"),
+                    "detected_recipient": job.get("mailTo"),
+                    "raw": job,
+                }
+            elif mode == "addsource":
                 # Ruta AddSource: Postalocity descarga la URL + dirección explícita.
                 test_url = url or "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
                 print(f"AddSource url={test_url}")
