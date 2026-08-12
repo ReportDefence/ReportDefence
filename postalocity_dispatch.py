@@ -398,21 +398,21 @@ def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | N
     filename, object_url = c.upload_pdf_to_s3(up, pdf_path)
     print(f"  [ok] PDF subido a S3: {filename}")
 
-    # Fijar el DESTINATARIO de forma EXPLICITA via AddSource (confirmado en
-    # apidoc: AddSourceRequest lleva deliveryAddress). Asi el ruteo no depende
-    # de la posicion sobre-ventana del PDF. Si no viene recipient, o si AddSource
-    # fallara, caemos al modo de extraccion por texto (solo split).
-    if recipient is not None:
-        try:
-            c.add_source(job_id, upload_url=object_url, delivery=recipient)
-            print(f"  [ok] AddSource con destinatario explicito: {recipient.name}")
-        except Exception as e:
-            print(f"  [aviso] AddSource con deliveryAddress fallo: {e}")
-            print("         cae a extraccion por texto (split directo).")
-    c.split_source(job_id, filename=filename)
-    print("  [ok] documento partido en paginas")
-    c.job_start(job_id)
-    print("  [ok] procesamiento disparado")
+    # FLUJO DIRECTO documentado: tras subir el PDF, se llama SplitSource.
+    # (AddSource NO se usa aqui: es una via ALTERNATIVA que descarga el PDF
+    #  desde una URL publica/firmada + deliveryAddress; con la subida directa
+    #  al bucket privado de Postalocity, AddSource devuelve 500.)
+    # No abortamos si algo falla: seguimos hasta GetJob para leer errorReason.
+    try:
+        c.split_source(job_id, filename=filename)
+        print("  [ok] documento partido en paginas")
+    except Exception as e:
+        print(f"  [aviso] SplitSource fallo: {e}")
+    try:
+        c.job_start(job_id)
+        print("  [ok] procesamiento disparado")
+    except Exception as e:
+        print(f"  [aviso] JobStart fallo: {e}")
 
     job = {}
     if poll:
@@ -441,6 +441,9 @@ def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | N
         "progress": job.get("progress"),
         "total_price": job.get("totalPrice"),
         "total_postage": job.get("totalPostage"),
+        "source_count": job.get("sourceCount"),
+        "mail_piece_count": job.get("mailPieceCount"),
+        "error_reason": job.get("errorReason"),
         "test": job.get("test"),
         "detected_recipient": job.get("mailTo"),
         "raw": job,
