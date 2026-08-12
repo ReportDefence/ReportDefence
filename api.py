@@ -1479,16 +1479,13 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         raise HTTPException(400, "Letter still contains address placeholders. "
                                  "Fill the client address and recipient address before mailing.")
 
-    # 3) componer el PDF mailable: dirección del destinatario (que ya conocemos)
-    #    en la ventana, Helvetica + formato USPS (calidad Q1) + el cuerpo debajo.
-    #    El remitente (cliente) lo imprime Postalocity (renderFromAddress).
-    from postalocity_dispatch import (Address, send_certified_letter,
-                                      build_recipient_lines, build_mailable_pdf)
-    recipient_lines = build_recipient_lines(
-        body.recipient_name, body.recipient_line1, body.recipient_city,
-        body.recipient_state, body.recipient_zip, body.recipient_line2 or "")
+    # 3) La carta YA trae la dirección del destinatario (formato de negocio con
+    #    el bloque del buró/collector). NO la inyectamos de nuevo: la renderizamos
+    #    tal cual en Helvetica (nítida para el OCR). Postalocity lee la dirección
+    #    del propio bloque de la carta.
+    from postalocity_dispatch import Address, send_certified_letter, write_text_pdf
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
-    build_mailable_pdf(pdf_path, recipient_lines, body.letter_text)
+    write_text_pdf(pdf_path, body.letter_text, font="Helvetica", size=11)
 
     # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
     try:
@@ -1499,12 +1496,9 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
             cl.get("state", ""),
             cl.get("zip_code", ""),
         )
-        recipient = Address(
-            body.recipient_name, body.recipient_line1,
-            body.recipient_city, body.recipient_state, body.recipient_zip,
-            body.recipient_line2 or "",
-        )
-        result = send_certified_letter(pdf_path, sender=sender, recipient=recipient)
+        # recipient=None: la dirección la lee Postalocity de la propia carta.
+        # (AddSource no está disponible en esta org; así evitamos ese intento fallido.)
+        result = send_certified_letter(pdf_path, sender=sender, recipient=None)
     except Exception as e:
         raise HTTPException(502, f"Postalocity dispatch failed: {e}\n{traceback.format_exc()[:800]}")
 
