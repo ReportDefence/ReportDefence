@@ -1990,15 +1990,16 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
                 # el mismo (renderFromAddress=true). Asi detecta al destinatario.
                 pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
                 write_text_pdf(pdf_path,
-                    "\n\n\n\n\n"                                   # ~2" en blanco (ventana del remitente)
-                    "Equifax Information Services LLC\n"
-                    "P.O. Box 740256\n"
-                    "Atlanta, GA 30374\n"
-                    "\n\n"
+                    "\n\n\n\n\n\n"                                 # baja la dirección a la ventana (~2.2")
+                    "EQUIFAX INFORMATION SERVICES LLC\n"
+                    "PO BOX 740256\n"
+                    "ATLANTA GA 30374\n"
+                    "\n\n\n"
                     "August 12, 2026\n\n"
                     "To whom it may concern:\n\n"
                     "This is a TEST letter for pipeline validation only. "
-                    "Not approved, not mailed.")
+                    "Not approved, not mailed.",
+                    font="Helvetica", size=12)
                 result = send_certified_letter(
                     pdf_path,
                     sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
