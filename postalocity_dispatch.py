@@ -165,6 +165,32 @@ def strip_leading_address(body):
             return "\n".join(lines[i:])
     return body or ""
 
+_GREETINGS = ("hi", "hello", "dear", "re:", "to whom", "greetings")
+
+def strip_return_block(body):
+    """Quita el PRIMER bloque de dirección de la carta (el remitente/cliente que
+    la carta imprime arriba), hasta la primera línea en blanco. Así el bloque del
+    DESTINATARIO (buró/collector) queda como la dirección superior, que es la que
+    Postalocity lee como el DESTINO. El remitente lo imprime Postalocity aparte
+    (renderFromAddress). Conservador: si la carta ya empieza con un saludo, no
+    toca nada."""
+    lines = (body or "").split("\n")
+    start = 0
+    while start < len(lines) and lines[start].strip() == "":
+        start += 1
+    if start >= len(lines):
+        return body or ""
+    if lines[start].strip().lower().startswith(_GREETINGS):
+        return "\n".join(lines[start:])
+    # avanzar por el primer bloque (no vacío) = el remitente/cliente
+    i = start
+    while i < len(lines) and lines[i].strip() != "":
+        i += 1
+    rest = lines[i:]
+    while rest and rest[0].strip() == "":
+        rest = rest[1:]
+    return "\n".join(rest) if rest else (body or "")
+
 def build_mailable_pdf(path, recipient_lines, body_text, window_blank_lines=6,
                        strip_header=True, size=11):
     """Compone el PDF a enviar: ventana (dirección del destinatario) + cuerpo.
