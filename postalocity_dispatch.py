@@ -78,8 +78,10 @@ def _wrap_lines(text, wrap=95):
     return out
 
 def text_to_pdf_bytes(text, size=11, margin=72, leading=15, wrap=95,
-                      page_w=612, page_h=792):
-    """Renderiza texto a un PDF mailable (Times-Roman) sin dependencias externas."""
+                      page_w=612, page_h=792, font="Times-Roman"):
+    """Renderiza texto a un PDF mailable sin dependencias externas.
+    font: fuente base-14 (Times-Roman, Helvetica, Courier). Helvetica lee
+    más nítido por OCR (útil para la dirección)."""
     lines = _wrap_lines(text, wrap)
     per_page = max(1, int((page_h - 2 * margin) // leading))
     pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)] or [[""]]
@@ -100,7 +102,7 @@ def text_to_pdf_bytes(text, size=11, margin=72, leading=15, wrap=95,
     parts = []
     parts.append((1, b"<< /Type /Catalog /Pages 2 0 R >>"))
     parts.append((2, ("<< /Type /Pages /Count %d /Kids [%s] >>" % (len(page_obj_ids), kids)).encode()))
-    parts.append((3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>"))
+    parts.append((3, ("<< /Type /Font /Subtype /Type1 /BaseFont /%s >>" % font).encode()))
     for idx, pid in enumerate(page_obj_ids):
         cid = content_obj_ids[idx]
         body = ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] "
