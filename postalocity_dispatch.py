@@ -328,17 +328,23 @@ class PostalocityClient:
         return self._check(r.json(), f"update_job[{field_name}]")
 
     def configure_certified(self, job_id: int, return_addr: Address,
-                            receipt=True, signature="NONE") -> None:
-        # Confirmado por Postalocity: los campos del perfil llevan el prefijo
-        # "jobProfile." y el value va como STRING JSON (update_job lo serializa).
-        # El remitente = el cliente (dinamico por job).
+                            receipt=True, signature="NONE", email="") -> None:
+        # EL FIX (confirmado comparando con un job certificado real, 1216389):
+        # lo que hace la carta CERTIFICADA es  mailingClass = "CERTIFIED".
+        # El objeto certifiedMail solo controla los add-ons (return receipt,
+        # firma, etc.). Sin mailingClass="CERTIFIED" sale como First Class.
         self.update_job(job_id, "jobProfile.envelopeReturnAddress",
                         return_addr.to_postal())
-        self.update_job(job_id, "jobProfile.certifiedMail", {
+        self.update_job(job_id, "jobProfile.mailingClass", "CERTIFIED")
+        self.update_job(job_id, "jobProfile.storageClass", "EXTENDED")  # retención de prueba
+        cm = {
             "receipt": receipt, "restricted": False, "adult": False,
             "signature": signature,
             "returnAddress": return_addr.to_postal(),
-        })
+        }
+        if email:
+            cm["email"] = email  # para el aviso de Return Receipt electrónico
+        self.update_job(job_id, "jobProfile.certifiedMail", cm)
 
     # 4) GetUploadParams
     def get_upload_params(self, job_id: int) -> dict:
@@ -425,14 +431,15 @@ class PostalocityClient:
 
 def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | None = None,
                           receipt: bool = True,
-                          poll: bool = True) -> dict:
+                          poll: bool = True, cert_email: str | None = None) -> dict:
     c = PostalocityClient()
 
+    email = cert_email if cert_email is not None else os.environ.get("POSTALOCITY_CERT_EMAIL", "")
     job_id = c.create_job()
     print(f"  [ok] job creado: {job_id}")
     try:
-        c.configure_certified(job_id, return_addr=sender, receipt=receipt)
-        print("  [ok] perfil certificado configurado")
+        c.configure_certified(job_id, return_addr=sender, receipt=receipt, email=email)
+        print("  [ok] perfil CERTIFIED configurado (mailingClass=CERTIFIED)")
     except Exception as e:
         print(f"  [aviso] no se pudo configurar el certificado aun: {e}")
         print("         (seguimos para ver el resto del flujo)")
