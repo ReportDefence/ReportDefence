@@ -1457,32 +1457,11 @@ class DispatchLetterBody(BaseModel):
     recipient_zip: str
 
 def _letter_text_to_pdf(text: str, out_path: str) -> str:
-    """Renderiza el texto de la carta a un PDF mailable (Times-Roman 11pt,
-    block-style, márgenes 1 pulgada)."""
-    from reportlab.lib.pagesizes import LETTER
-    from reportlab.lib.units import inch
-    from reportlab.pdfgen import canvas as _canvas
-    c = _canvas.Canvas(out_path, pagesize=LETTER)
-    W, H = LETTER
-    M = 1 * inch
-    x, y = M, H - M
-    c.setFont("Times-Roman", 11)
-    max_w = W - 2 * M
-    for raw in (text or "").split("\n"):
-        line = ""
-        for word in raw.split(" "):
-            t = (line + " " + word).strip()
-            if c.stringWidth(t, "Times-Roman", 11) <= max_w:
-                line = t
-            else:
-                c.drawString(x, y, line); y -= 15; line = word
-                if y < M:
-                    c.showPage(); c.setFont("Times-Roman", 11); y = H - M
-        c.drawString(x, y, line); y -= 15
-        if y < M:
-            c.showPage(); c.setFont("Times-Roman", 11); y = H - M
-    c.showPage(); c.save()
-    return out_path
+    """Renderiza el texto de la carta a un PDF mailable (Times-Roman 11pt).
+    Usa el generador de PDF puro del módulo de Postalocity (sin reportlab),
+    para no depender de librerías que puedan faltar en el deploy."""
+    from postalocity_dispatch import write_text_pdf
+    return write_text_pdf(out_path, text or "", size=11, margin=72, leading=15, wrap=95)
 
 @app.post("/dispatch-letter")
 async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_user)):
@@ -1961,16 +1940,12 @@ async def health():
 
 # ═══════════════════════════════════════════════════════════════
 #  TEMPORAL — DRY-RUN DE POSTALOCITY DESDE EL NAVEGADOR
-#  Pegar al FINAL de api.py (antes de nada raro, cualquier lugar sirve).
-#  Corre el pipeline hasta la cotizacion (NO aprueba, NO paga, NO manda)
-#  y devuelve el log + el resultado como JSON.
-#  >>> BORRAR este bloque despues de usarlo. <<<
+#  (sin reportlab, sin requests). BORRAR este bloque tras usarlo.
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/debug/postalocity-dryrun")
 async def debug_postalocity_dryrun(key: str = ""):
     import os, io, contextlib, traceback
-    # candado simple: cambia el valor por defecto o pon POSTALOCITY_DEBUG_KEY en Railway
     expected = os.environ.get("POSTALOCITY_DEBUG_KEY", "reportdefence-2026")
     if key != expected:
         raise HTTPException(403, "bad key")
@@ -1980,26 +1955,15 @@ async def debug_postalocity_dryrun(key: str = ""):
     with contextlib.redirect_stdout(buf):
         try:
             from postalocity_dispatch import (Address, send_certified_letter,
-                                              BUREAU_ADDRESSES, ENV, BASE)
+                                              BUREAU_ADDRESSES, ENV, BASE, write_text_pdf)
             print(f"ENV={ENV}  BASE={BASE}")
-
-            # PDF de prueba (no depende de archivos externos)
-            from reportlab.lib.pagesizes import LETTER
-            from reportlab.lib.units import inch
-            from reportlab.pdfgen import canvas as _cv
             pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
-            cc = _cv.Canvas(pdf_path, pagesize=LETTER)
-            W, H = LETTER
-            y = H - 1 * inch
-            for ln in ["Cliente Prueba", "123 Main St", "Orlando, FL 32801", "",
-                       "August 11, 2026", "",
-                       "Equifax Information Services LLC", "P.O. Box 740256",
-                       "Atlanta, GA 30374", "",
-                       "TEST letter - pipeline validation only.",
-                       "Not approved, not mailed."]:
-                cc.setFont("Times-Roman", 11); cc.drawString(1 * inch, y, ln); y -= 15
-            cc.showPage(); cc.save()
-
+            write_text_pdf(pdf_path,
+                "Cliente Prueba\n123 Main St\nOrlando, FL 32801\n\n"
+                "August 12, 2026\n\n"
+                "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374\n\n"
+                "To whom it may concern:\n\n"
+                "TEST letter - pipeline validation only. Not approved, not mailed.")
             res = send_certified_letter(
                 pdf_path,
                 sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
