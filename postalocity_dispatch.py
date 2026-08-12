@@ -497,9 +497,11 @@ class PostalocityClient:
 # (NO aprueba / NO paga / NO manda — eso lo haces tu)
 # ----------------------------------------------------------------------------
 
-# Ventana de ENTREGA (addressZone) tomada de un job certificado real (1216389).
-# La carta pone el buró a ~2.6" desde arriba, justo dentro de esta zona.
-DELIVERY_ADDRESS_ZONE = "60,178,300,170"
+# Ventana de ENTREGA (addressZone = "x,y,w,h" en puntos, origen arriba-izquierda).
+# Calculada sobre el render REAL de la carta: el bloque del buró cae en
+# y≈123-164pt (formato fijo: cliente 3 líneas arriba). La zona lo cubre con
+# buffer, dejando al cliente (arriba) y a la fecha/cuerpo (abajo) FUERA.
+DELIVERY_ADDRESS_ZONE = "56,116,300,58"
 
 def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | None = None,
                           receipt: bool = True,
