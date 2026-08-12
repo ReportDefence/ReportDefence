@@ -1479,16 +1479,23 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         raise HTTPException(400, "Letter still contains address placeholders. "
                                  "Fill the client address and recipient address before mailing.")
 
-    # 3) La carta trae DOS direcciones: la del cliente (arriba) y la del buró.
-    #    Postalocity imprime el remitente por su cuenta (renderFromAddress) y lee
-    #    la PRIMERA dirección de la carta como el DESTINO. Por eso quitamos el
-    #    bloque del cliente, para que el DESTINO sea el buró/collector (no el
-    #    cliente). La carta se renderiza en Helvetica (nítida para el OCR).
+    # 3) FORMATO COMPLETO (el que se quiere conservar): cliente arriba, dirección
+    #    del buró en la ventana de entrega (posición fija + formato USPS), y el
+    #    cuerpo debajo. El addressZone (fijado en configure_certified) hace que
+    #    Postalocity lea el BURÓ como destino, no el cliente.
     from postalocity_dispatch import (Address, send_certified_letter,
-                                      write_text_pdf, strip_return_block)
-    mailable_text = strip_return_block(body.letter_text)
+                                      build_recipient_lines, build_windowed_letter)
+    client_lines = [
+        cl.get("full_name", ""),
+        cl.get("address", ""),
+        f"{cl.get('city','')}, {cl.get('state','')} {cl.get('zip_code','')}".strip(" ,"),
+    ]
+    client_lines = [x for x in client_lines if x and x.strip()]
+    bureau_lines = build_recipient_lines(
+        body.recipient_name, body.recipient_line1, body.recipient_city,
+        body.recipient_state, body.recipient_zip, body.recipient_line2 or "")
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
-    write_text_pdf(pdf_path, mailable_text, font="Helvetica", size=11)
+    build_windowed_letter(pdf_path, client_lines, bureau_lines, body.letter_text)
 
     # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
     try:
