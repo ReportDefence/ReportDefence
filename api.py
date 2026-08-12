@@ -1944,7 +1944,7 @@ async def health():
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/debug/postalocity-dryrun")
-async def debug_postalocity_dryrun(key: str = ""):
+async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str = ""):
     import os, io, contextlib, traceback
     expected = os.environ.get("POSTALOCITY_DEBUG_KEY", "reportdefence-2026")
     if key != expected:
@@ -1955,21 +1955,29 @@ async def debug_postalocity_dryrun(key: str = ""):
     with contextlib.redirect_stdout(buf):
         try:
             from postalocity_dispatch import (Address, send_certified_letter,
-                                              BUREAU_ADDRESSES, ENV, BASE, write_text_pdf)
-            print(f"ENV={ENV}  BASE={BASE}")
-            pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
-            write_text_pdf(pdf_path,
-                "Cliente Prueba\n123 Main St\nOrlando, FL 32801\n\n"
-                "August 12, 2026\n\n"
-                "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374\n\n"
-                "To whom it may concern:\n\n"
-                "TEST letter - pipeline validation only. Not approved, not mailed.")
-            res = send_certified_letter(
-                pdf_path,
-                sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
-                recipient=BUREAU_ADDRESSES["equifax"],
-            )
-            result = res
+                                              dryrun_addsource, BUREAU_ADDRESSES,
+                                              ENV, BASE, write_text_pdf)
+            print(f"ENV={ENV}  BASE={BASE}  mode={mode}")
+
+            if mode == "addsource":
+                # Ruta AddSource: Postalocity descarga la URL + dirección explícita.
+                test_url = url or "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+                print(f"AddSource url={test_url}")
+                result = dryrun_addsource(test_url, recipient=BUREAU_ADDRESSES["equifax"])
+            else:
+                # Ruta DIRECTA: subir PDF a S3 -> SplitSource.
+                pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
+                write_text_pdf(pdf_path,
+                    "Cliente Prueba\n123 Main St\nOrlando, FL 32801\n\n"
+                    "August 12, 2026\n\n"
+                    "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374\n\n"
+                    "To whom it may concern:\n\n"
+                    "TEST letter - pipeline validation only. Not approved, not mailed.")
+                result = send_certified_letter(
+                    pdf_path,
+                    sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
+                    recipient=BUREAU_ADDRESSES["equifax"],
+                )
         except Exception as e:
             print("ERROR:", e)
             print(traceback.format_exc())
