@@ -191,15 +191,51 @@ def strip_return_block(body):
         rest = rest[1:]
     return "\n".join(rest) if rest else (body or "")
 
+def extract_body(text):
+    """Devuelve el CUERPO de la carta, quitando TODO el encabezado (direcciones +
+    fecha), sin importar el formato. El cuerpo empieza en el primer saludo
+    (Hi/Hello/Dear/Re/To whom/Greetings) o, si no hay saludo, en la primera línea
+    'de prosa' (>45 caracteres). Las líneas de dirección/fecha son cortas, así que
+    no disparan la regla. Robusto ante cartas con o sin bloque de dirección."""
+    lines = (text or "").split("\n")
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.lower().startswith(_GREETINGS):
+            return "\n".join(lines[i:])
+        if len(s) > 45:
+            return "\n".join(lines[i:])
+    return text or ""
+
 def build_mailable_pdf(path, recipient_lines, body_text, window_blank_lines=6,
                        strip_header=True, size=11):
-    """Compone el PDF a enviar: ventana (dirección del destinatario) + cuerpo.
-    El remitente lo imprime Postalocity (renderFromAddress)."""
-    body = strip_leading_address(body_text) if strip_header else (body_text or "")
+    """Compone el PDF a enviar: ventana (dirección del destinatario, formato USPS)
+    + el CUERPO de la carta (sin su encabezado). El remitente y la fecha los pone
+    Postalocity (renderFromAddress / renderFromDate)."""
+    body = extract_body(body_text) if strip_header else (body_text or "")
     text = ("\n" * window_blank_lines
             + "\n".join(recipient_lines)
             + "\n\n\n" + body)
     return write_text_pdf(path, text, font="Helvetica", size=size)
+
+
+def build_windowed_letter(path, client_lines, bureau_lines, body_text,
+                          bureau_line=8, size=11):
+    """Carta con el FORMATO COMPLETO que se quiere conservar:
+       - Cliente (remitente) arriba.
+       - Dirección del buró/collector en la posición FIJA de la ventana de
+         entrega (línea `bureau_line` ~2.6" desde arriba), en formato USPS.
+       - Cuerpo de la carta debajo.
+    El buró queda dentro del addressZone (que fijamos aparte) y el cliente queda
+    ARRIBA de esa zona, así Postalocity lee el buró como destino. El largo de la
+    dirección del cliente no afecta: el buró siempre cae en la línea fija."""
+    body = extract_body(body_text)
+    lines = list(client_lines)
+    while len(lines) < bureau_line:
+        lines.append("")
+    lines += list(bureau_lines)
+    lines += ["", "", ""]
+    lines += body.split("\n")
+    return write_text_pdf(path, "\n".join(lines), font="Helvetica", size=size)
 
 
 
@@ -354,7 +390,8 @@ class PostalocityClient:
         return self._check(r.json(), f"update_job[{field_name}]")
 
     def configure_certified(self, job_id: int, return_addr: Address,
-                            receipt=True, signature="NONE", email="") -> None:
+                            receipt=True, signature="NONE", email="",
+                            address_zone="") -> None:
         # EL FIX (confirmado comparando con un job certificado real, 1216389):
         # lo que hace la carta CERTIFICADA es  mailingClass = "CERTIFIED".
         # El objeto certifiedMail solo controla los add-ons (return receipt,
@@ -363,6 +400,11 @@ class PostalocityClient:
                         return_addr.to_postal())
         self.update_job(job_id, "jobProfile.mailingClass", "CERTIFIED")
         self.update_job(job_id, "jobProfile.storageClass", "EXTENDED")  # retención de prueba
+        if address_zone:
+            # Fija la ventana de ENTREGA donde Postalocity lee la dirección del
+            # destinatario (buró). Así lee el buró y no el cliente (que va arriba,
+            # fuera de la zona). Valor tomado de un job certificado real.
+            self.update_job(job_id, "jobProfile.addressZone", address_zone)
         cm = {
             "receipt": receipt, "restricted": False, "adult": False,
             "signature": signature,
@@ -455,17 +497,23 @@ class PostalocityClient:
 # (NO aprueba / NO paga / NO manda — eso lo haces tu)
 # ----------------------------------------------------------------------------
 
+# Ventana de ENTREGA (addressZone) tomada de un job certificado real (1216389).
+# La carta pone el buró a ~2.6" desde arriba, justo dentro de esta zona.
+DELIVERY_ADDRESS_ZONE = "60,178,300,170"
+
 def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | None = None,
                           receipt: bool = True,
-                          poll: bool = True, cert_email: str | None = None) -> dict:
+                          poll: bool = True, cert_email: str | None = None,
+                          address_zone: str = DELIVERY_ADDRESS_ZONE) -> dict:
     c = PostalocityClient()
 
     email = cert_email if cert_email is not None else os.environ.get("POSTALOCITY_CERT_EMAIL", "")
     job_id = c.create_job()
     print(f"  [ok] job creado: {job_id}")
     try:
-        c.configure_certified(job_id, return_addr=sender, receipt=receipt, email=email)
-        print("  [ok] perfil CERTIFIED configurado (mailingClass=CERTIFIED)")
+        c.configure_certified(job_id, return_addr=sender, receipt=receipt, email=email,
+                              address_zone=address_zone)
+        print("  [ok] perfil CERTIFIED configurado (mailingClass=CERTIFIED, addressZone fijo)")
     except Exception as e:
         print(f"  [aviso] no se pudo configurar el certificado aun: {e}")
         print("         (seguimos para ver el resto del flujo)")
