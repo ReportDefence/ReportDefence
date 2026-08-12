@@ -1455,6 +1455,9 @@ class DispatchLetterBody(BaseModel):
     recipient_city: str
     recipient_state: str
     recipient_zip: str
+    recipient_type: Optional[str] = None   # 'bureau' | 'furnisher' (para el recibo)
+    round: Optional[str] = None            # round_1 | round_2 | round_3 (para el recibo)
+    save_receipt: Optional[bool] = True    # crea fila en letter_receipts con el postalocity_job_id
 
 def _letter_text_to_pdf(text: str, out_path: str) -> str:
     """Renderiza el texto de la carta a un PDF mailable (Times-Roman 11pt).
@@ -1476,13 +1479,19 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         raise HTTPException(400, "Letter still contains address placeholders. "
                                  "Fill the client address and recipient address before mailing.")
 
-    # 3) texto -> PDF
+    # 3) componer el PDF mailable: dirección del destinatario (que ya conocemos)
+    #    en la ventana, Helvetica + formato USPS (calidad Q1) + el cuerpo debajo.
+    #    El remitente (cliente) lo imprime Postalocity (renderFromAddress).
+    from postalocity_dispatch import (Address, send_certified_letter,
+                                      build_recipient_lines, build_mailable_pdf)
+    recipient_lines = build_recipient_lines(
+        body.recipient_name, body.recipient_line1, body.recipient_city,
+        body.recipient_state, body.recipient_zip, body.recipient_line2 or "")
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
-    _letter_text_to_pdf(body.letter_text, pdf_path)
+    build_mailable_pdf(pdf_path, recipient_lines, body.letter_text)
 
     # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
     try:
-        from postalocity_dispatch import Address, send_certified_letter
         sender = Address(
             cl.get("full_name", ""),
             cl.get("address", ""),
@@ -1499,7 +1508,9 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
     except Exception as e:
         raise HTTPException(502, f"Postalocity dispatch failed: {e}\n{traceback.format_exc()[:800]}")
 
-    # 5) guardar tracking en el job (opcional, no rompe si falla)
+    pjob = result.get("job_id") if isinstance(result, dict) else None
+
+    # 5) guardar historial en el job (opcional, no rompe si falla)
     try:
         job = sb.table("api_jobs").select("response_history").eq("job_id", body.job_id).execute()
         hist = (job.data[0].get("response_history") if job.data else []) or []
@@ -1509,9 +1520,30 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
     except Exception:
         pass
 
+    # 6) crear fila en letter_receipts con el postalocity_job_id (Tarea 3).
+    #    El tracking / date_sent se cargan luego, al aprobar y enviar.
+    receipt = None
+    if body.save_receipt:
+        try:
+            data = {
+                "client_id": body.client_id,
+                "job_id": body.job_id,
+                "round": body.round,
+                "recipient_type": body.recipient_type,
+                "recipient_name": body.recipient_name,
+                "postalocity_job_id": str(pjob) if pjob is not None else None,
+                "operator_id": user["id"],
+            }
+            data = {k: v for k, v in data.items() if v is not None}
+            r = sb.table("letter_receipts").insert(data).execute()
+            receipt = r.data[0] if r.data else None
+        except Exception:
+            receipt = None
+
     # NOTA: llega hasta la cotización. La APROBACIÓN/PAGO es un paso manual
     # aparte (dashboard de Postalocity), NO se hace en este endpoint.
-    return {"status": "quoted", "quote": result, "note":
+    return {"status": "quoted", "quote": result, "postalocity_job_id": pjob,
+            "receipt": receipt, "note":
             "Stopped at quote. Approve & pay manually in the Postalocity dashboard."}
 
 # ═══════════════════════════════════════════════════════════════
