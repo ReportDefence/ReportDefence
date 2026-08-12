@@ -1966,13 +1966,20 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
                 result = dryrun_addsource(test_url, recipient=BUREAU_ADDRESSES["equifax"])
             else:
                 # Ruta DIRECTA: subir PDF a S3 -> SplitSource.
+                # La carta lleva SOLO el destinatario arriba (en la posicion de
+                # ventana ~2"), sin remitente: Postalocity imprime el remitente
+                # el mismo (renderFromAddress=true). Asi detecta al destinatario.
                 pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
                 write_text_pdf(pdf_path,
-                    "Cliente Prueba\n123 Main St\nOrlando, FL 32801\n\n"
+                    "\n\n\n\n\n"                                   # ~2" en blanco (ventana del remitente)
+                    "Equifax Information Services LLC\n"
+                    "P.O. Box 740256\n"
+                    "Atlanta, GA 30374\n"
+                    "\n\n"
                     "August 12, 2026\n\n"
-                    "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374\n\n"
                     "To whom it may concern:\n\n"
-                    "TEST letter - pipeline validation only. Not approved, not mailed.")
+                    "This is a TEST letter for pipeline validation only. "
+                    "Not approved, not mailed.")
                 result = send_certified_letter(
                     pdf_path,
                     sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
