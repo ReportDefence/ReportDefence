@@ -46,14 +46,90 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
-import requests
+import httpx
 
 
 def _check_http(r):
     """Como raise_for_status pero incluye el mensaje del servidor (clave para depurar)."""
-    if not r.ok:
+    if not r.is_success:
         raise RuntimeError(f"HTTP {r.status_code} en {r.url}\n--- respuesta del servidor ---\n{r.text[:1000]}")
     return r
+
+
+# ----------------------------------------------------------------------------
+# Generador de PDF puro (sin reportlab). Multipágina + wrap simple.
+# ----------------------------------------------------------------------------
+
+def _pdf_escape(s):
+    return (s or "").replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+def _wrap_lines(text, wrap=95):
+    out = []
+    for raw in (text or "").split("\n"):
+        if len(raw) <= wrap:
+            out.append(raw); continue
+        cur = ""
+        for w in raw.split(" "):
+            if len((cur + " " + w).strip()) <= wrap:
+                cur = (cur + " " + w).strip()
+            else:
+                out.append(cur); cur = w
+        out.append(cur)
+    return out
+
+def text_to_pdf_bytes(text, size=11, margin=72, leading=15, wrap=95,
+                      page_w=612, page_h=792):
+    """Renderiza texto a un PDF mailable (Times-Roman) sin dependencias externas."""
+    lines = _wrap_lines(text, wrap)
+    per_page = max(1, int((page_h - 2 * margin) // leading))
+    pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)] or [[""]]
+
+    page_obj_ids, content_obj_ids, content_streams = [], [], []
+    next_id = 4
+    for pl in pages:
+        pid = next_id; cid = next_id + 1; next_id += 2
+        page_obj_ids.append(pid); content_obj_ids.append(cid)
+        y = page_h - margin
+        s = "BT\n/F1 %d Tf\n%d TL\n%d %d Td\n" % (size, leading, margin, y)
+        for ln in pl:
+            s += "(%s) Tj\nT*\n" % _pdf_escape(ln)
+        s += "ET"
+        content_streams.append(s)
+
+    kids = " ".join("%d 0 R" % p for p in page_obj_ids)
+    parts = []
+    parts.append((1, b"<< /Type /Catalog /Pages 2 0 R >>"))
+    parts.append((2, ("<< /Type /Pages /Count %d /Kids [%s] >>" % (len(page_obj_ids), kids)).encode()))
+    parts.append((3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>"))
+    for idx, pid in enumerate(page_obj_ids):
+        cid = content_obj_ids[idx]
+        body = ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] "
+                "/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>"
+                % (page_w, page_h, cid)).encode()
+        parts.append((pid, body))
+        cs = content_streams[idx].encode("latin-1", "replace")
+        stream = b"<< /Length %d >>\nstream\n" % len(cs) + cs + b"\nendstream"
+        parts.append((cid, stream))
+
+    parts.sort(key=lambda x: x[0])
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    for num, body in parts:
+        offsets[num] = len(out)
+        out += ("%d 0 obj\n" % num).encode() + body + b"\nendobj\n"
+    xref_pos = len(out)
+    n = len(parts) + 1
+    out += ("xref\n0 %d\n" % n).encode()
+    out += b"0000000000 65535 f \n"
+    for num in range(1, n):
+        out += ("%010d 00000 n \n" % offsets[num]).encode()
+    out += ("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF" % (n, xref_pos)).encode()
+    return bytes(out)
+
+def write_text_pdf(path, text, **kw):
+    with open(path, "wb") as f:
+        f.write(text_to_pdf_bytes(text, **kw))
+    return path
 
 
 
@@ -122,14 +198,14 @@ class TokenManager:
         return token
 
     def _login(self) -> str:
-        r = requests.post(f"{self.base}/user/login", headers=self._hdr(),
+        r = httpx.post(f"{self.base}/user/login", headers=self._hdr(),
                           json={"userName": POSTALOCITY_USER,
                                 "password": POSTALOCITY_PASS}, timeout=30)
         _check_http(r)
         return self._store(r.json())
 
     def _regen(self) -> str:
-        r = requests.post(f"{self.base}/user/regenToken",   # CONFIRMAR path
+        r = httpx.post(f"{self.base}/user/regenToken",   # CONFIRMAR path
                           headers=self._hdr(self._token), json="", timeout=30)
         _check_http(r)
         return self._store(r.json())
@@ -172,7 +248,7 @@ class PostalocityClient:
         errors = []
         for method, path in self.CREATE_ATTEMPTS:
             try:
-                r = requests.request(method, f"{self.base}{path}",
+                r = httpx.request(method, f"{self.base}{path}",
                                      headers=self._h(), json=body, timeout=30)
             except Exception as e:
                 errors.append(f"{method} {path}: {e}")
@@ -180,7 +256,7 @@ class PostalocityClient:
             if r.status_code in (404, 405):
                 errors.append(f"{method} {path}: {r.status_code}")
                 continue
-            if r.ok:
+            if r.is_success:
                 print(f"  [ok] ruta de crear encontrada: {method} {path}")
                 data = self._check(r.json(), "create_job")
                 return data.get("data") or data["job"]["id"]
@@ -201,7 +277,7 @@ class PostalocityClient:
             value = json.dumps(value)
         elif not isinstance(value, str):
             value = str(value)
-        r = requests.post(f"{self.base}/job", headers=self._h(),
+        r = httpx.post(f"{self.base}/job", headers=self._h(),
                           json={"jobId": job_id, "field": field_name, "value": value},
                           timeout=30)
         _check_http(r)
@@ -222,7 +298,7 @@ class PostalocityClient:
 
     # 4) GetUploadParams
     def get_upload_params(self, job_id: int) -> dict:
-        r = requests.post(f"{self.base}/job/srcuploadparams", headers=self._h(),
+        r = httpx.post(f"{self.base}/job/srcuploadparams", headers=self._h(),
                           json={"jobId": job_id}, timeout=30)
         _check_http(r)
         return self._check(r.json(), "get_upload_params")["uploadParams"]
@@ -246,7 +322,7 @@ class PostalocityClient:
         }
         with open(pdf_path, "rb") as f:
             # El "file" debe ir de ULTIMO en un POST de S3, y con su content-type.
-            r = requests.post(up["url"], data=fields,
+            r = httpx.post(up["url"], data=fields,
                               files={"file": (fn, f, "application/pdf")}, timeout=120)
         _check_http(r)
         object_url = f'{up["url"]}/{key}'   # CONFIRMAR: AddSource puede requerir presigned GET
@@ -264,28 +340,28 @@ class PostalocityClient:
         payload = {"jobId": job_id, "uploadUrl": upload_url}
         if delivery is not None:
             payload["deliveryAddress"] = delivery.to_postal()
-        r = requests.post(f"{self.base}/job/addsource", headers=self._h(),
+        r = httpx.post(f"{self.base}/job/addsource", headers=self._h(),
                           json=payload, timeout=60)
         _check_http(r)
         return self._check(r.json(), "add_source")
 
     # 7) SplitSource
     def split_source(self, job_id: int, filename: str) -> dict:
-        r = requests.post(f"{self.base}/job/splitsource", headers=self._h(),
+        r = httpx.post(f"{self.base}/job/splitsource", headers=self._h(),
                           json={"filename": filename, "jobId": job_id}, timeout=60)
         _check_http(r)
         return self._check(r.json(), "split_source")
 
     # 8) JobStart (GET /job/run?id=)
     def job_start(self, job_id: int) -> dict:
-        r = requests.get(f"{self.base}/job/run", headers=self._h(),
+        r = httpx.get(f"{self.base}/job/run", headers=self._h(),
                          params={"id": job_id}, timeout=60)
         _check_http(r)
         return self._check(r.json(), "job_start")
 
     # 9) GetJob (GET /job?id=)  -> estado + precio, para tracking
     def get_job(self, job_id: int) -> dict:
-        r = requests.get(f"{self.base}/job", headers=self._h(),
+        r = httpx.get(f"{self.base}/job", headers=self._h(),
                          params={"id": job_id}, timeout=30)
         _check_http(r)
         resp = self._check(r.json(), "get_job")
@@ -426,7 +502,7 @@ def probe_return_address():
 
     # PASO 1: mandar un valor INVALIDO -> el server suele listar los validos
     print("== PASO 1: valor invalido a returnAddressSource (buscando el enum) ==")
-    r = requests.post(f"{c.base}/job", headers=c._h(),
+    r = httpx.post(f"{c.base}/job", headers=c._h(),
                       json={"jobId": job_id, "field": "returnAddressSource",
                             "value": "__PROBE_INVALID__"}, timeout=30)
     print(f"  HTTP {r.status_code}")
@@ -442,12 +518,12 @@ def probe_return_address():
     print("== PASO 2: probar cada modo + fijar remitente + verificar ==")
     for cand in candidates:
         # set returnAddressSource
-        r1 = requests.post(f"{c.base}/job", headers=c._h(),
+        r1 = httpx.post(f"{c.base}/job", headers=c._h(),
                            json={"jobId": job_id, "field": "returnAddressSource",
                                  "value": cand}, timeout=30)
-        ok_src = r1.ok
+        ok_src = r1.is_success
         # set envelopeReturnAddress (como string JSON)
-        r2 = requests.post(f"{c.base}/job", headers=c._h(),
+        r2 = httpx.post(f"{c.base}/job", headers=c._h(),
                            json={"jobId": job_id, "field": "envelopeReturnAddress",
                                  "value": json.dumps(test_addr)}, timeout=30)
         # leer que quedo
@@ -491,9 +567,9 @@ def probe_create_with_return():
 
     for label, body in bodies.items():
         print(f"== {label} ==")
-        r = requests.put(f"{c.base}/job", headers=c._h(), json=body, timeout=30)
+        r = httpx.put(f"{c.base}/job", headers=c._h(), json=body, timeout=30)
         print(f"  PUT /job -> HTTP {r.status_code}")
-        if not r.ok:
+        if not r.is_success:
             print(f"  {r.text[:400]}\n")   # 400 'Unrecognized field' nos revela el schema
             continue
         data = r.json()
@@ -511,7 +587,7 @@ def probe_create_with_return():
 def inspect(job_id: int):
     """Consulta un job existente: muestra estado, precio, remitente y destinatario."""
     c = PostalocityClient()
-    r = requests.get(f"{c.base}/job", headers=c._h(),
+    r = httpx.get(f"{c.base}/job", headers=c._h(),
                      params={"id": job_id}, timeout=30)
     print(f"== GET /job?id={job_id}  ->  HTTP {r.status_code} ==")
     try:
@@ -579,29 +655,14 @@ if __name__ == "__main__":
     # Genera un PDF de prueba si no existe (para que el dry-run corra sin fricción).
     test_pdf = "ejemplo_carta_parte2.pdf"
     if not os.path.exists(test_pdf):
-        try:
-            from reportlab.lib.pagesizes import LETTER
-            from reportlab.lib.units import inch
-            from reportlab.pdfgen import canvas as _cv
-            cc = _cv.Canvas(test_pdf, pagesize=LETTER)
-            W, H = LETTER
-            y = H - 1 * inch
-            for ln in [
-                "Cliente Prueba", "123 Main St", "Orlando, FL 32801", "",
-                "August 11, 2026", "",
-                "Equifax Information Services LLC", "P.O. Box 740256",
-                "Atlanta, GA 30374", "",
-                "To whom it may concern:", "",
-                "This is a TEST letter used only to validate the mailing pipeline.",
-                "No action is requested. This job will not be approved or mailed.",
-            ]:
-                cc.setFont("Times-Roman", 11); cc.drawString(1 * inch, y, ln); y -= 15
-            cc.showPage(); cc.save()
-            print(f"[ok] PDF de prueba generado: {test_pdf}")
-        except Exception as e:
-            print(f"[error] no pude generar el PDF de prueba: {e}")
-            print("        instala reportlab: pip install reportlab")
-            sys.exit(1)
+        write_text_pdf(test_pdf,
+            "Cliente Prueba\n123 Main St\nOrlando, FL 32801\n\n"
+            "August 11, 2026\n\n"
+            "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374\n\n"
+            "To whom it may concern:\n\n"
+            "This is a TEST letter used only to validate the mailing pipeline.\n"
+            "No action is requested. This job will not be approved or mailed.")
+        print(f"[ok] PDF de prueba generado (sin reportlab): {test_pdf}")
 
     print(f"\nCorriendo pipeline completo en {ENV} (sin aprobar/pagar)...")
     res = send_certified_letter(
