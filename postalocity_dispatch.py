@@ -134,6 +134,48 @@ def write_text_pdf(path, text, **kw):
     return path
 
 
+# ----------------------------------------------------------------------------
+# Carta mailable para Postalocity: dirección del destinatario en la posición de
+# ventana (Helvetica + formato USPS => calidad Q1) + cuerpo debajo.
+# ----------------------------------------------------------------------------
+
+def usps_normalize(s):
+    """Normaliza una línea de dirección al estilo USPS: mayúsculas, sin comas
+    ni puntos, espacios colapsados. (Mejora la calidad de lectura de la dirección.)"""
+    s = (s or "").replace(",", " ").replace(".", "").upper()
+    return " ".join(s.split())
+
+def build_recipient_lines(name, line1, city, state, zip_code, line2=""):
+    lines = [usps_normalize(name), usps_normalize(line1)]
+    if line2:
+        lines.append(usps_normalize(line2))
+    lines.append(usps_normalize(f"{city} {state} {zip_code}"))
+    return [x for x in lines if x]
+
+_SALUTATIONS = ("re:", "dear ", "to whom")
+
+def strip_leading_address(body):
+    """Quita el encabezado de dirección/fecha del cuerpo (hasta el saludo:
+    'Re:', 'Dear', 'To whom'), para no duplicar la dirección. Conservador:
+    si no encuentra saludo en las primeras ~14 líneas, deja el cuerpo igual."""
+    lines = (body or "").split("\n")
+    for i, ln in enumerate(lines[:14]):
+        low = ln.strip().lower()
+        if low.startswith(_SALUTATIONS):
+            return "\n".join(lines[i:])
+    return body or ""
+
+def build_mailable_pdf(path, recipient_lines, body_text, window_blank_lines=6,
+                       strip_header=True, size=11):
+    """Compone el PDF a enviar: ventana (dirección del destinatario) + cuerpo.
+    El remitente lo imprime Postalocity (renderFromAddress)."""
+    body = strip_leading_address(body_text) if strip_header else (body_text or "")
+    text = ("\n" * window_blank_lines
+            + "\n".join(recipient_lines)
+            + "\n\n\n" + body)
+    return write_text_pdf(path, text, font="Helvetica", size=size)
+
+
 
 # ----------------------------------------------------------------------------
 # Config (DEV por defecto = seguro)
