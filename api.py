@@ -1479,13 +1479,16 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         raise HTTPException(400, "Letter still contains address placeholders. "
                                  "Fill the client address and recipient address before mailing.")
 
-    # 3) La carta YA trae la dirección del destinatario (formato de negocio con
-    #    el bloque del buró/collector). NO la inyectamos de nuevo: la renderizamos
-    #    tal cual en Helvetica (nítida para el OCR). Postalocity lee la dirección
-    #    del propio bloque de la carta.
-    from postalocity_dispatch import Address, send_certified_letter, write_text_pdf
+    # 3) La carta trae DOS direcciones: la del cliente (arriba) y la del buró.
+    #    Postalocity imprime el remitente por su cuenta (renderFromAddress) y lee
+    #    la PRIMERA dirección de la carta como el DESTINO. Por eso quitamos el
+    #    bloque del cliente, para que el DESTINO sea el buró/collector (no el
+    #    cliente). La carta se renderiza en Helvetica (nítida para el OCR).
+    from postalocity_dispatch import (Address, send_certified_letter,
+                                      write_text_pdf, strip_return_block)
+    mailable_text = strip_return_block(body.letter_text)
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
-    write_text_pdf(pdf_path, body.letter_text, font="Helvetica", size=11)
+    write_text_pdf(pdf_path, mailable_text, font="Helvetica", size=11)
 
     # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
     try:
