@@ -497,11 +497,14 @@ class PostalocityClient:
 # (NO aprueba / NO paga / NO manda — eso lo haces tu)
 # ----------------------------------------------------------------------------
 
-# Ventana de ENTREGA (addressZone = "x,y,w,h" en puntos, origen arriba-izquierda).
-# Calculada sobre el render REAL de la carta: el bloque del buró cae en
-# y≈123-164pt (formato fijo: cliente 3 líneas arriba). La zona lo cubre con
-# buffer, dejando al cliente (arriba) y a la fecha/cuerpo (abajo) FUERA.
-DELIVERY_ADDRESS_ZONE = "56,116,300,58"
+# Ventana de ENTREGA (addressZone). FORMATO CONFIRMADO POR POSTALOCITY SOPORTE:
+# "x_izquierda, y_arriba, x_derecha, y_abajo" en PUNTOS (72 ppp), origen
+# arriba-izquierda del PDF original. (NO es x,y,ancho,alto.)
+# Calibrado sobre el render real: el bloque del buró cae en y≈123-164pt
+# (formato fijo: cliente 3 líneas arriba). La caja 40,116,400,170 lo bordea
+# dejando al cliente (termina ~y104, ARRIBA) y a la fecha (empieza y183, ABAJO)
+# fuera. Verificado en prod: q1Count=1, sin error, TransUnion como destino.
+DELIVERY_ADDRESS_ZONE = "40,116,400,170"
 
 def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | None = None,
                           receipt: bool = True,
