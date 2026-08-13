@@ -1457,6 +1457,7 @@ class DispatchLetterBody(BaseModel):
     recipient_zip: str
     recipient_type: Optional[str] = None   # 'bureau' | 'furnisher' (para el recibo)
     round: Optional[str] = None            # round_1 | round_2 | round_3 (para el recibo)
+    letter_name: Optional[str] = None      # nombre para el job en Postalocity (igual al del PDF)
     save_receipt: Optional[bool] = True    # crea fila en letter_receipts con el postalocity_job_id
 
 def _letter_text_to_pdf(text: str, out_path: str) -> str:
@@ -1494,6 +1495,15 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
                                  "(Ajustes → Postalocity). Cada envío sale desde tu "
                                  "propia cuenta.")
 
+    # Nombre del job en Postalocity: usar el que manda el frontend (mismo que el
+    # nombre del PDF al descargarlo). Si no viene, se arma uno con cliente+buró+ronda.
+    def _slug(s):
+        return re.sub(r"[^A-Za-z0-9]+", "_", str(s or "")).strip("_")
+    job_name = (body.letter_name or "").strip()
+    if not job_name:
+        parts = [cl.get("full_name", ""), body.recipient_name, body.round or ""]
+        job_name = "_".join(_slug(p) for p in parts if p) or f"Letter_{body.job_id}"
+
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
     write_text_pdf(pdf_path, body.letter_text, font="Helvetica", size=11)
 
@@ -1508,7 +1518,8 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         )
         # recipient=None: la dirección la lee Postalocity de la propia carta (addressZone).
         result = send_certified_letter(pdf_path, sender=sender, recipient=None,
-                                       user=pu, password=pp, env=penv)
+                                       user=pu, password=pp, env=penv,
+                                       job_name=job_name)
     except Exception as e:
         raise HTTPException(502, f"Postalocity dispatch failed: {e}\n{traceback.format_exc()[:800]}")
 
