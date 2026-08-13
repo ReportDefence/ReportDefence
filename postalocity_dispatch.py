@@ -534,13 +534,26 @@ def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | N
                           receipt: bool = True,
                           poll: bool = True, cert_email: str | None = None,
                           address_zone: str = DELIVERY_ADDRESS_ZONE,
-                          user: str = None, password: str = None, env: str = None) -> dict:
+                          user: str = None, password: str = None, env: str = None,
+                          job_name: str | None = None) -> dict:
     # Credenciales por-agencia (multi-cuenta). Si no se pasan, usa las globales.
     c = PostalocityClient(user=user, password=password, env=env)
 
     email = cert_email if cert_email is not None else os.environ.get("POSTALOCITY_CERT_EMAIL", "")
     job_id = c.create_job()
     print(f"  [ok] job creado: {job_id}")
+
+    # Nombre del job (para identificarlo en el panel de Postalocity en vez de
+    # "Unnamed"). Es cosmético: si el campo falla, NO abortamos el envío.
+    if job_name:
+        clean = str(job_name).strip()[:120]
+        for field in ("name", "jobName"):
+            try:
+                c.update_job(job_id, field, clean)
+                print(f"  [ok] job nombrado ('{field}'): {clean}")
+                break
+            except Exception as e:
+                print(f"  [aviso] no se pudo nombrar el job con '{field}': {e}")
     try:
         c.configure_certified(job_id, return_addr=sender, receipt=receipt, email=email,
                               address_zone=address_zone)
