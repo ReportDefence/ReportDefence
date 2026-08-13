@@ -1496,9 +1496,15 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
             cl.get("state", ""),
             cl.get("zip_code", ""),
         )
-        # recipient=None: la dirección la lee Postalocity de la propia carta.
-        # (AddSource no está disponible en esta org; así evitamos ese intento fallido.)
-        result = send_certified_letter(pdf_path, sender=sender, recipient=None)
+        # Credenciales de Postalocity de LA AGENCIA (multi-cuenta). Si la agencia
+        # no conectó su cuenta, cae a las globales (env) por compatibilidad.
+        pu, pp, penv = _agency_postalocity_creds(user["id"])
+        if not pu and not os.environ.get("POSTALOCITY_USER"):
+            raise HTTPException(400, "Conecta la cuenta de Postalocity de tu agencia "
+                                     "antes de enviar (Ajustes → Postalocity).")
+        # recipient=None: la dirección la lee Postalocity de la propia carta (addressZone).
+        result = send_certified_letter(pdf_path, sender=sender, recipient=None,
+                                       user=pu, password=pp, env=penv)
     except Exception as e:
         raise HTTPException(502, f"Postalocity dispatch failed: {e}\n{traceback.format_exc()[:800]}")
 
@@ -2068,3 +2074,86 @@ async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str
             print(traceback.format_exc())
 
     return {"log": buf.getvalue(), "result": result}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  POSTALOCITY MULTI-CUENTA (por agencia)
+#  Cada agencia conecta su propia cuenta de Postalocity. La clave se
+#  guarda ENCRIPTADA (Fernet). Requiere:
+#   - tabla api_postalocity_accounts (ver api_postalocity_accounts.sql)
+#   - env POSTALOCITY_ENC_KEY (clave Fernet)
+#   - 'cryptography' instalado (agregar a requirements.txt si falta)
+# ═══════════════════════════════════════════════════════════════
+
+def _fernet():
+    from cryptography.fernet import Fernet
+    key = os.environ.get("POSTALOCITY_ENC_KEY", "")
+    if not key:
+        raise HTTPException(500, "POSTALOCITY_ENC_KEY no está configurada en el servidor.")
+    return Fernet(key.encode())
+
+def _enc_secret(text: str) -> str:
+    return _fernet().encrypt((text or "").encode()).decode()
+
+def _dec_secret(token: str) -> str:
+    return _fernet().decrypt((token or "").encode()).decode()
+
+def _agency_postalocity_creds(user_id):
+    """Devuelve (user, password, env) de la agencia, o (None, None, None) si no conectó."""
+    try:
+        r = sb.table("api_postalocity_accounts").select("*").eq("user_id", user_id).execute()
+        if not r.data:
+            return (None, None, None)
+        row = r.data[0]
+        return (row.get("postalocity_user"),
+                _dec_secret(row.get("postalocity_pass_enc")),
+                row.get("env") or "prod")
+    except Exception:
+        return (None, None, None)
+
+class PostalocityConnectBody(BaseModel):
+    postalocity_user: str
+    postalocity_pass: str
+    env: Optional[str] = "prod"
+
+@app.post("/postalocity/connect")
+async def postalocity_connect(body: PostalocityConnectBody, user=Depends(get_current_user)):
+    """Verifica las credenciales (login real) y las guarda encriptadas para la agencia."""
+    from postalocity_dispatch import verify_credentials
+    env = (body.env or "prod").lower()
+    if env not in ("dev", "prod"):
+        env = "prod"
+    check = verify_credentials(body.postalocity_user, body.postalocity_pass, env)
+    if not check.get("ok"):
+        raise HTTPException(400, f"No pude validar la cuenta de Postalocity: {check.get('message')}")
+    now = datetime.now(timezone.utc).isoformat()
+    data = {
+        "user_id": user["id"],
+        "postalocity_user": body.postalocity_user,
+        "postalocity_pass_enc": _enc_secret(body.postalocity_pass),
+        "env": env,
+        "connected_at": now,
+        "last_verified_at": now,
+    }
+    sb.table("api_postalocity_accounts").upsert(data, on_conflict="user_id").execute()
+    return {"connected": True, "postalocity_user": body.postalocity_user, "env": env}
+
+@app.get("/postalocity/status")
+async def postalocity_status(user=Depends(get_current_user)):
+    """Dice si la agencia tiene cuenta conectada (usuario enmascarado, sin la clave)."""
+    r = (sb.table("api_postalocity_accounts")
+         .select("postalocity_user, env, connected_at, last_verified_at")
+         .eq("user_id", user["id"]).execute())
+    if not r.data:
+        return {"connected": False}
+    row = r.data[0]
+    u = row.get("postalocity_user") or ""
+    masked = (u[:2] + "***" + u[-2:]) if len(u) > 4 else "***"
+    return {"connected": True, "postalocity_user_masked": masked,
+            "env": row.get("env"), "connected_at": row.get("connected_at"),
+            "last_verified_at": row.get("last_verified_at")}
+
+@app.delete("/postalocity/disconnect")
+async def postalocity_disconnect(user=Depends(get_current_user)):
+    sb.table("api_postalocity_accounts").delete().eq("user_id", user["id"]).execute()
+    return {"connected": False}
