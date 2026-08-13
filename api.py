@@ -1484,6 +1484,16 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
     #    buró (coordenadas exactas medidas del render real) para que Postalocity lea
     #    el buró como destino, no el cliente. Render en Helvetica (nítido para OCR).
     from postalocity_dispatch import Address, send_certified_letter, write_text_pdf
+
+    # Credenciales de Postalocity de LA AGENCIA (multi-cuenta). OBLIGATORIO:
+    # si la agencia NO conectó su propia cuenta, NO se permite enviar (sin
+    # fallback a la cuenta global). Se valida ANTES de crear/despachar nada.
+    pu, pp, penv = _agency_postalocity_creds(user["id"])
+    if not pu:
+        raise HTTPException(400, "Conecta tu cuenta de Postalocity antes de enviar "
+                                 "(Ajustes → Postalocity). Cada envío sale desde tu "
+                                 "propia cuenta.")
+
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
     write_text_pdf(pdf_path, body.letter_text, font="Helvetica", size=11)
 
@@ -1496,12 +1506,6 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
             cl.get("state", ""),
             cl.get("zip_code", ""),
         )
-        # Credenciales de Postalocity de LA AGENCIA (multi-cuenta). Si la agencia
-        # no conectó su cuenta, cae a las globales (env) por compatibilidad.
-        pu, pp, penv = _agency_postalocity_creds(user["id"])
-        if not pu and not os.environ.get("POSTALOCITY_USER"):
-            raise HTTPException(400, "Conecta la cuenta de Postalocity de tu agencia "
-                                     "antes de enviar (Ajustes → Postalocity).")
         # recipient=None: la dirección la lee Postalocity de la propia carta (addressZone).
         result = send_certified_letter(pdf_path, sender=sender, recipient=None,
                                        user=pu, password=pp, env=penv)
