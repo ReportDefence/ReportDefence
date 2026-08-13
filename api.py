@@ -2172,3 +2172,111 @@ async def postalocity_status(user=Depends(get_current_user)):
 async def postalocity_disconnect(user=Depends(get_current_user)):
     sb.table("api_postalocity_accounts").delete().eq("user_id", user["id"]).execute()
     return {"connected": False}
+
+# ═══════════════════════════════════════════════════════════════
+#  SINCRONIZACIÓN DE ESTADO DE ENVÍO (¿la carta ya se envió?)
+#  Consulta el job en Postalocity con las credenciales de la agencia
+#  y actualiza letter_receipts (mail_status / tracking / date_sent).
+#  - POST /postalocity/sync-status  → manual (botón "Actualizar estado")
+#  - POST /postalocity/sync-all?key=…  → todas las agencias (para el cron)
+# ═══════════════════════════════════════════════════════════════
+
+def _derive_mail_status(job) -> dict:
+    """Deduce del job de Postalocity si la carta ya se envió.
+    Señal fuerte = ya tiene tracking USPS o fecha de envío/producción.
+    Antes de aprobar/pagar, el job NO tiene tracking (queda 'ready for approval')."""
+    if not isinstance(job, dict):
+        return {"status": "unknown", "sent": False, "state": None,
+                "tracking": None, "mailed_date": None}
+    tracking = (job.get("trackingNumber") or job.get("tracking")
+                or job.get("certifiedTrackingNumber") or job.get("uspsTracking") or "")
+    mailed_date = (job.get("mailedDate") or job.get("mailed_date")
+                   or job.get("dateMailed") or job.get("productionDate") or "")
+    state = job.get("state")
+    status_str = str(job.get("status") or job.get("statusText") or "").lower()
+    sent = bool(tracking) or bool(mailed_date) or any(
+        k in status_str for k in ("mail", "production", "produced", "shipped",
+                                   "complete", "sent", "in-transit", "delivered"))
+    if sent:
+        label = "sent"
+    elif "approv" in status_str or state == 3:   # 3 = READY FOR APPROVAL (observado; calibrar)
+        label = "ready_for_approval"
+    else:
+        label = "pending"
+    return {"status": label, "sent": sent, "state": state,
+            "tracking": tracking or None, "mailed_date": mailed_date or None}
+
+def _sync_receipts_for_agency(user_id, pu, pp, penv) -> dict:
+    """Consulta en Postalocity todas las cartas (letter_receipts) de esta agencia
+    que tienen postalocity_job_id y aún no están marcadas como enviadas."""
+    from postalocity_dispatch import PostalocityClient
+    summary = {"checked": 0, "updated": 0, "sent": 0, "errors": 0}
+    try:
+        rows = (sb.table("letter_receipts").select("*")
+                .eq("operator_id", user_id).execute()).data or []
+    except Exception as e:
+        summary["error"] = str(e)
+        return summary
+    rows = [r for r in rows if r.get("postalocity_job_id")
+            and r.get("mail_status") != "sent"]
+    if not rows:
+        return summary
+    client = PostalocityClient(user=pu, password=pp, env=penv)
+    now = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        pid = str(row.get("postalocity_job_id") or "").strip()
+        if not pid:
+            continue
+        summary["checked"] += 1
+        try:
+            job = client.get_job(int(pid))
+            d = _derive_mail_status(job)
+            upd = {"mail_status": d["status"], "last_synced_at": now}
+            if d["state"] is not None:
+                upd["mail_state"] = str(d["state"])
+            if d["tracking"]:
+                upd["tracking_number"] = d["tracking"]
+            if d["sent"]:
+                summary["sent"] += 1
+                md = d["mailed_date"]
+                upd["date_sent"] = (str(md)[:10] if md else now[:10])
+            sb.table("letter_receipts").update(upd).eq("id", row["id"]).execute()
+            summary["updated"] += 1
+        except Exception:
+            summary["errors"] += 1
+    return summary
+
+@app.post("/postalocity/sync-status")
+async def postalocity_sync_status(user=Depends(get_current_user)):
+    """Botón 'Actualizar estado': consulta AHORA las cartas de esta agencia."""
+    pu, pp, penv = _agency_postalocity_creds(user["id"])
+    if not pu:
+        raise HTTPException(400, "Conecta tu cuenta de Postalocity para actualizar estados.")
+    summary = _sync_receipts_for_agency(user["id"], pu, pp, penv)
+    return {"ok": True, **summary}
+
+@app.post("/postalocity/sync-all")
+async def postalocity_sync_all(key: str = ""):
+    """Revisión automática de TODAS las agencias. Protegido por POSTALOCITY_SYNC_KEY.
+    Pensado para un cron externo (Railway cron / cron-job.org) cada X horas."""
+    expected = os.environ.get("POSTALOCITY_SYNC_KEY", "")
+    if not expected or key != expected:
+        raise HTTPException(403, "bad key")
+    try:
+        agencies = (sb.table("api_postalocity_accounts").select("*").execute()).data or []
+    except Exception as e:
+        raise HTTPException(500, f"No pude leer las cuentas de Postalocity: {e}")
+    total = {"agencies": 0, "checked": 0, "updated": 0, "sent": 0, "errors": 0}
+    for a in agencies:
+        try:
+            pu = a.get("postalocity_user")
+            pp = _dec_secret(a.get("postalocity_pass_enc"))
+            penv = a.get("env") or "prod"
+        except Exception:
+            total["errors"] += 1
+            continue
+        s = _sync_receipts_for_agency(a.get("user_id"), pu, pp, penv)
+        total["agencies"] += 1
+        for k in ("checked", "updated", "sent", "errors"):
+            total[k] += s.get(k, 0)
+    return {"ok": True, **total}
