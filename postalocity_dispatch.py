@@ -283,8 +283,11 @@ class Address:
 # ----------------------------------------------------------------------------
 
 class TokenManager:
-    def __init__(self, base: str = BASE):
+    def __init__(self, base: str = BASE, user: str = None, password: str = None):
         self.base = base
+        # Credenciales por-agencia; si no se pasan, usa las globales (env) como fallback.
+        self.user = user if user is not None else POSTALOCITY_USER
+        self.password = password if password is not None else POSTALOCITY_PASS
         self._token: Optional[str] = None
         self._obtained_at = 0.0
 
@@ -304,9 +307,12 @@ class TokenManager:
         return token
 
     def _login(self) -> str:
+        if not self.user or not self.password:
+            raise RuntimeError("Sin credenciales de Postalocity para esta agencia "
+                               "(conecta la cuenta en Ajustes).")
         r = httpx.post(f"{self.base}/user/login", headers=self._hdr(),
-                          json={"userName": POSTALOCITY_USER,
-                                "password": POSTALOCITY_PASS}, timeout=30)
+                          json={"userName": self.user,
+                                "password": self.password}, timeout=30)
         _check_http(r)
         return self._store(r.json())
 
@@ -331,10 +337,28 @@ class TokenManager:
 # Cliente Postalocity (un metodo por paso del pipeline)
 # ----------------------------------------------------------------------------
 
+def base_for_env(env: str = None) -> str:
+    """Devuelve la URL base según el ambiente ('dev'|'prod'). Default = ENV global."""
+    return {"dev": "https://dev.postalocity.com",
+            "prod": "https://prod.postalocity.com"}.get(env or ENV, BASE)
+
+
+def verify_credentials(user: str, password: str, env: str = "prod") -> dict:
+    """Intenta login con las credenciales dadas. Devuelve {ok, message}.
+    Se usa al 'conectar' la cuenta de Postalocity de una agencia."""
+    try:
+        tm = TokenManager(base_for_env(env), user=user, password=password)
+        tok = tm.get()
+        return {"ok": bool(tok), "message": "OK" if tok else "sin token"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)[:300]}
+
+
 class PostalocityClient:
-    def __init__(self, base: str = BASE):
-        self.base = base
-        self.tokens = TokenManager(base)
+    def __init__(self, base: str = None, user: str = None, password: str = None,
+                 env: str = None):
+        self.base = base or (base_for_env(env) if env else BASE)
+        self.tokens = TokenManager(self.base, user=user, password=password)
 
     def _h(self) -> dict:
         return {"Accept": "application/json", "Content-Type": "application/json",
@@ -509,8 +533,10 @@ DELIVERY_ADDRESS_ZONE = "40,116,400,170"
 def send_certified_letter(pdf_path: str, sender: Address, recipient: Address | None = None,
                           receipt: bool = True,
                           poll: bool = True, cert_email: str | None = None,
-                          address_zone: str = DELIVERY_ADDRESS_ZONE) -> dict:
-    c = PostalocityClient()
+                          address_zone: str = DELIVERY_ADDRESS_ZONE,
+                          user: str = None, password: str = None, env: str = None) -> dict:
+    # Credenciales por-agencia (multi-cuenta). Si no se pasan, usa las globales.
+    c = PostalocityClient(user=user, password=password, env=env)
 
     email = cert_email if cert_email is not None else os.environ.get("POSTALOCITY_CERT_EMAIL", "")
     job_id = c.create_job()
