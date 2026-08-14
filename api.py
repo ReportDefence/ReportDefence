@@ -2584,6 +2584,15 @@ def _verify_stripe_sig(raw: bytes, sig_header: str, secret: str) -> bool:
     except Exception:
         return False
 
+def _subscription_url():
+    """URL de la pantalla de suscripción (a donde vuelve Stripe). Configurable con
+    APP_SUBSCRIPTION_URL (URL completa); si no, se arma con FRONTEND_URL + /subscription."""
+    u = os.environ.get("APP_SUBSCRIPTION_URL", "").strip()
+    if u:
+        return u.rstrip("/")
+    front = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    return f"{front}/subscription"
+
 # ── Endpoints de cobro ─────────────────────────────────────────
 @app.get("/billing/plans")
 async def billing_plans():
@@ -2637,18 +2646,19 @@ async def billing_checkout(body: CheckoutBody, user=Depends(get_current_user)):
     if plan == "basic":
         cycle = "monthly"                  # Básica solo mensual
     price = _price_id(plan, cycle)
-    front = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    base = _subscription_url()
     try:
         r = sb.table("api_subscriptions").select("*").eq("user_id", user["id"]).execute()
         existing = r.data[0] if r.data else None
     except Exception:
         existing = None
+    sep = "&" if "?" in base else "?"
     data = {
         "mode": "subscription",
         "line_items[0][price]": price,
         "line_items[0][quantity]": "1",
-        "success_url": f"{front}/subscription?status=success",
-        "cancel_url": f"{front}/subscription?status=cancel",
+        "success_url": f"{base}{sep}status=success",
+        "cancel_url": f"{base}{sep}status=cancel",
         "client_reference_id": user["id"],
         "metadata[user_id]": user["id"],
         "metadata[plan]": plan,
@@ -2671,10 +2681,9 @@ async def billing_portal(user=Depends(get_current_user)):
     sub = r.data[0] if r.data else None
     if not sub or not sub.get("stripe_customer_id"):
         raise HTTPException(400, "No hay una suscripción para gestionar.")
-    front = os.environ.get("FRONTEND_URL", "").rstrip("/")
     session = _stripe_post("/billing_portal/sessions",
                            {"customer": sub["stripe_customer_id"],
-                            "return_url": f"{front}/subscription"})
+                            "return_url": _subscription_url()})
     return {"url": session.get("url")}
 
 @app.post("/billing/webhook")
