@@ -2504,24 +2504,29 @@ def _plan_from_price(price_id):
 
 def _sub_fields(s: dict) -> dict:
     out = {"status": s.get("status")}
-    cpe = s.get("current_period_end")
-    if cpe:
-        out["current_period_end"] = datetime.fromtimestamp(cpe, timezone.utc).isoformat()
     out["cancel_at_period_end"] = bool(s.get("cancel_at_period_end"))
     md = s.get("metadata") or {}
     if md.get("plan"):
         out["plan"] = md["plan"]
     if md.get("cycle"):
         out["billing_cycle"] = md["cycle"]
+    # current_period_end: en API viejas está en el objeto; en las nuevas está en
+    # el ítem de la suscripción (items.data[0].current_period_end). Probamos ambos.
+    cpe = s.get("current_period_end")
     try:
         items = (s.get("items") or {}).get("data") or []
-        pid = items[0]["price"]["id"] if items else None
+        first = items[0] if items else {}
+        if not cpe:
+            cpe = first.get("current_period_end")
+        pid = (first.get("price") or {}).get("id")
         p, c = _plan_from_price(pid)
         if p:
             out.setdefault("plan", p)
             out.setdefault("billing_cycle", c)
     except Exception:
         pass
+    if cpe:
+        out["current_period_end"] = datetime.fromtimestamp(cpe, timezone.utc).isoformat()
     return out
 
 def _sub_upsert(user_id, base: dict):
