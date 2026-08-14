@@ -2210,25 +2210,34 @@ def _sync_receipts_for_agency(user_id, pu, pp, penv) -> dict:
     """Consulta en Postalocity todas las cartas (letter_receipts) de esta agencia
     que tienen postalocity_job_id y aún no están marcadas como enviadas."""
     from postalocity_dispatch import PostalocityClient
-    summary = {"checked": 0, "updated": 0, "sent": 0, "errors": 0}
+    summary = {"checked": 0, "updated": 0, "sent": 0, "errors": 0, "not_found": 0}
     try:
         rows = (sb.table("letter_receipts").select("*")
                 .eq("operator_id", user_id).execute()).data or []
     except Exception as e:
         summary["error"] = str(e)
         return summary
+    # No re-consultar las ya enviadas ni las marcadas como no rastreables.
+    DONE = ("sent", "no_encontrada")
     rows = [r for r in rows if r.get("postalocity_job_id")
-            and r.get("mail_status") != "sent"]
+            and r.get("mail_status") not in DONE]
     if not rows:
         return summary
     client = PostalocityClient(user=pu, password=pp, env=penv)
     now = datetime.now(timezone.utc).isoformat()
+    # Mensajes que indican que el job NO existe o no pertenece a esta cuenta
+    # (error permanente -> se marca de una vez, no se reintenta).
+    PERMA = ("not found", "no such", "does not exist", "unauthorized",
+             "forbidden", "invalid job", "no existe", "not owned",
+             "access denied", "permission", "404")
     for row in rows:
         pid = str(row.get("postalocity_job_id") or "").strip()
         if not pid:
             continue
         summary["checked"] += 1
         try:
+            if not pid.isdigit():
+                raise ValueError("job id no numérico")
             job = client.get_job(int(pid))
             d = _derive_mail_status(job)
             upd = {"mail_status": d["status"], "last_synced_at": now}
@@ -2242,8 +2251,26 @@ def _sync_receipts_for_agency(user_id, pu, pp, penv) -> dict:
                 upd["date_sent"] = (str(md)[:10] if md else now[:10])
             sb.table("letter_receipts").update(upd).eq("id", row["id"]).execute()
             summary["updated"] += 1
-        except Exception:
-            summary["errors"] += 1
+        except Exception as e:
+            # Cuenta de intentos fallidos guardada en mail_state como "err:N".
+            # Permanente (job inexistente/ajeno) o 3 fallos seguidos -> se marca
+            # "no_encontrada" y deja de reintentarse. Un fallo transitorio (red)
+            # solo suma un intento y se reintenta en la próxima corrida.
+            msg = str(e).lower()
+            prev = str(row.get("mail_state") or "")
+            n = (int(prev[4:]) if prev.startswith("err:") and prev[4:].isdigit() else 0) + 1
+            permanent = (not pid.isdigit()) or any(k in msg for k in PERMA)
+            if permanent or n >= 3:
+                summary["not_found"] += 1
+                upd = {"mail_status": "no_encontrada",
+                       "mail_state": f"err:{n}", "last_synced_at": now}
+            else:
+                summary["errors"] += 1
+                upd = {"mail_state": f"err:{n}", "last_synced_at": now}
+            try:
+                sb.table("letter_receipts").update(upd).eq("id", row["id"]).execute()
+            except Exception:
+                pass
     return summary
 
 @app.post("/postalocity/sync-status")
@@ -2266,7 +2293,8 @@ async def postalocity_sync_all(key: str = ""):
         agencies = (sb.table("api_postalocity_accounts").select("*").execute()).data or []
     except Exception as e:
         raise HTTPException(500, f"No pude leer las cuentas de Postalocity: {e}")
-    total = {"agencies": 0, "checked": 0, "updated": 0, "sent": 0, "errors": 0}
+    total = {"agencies": 0, "checked": 0, "updated": 0, "sent": 0,
+             "errors": 0, "not_found": 0}
     for a in agencies:
         try:
             pu = a.get("postalocity_user")
@@ -2277,6 +2305,6 @@ async def postalocity_sync_all(key: str = ""):
             continue
         s = _sync_receipts_for_agency(a.get("user_id"), pu, pp, penv)
         total["agencies"] += 1
-        for k in ("checked", "updated", "sent", "errors"):
+        for k in ("checked", "updated", "sent", "errors", "not_found"):
             total[k] += s.get(k, 0)
     return {"ok": True, **total}
