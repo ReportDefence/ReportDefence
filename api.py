@@ -420,6 +420,7 @@ async def list_clients(user=Depends(get_current_user)):
 
 @app.post("/clients", status_code=201)
 async def create_client(body: ClientCreate, user=Depends(get_current_user)):
+    _enforce_can_add_client(user)   # plan requerido; Básica = máx 1 cliente
     data = body.model_dump()
     data["operator_id"] = user["id"]
     res = sb.table("api_clients").insert(data).execute()
@@ -1015,6 +1016,7 @@ class GenerateLettersBody(BaseModel):
 
 @app.post("/generate-letters")
 async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_user)):
+    _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
     res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).execute()
     if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Job not found")
@@ -1358,6 +1360,7 @@ class GenerateFurnisherLettersBody(BaseModel):
 
 @app.post("/generate-furnisher-letters")
 async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=Depends(get_current_user)):
+    _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
     res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).execute()
     if not res.data or len(res.data) == 0:
         raise HTTPException(404, "Job not found")
@@ -1469,6 +1472,7 @@ def _letter_text_to_pdf(text: str, out_path: str) -> str:
 
 @app.post("/dispatch-letter")
 async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_user)):
+    _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
     # 1) remitente = el cliente (dirección dinámica por job)
     cr = sb.table("api_clients").select("*").eq("id", body.client_id).execute()
     if not cr.data:
@@ -2387,3 +2391,295 @@ async def list_client_reminders(client_id: str, user=Depends(get_current_user)):
         return _reminders_query(user["id"], client_id)
     except Exception:
         return []
+
+# ═══════════════════════════════════════════════════════════════
+#  SUSCRIPCIONES / COBRO (Stripe, vía httpx — sin dependencias nuevas)
+#  Planes:
+#    - basic  $50/mes   -> 1 cliente en total, solo Round 1
+#    - pro    $150/mes  o  anual (-15%) -> ilimitado, todas las rondas
+#  El cobro se ENFORCEA solo cuando BILLING_ENFORCED=1 (así puedes
+#  desplegar, configurar Stripe y probar antes de bloquear a nadie).
+#  Env vars: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, FRONTEND_URL,
+#    STRIPE_PRICE_BASIC_MONTHLY, STRIPE_PRICE_PRO_MONTHLY,
+#    STRIPE_PRICE_PRO_ANNUAL, BILLING_ADMIN_EMAILS (coma-separadas)
+# ═══════════════════════════════════════════════════════════════
+
+STRIPE_API = "https://api.stripe.com/v1"
+PLAN_LIMITS = {
+    "basic": {"max_clients": 1, "rounds": {"round_1"}},
+    "pro":   {"max_clients": None, "rounds": None},   # None = ilimitado
+}
+PRICE_ENV = {
+    ("basic", "monthly"): "STRIPE_PRICE_BASIC_MONTHLY",
+    ("pro",   "monthly"): "STRIPE_PRICE_PRO_MONTHLY",
+    ("pro",   "annual"):  "STRIPE_PRICE_PRO_ANNUAL",
+}
+
+def _billing_enforced() -> bool:
+    return os.environ.get("BILLING_ENFORCED", "").lower() in ("1", "true", "yes", "on")
+
+def _is_billing_admin(user) -> bool:
+    emails = [e.strip().lower() for e in
+              os.environ.get("BILLING_ADMIN_EMAILS", "").split(",") if e.strip()]
+    return (user.get("role") == "admin") or (str(user.get("email", "")).lower() in emails)
+
+def _user_plan(user_id):
+    """Fila de suscripción si está activa, si no None."""
+    try:
+        r = sb.table("api_subscriptions").select("*").eq("user_id", user_id).execute()
+        if not r.data:
+            return None
+        row = r.data[0]
+        if row.get("status") not in ("active", "trialing"):
+            return None
+        return row
+    except Exception:
+        return None
+
+def _active_plan_or_402(user) -> str:
+    """Devuelve 'basic'|'pro'. Si el cobro no está activado o es admin, todo = 'pro'.
+    Si el cobro está activo y no hay plan, corta con 402."""
+    if not _billing_enforced() or _is_billing_admin(user):
+        return "pro"
+    row = _user_plan(user["id"])
+    if not row:
+        raise HTTPException(402, "Elige un plan para continuar (Suscripción).")
+    return (row.get("plan") or "basic").lower()
+
+def _enforce_can_add_client(user):
+    plan = _active_plan_or_402(user)
+    lim = PLAN_LIMITS.get(plan, PLAN_LIMITS["basic"])["max_clients"]
+    if lim is None:
+        return
+    try:
+        cnt = (sb.table("api_clients").select("id", count="exact")
+               .eq("operator_id", user["id"]).execute())
+        n = cnt.count if getattr(cnt, "count", None) is not None else len(cnt.data or [])
+    except Exception:
+        n = 0
+    if n >= lim:
+        raise HTTPException(402, f"El plan Básico permite {lim} cliente. "
+                                 "Sube a Pro para agregar más.")
+
+def _enforce_round(user, rnd):
+    plan = _active_plan_or_402(user)
+    allowed = PLAN_LIMITS.get(plan, PLAN_LIMITS["basic"])["rounds"]
+    if allowed is not None and (rnd or "round_1") not in allowed:
+        raise HTTPException(402, "El plan Básico solo permite Round 1. "
+                                 "Sube a Pro para Round 2 y 3.")
+
+# ── Stripe REST (httpx, form-encoded) ──────────────────────────
+def _stripe_key():
+    k = os.environ.get("STRIPE_SECRET_KEY", "")
+    if not k:
+        raise HTTPException(500, "STRIPE_SECRET_KEY no está configurada en el servidor.")
+    return k
+
+def _stripe_post(path, data):
+    import httpx
+    r = httpx.post(f"{STRIPE_API}{path}", data=data, auth=(_stripe_key(), ""), timeout=30)
+    if not r.is_success:
+        raise HTTPException(502, f"Stripe error {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+def _stripe_get(path):
+    import httpx
+    r = httpx.get(f"{STRIPE_API}{path}", auth=(_stripe_key(), ""), timeout=30)
+    if not r.is_success:
+        raise RuntimeError(f"Stripe GET {path}: {r.status_code} {r.text[:200]}")
+    return r.json()
+
+def _price_id(plan, cycle):
+    env = PRICE_ENV.get((plan, cycle))
+    pid = os.environ.get(env, "") if env else ""
+    if not pid:
+        raise HTTPException(400, f"Plan/ciclo no disponible: {plan}/{cycle}")
+    return pid
+
+def _plan_from_price(price_id):
+    for (plan, cycle), env in PRICE_ENV.items():
+        if price_id and os.environ.get(env, "") == price_id:
+            return plan, cycle
+    return None, None
+
+def _sub_fields(s: dict) -> dict:
+    out = {"status": s.get("status")}
+    cpe = s.get("current_period_end")
+    if cpe:
+        out["current_period_end"] = datetime.fromtimestamp(cpe, timezone.utc).isoformat()
+    out["cancel_at_period_end"] = bool(s.get("cancel_at_period_end"))
+    md = s.get("metadata") or {}
+    if md.get("plan"):
+        out["plan"] = md["plan"]
+    if md.get("cycle"):
+        out["billing_cycle"] = md["cycle"]
+    try:
+        items = (s.get("items") or {}).get("data") or []
+        pid = items[0]["price"]["id"] if items else None
+        p, c = _plan_from_price(pid)
+        if p:
+            out.setdefault("plan", p)
+            out.setdefault("billing_cycle", c)
+    except Exception:
+        pass
+    return out
+
+def _sub_upsert(user_id, base: dict):
+    base["user_id"] = user_id
+    base["updated_at"] = datetime.now(timezone.utc).isoformat()
+    base = {k: v for k, v in base.items() if v is not None}
+    sb.table("api_subscriptions").upsert(base, on_conflict="user_id").execute()
+
+def _sub_from_checkout(session: dict):
+    md = session.get("metadata") or {}
+    user_id = session.get("client_reference_id") or md.get("user_id")
+    if not user_id:
+        return
+    base = {"stripe_customer_id": session.get("customer"),
+            "stripe_subscription_id": session.get("subscription"),
+            "status": "active", "plan": md.get("plan"),
+            "billing_cycle": md.get("cycle")}
+    if session.get("subscription"):
+        try:
+            base.update(_sub_fields(_stripe_get(f"/subscriptions/{session['subscription']}")))
+        except Exception:
+            pass
+    _sub_upsert(user_id, base)
+
+def _sub_from_subscription(s: dict):
+    md = s.get("metadata") or {}
+    user_id = md.get("user_id")
+    if not user_id:
+        try:
+            r = (sb.table("api_subscriptions").select("user_id")
+                 .eq("stripe_customer_id", s.get("customer")).execute())
+            user_id = r.data[0]["user_id"] if r.data else None
+        except Exception:
+            user_id = None
+    if not user_id:
+        return
+    base = {"stripe_customer_id": s.get("customer"),
+            "stripe_subscription_id": s.get("id")}
+    base.update(_sub_fields(s))
+    _sub_upsert(user_id, base)
+
+def _sub_mark_canceled(s: dict):
+    try:
+        (sb.table("api_subscriptions")
+         .update({"status": "canceled",
+                  "updated_at": datetime.now(timezone.utc).isoformat()})
+         .eq("stripe_subscription_id", s.get("id")).execute())
+    except Exception:
+        pass
+
+def _verify_stripe_sig(raw: bytes, sig_header: str, secret: str) -> bool:
+    try:
+        parts = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
+        t, v1 = parts.get("t"), parts.get("v1")
+        if not t or not v1:
+            return False
+        signed = t.encode() + b"." + raw
+        mac = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(mac, v1)
+    except Exception:
+        return False
+
+# ── Endpoints de cobro ─────────────────────────────────────────
+@app.get("/billing/plans")
+async def billing_plans():
+    """Catálogo de planes para pintar la pantalla de precios."""
+    return {"currency": "usd", "plans": [
+        {"id": "basic", "name": "Básica", "monthly": 50, "annual": None,
+         "features": ["1 cliente", "Solo Round 1"]},
+        {"id": "pro", "name": "Pro", "monthly": 150, "annual": 1530,
+         "annual_discount_pct": 15,
+         "features": ["Clientes ilimitados", "Todas las rondas (1, 2, 3)"]},
+    ]}
+
+@app.get("/billing/status")
+async def billing_status(user=Depends(get_current_user)):
+    row = _user_plan(user["id"])
+    base = {"enforced": _billing_enforced(), "is_admin": _is_billing_admin(user)}
+    if not row:
+        return {"plan": None, "status": "none", **base}
+    return {"plan": row.get("plan"), "cycle": row.get("billing_cycle"),
+            "status": row.get("status"),
+            "current_period_end": row.get("current_period_end"),
+            "cancel_at_period_end": row.get("cancel_at_period_end"), **base}
+
+class CheckoutBody(BaseModel):
+    plan: str                              # 'basic' | 'pro'
+    cycle: Optional[str] = "monthly"       # 'monthly' | 'annual'
+
+@app.post("/billing/checkout")
+async def billing_checkout(body: CheckoutBody, user=Depends(get_current_user)):
+    plan = (body.plan or "").lower()
+    cycle = (body.cycle or "monthly").lower()
+    if plan not in ("basic", "pro"):
+        raise HTTPException(400, "Plan inválido.")
+    if plan == "basic":
+        cycle = "monthly"                  # Básica solo mensual
+    price = _price_id(plan, cycle)
+    front = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    try:
+        r = sb.table("api_subscriptions").select("*").eq("user_id", user["id"]).execute()
+        existing = r.data[0] if r.data else None
+    except Exception:
+        existing = None
+    data = {
+        "mode": "subscription",
+        "line_items[0][price]": price,
+        "line_items[0][quantity]": "1",
+        "success_url": f"{front}/subscription?status=success",
+        "cancel_url": f"{front}/subscription?status=cancel",
+        "client_reference_id": user["id"],
+        "metadata[user_id]": user["id"],
+        "metadata[plan]": plan,
+        "metadata[cycle]": cycle,
+        "subscription_data[metadata][user_id]": user["id"],
+        "subscription_data[metadata][plan]": plan,
+        "subscription_data[metadata][cycle]": cycle,
+    }
+    if existing and existing.get("stripe_customer_id"):
+        data["customer"] = existing["stripe_customer_id"]
+    elif user.get("email"):
+        data["customer_email"] = user["email"]
+    session = _stripe_post("/checkout/sessions", data)
+    return {"url": session.get("url"), "id": session.get("id")}
+
+@app.post("/billing/portal")
+async def billing_portal(user=Depends(get_current_user)):
+    """Portal de Stripe para gestionar/cancelar la suscripción."""
+    r = sb.table("api_subscriptions").select("*").eq("user_id", user["id"]).execute()
+    sub = r.data[0] if r.data else None
+    if not sub or not sub.get("stripe_customer_id"):
+        raise HTTPException(400, "No hay una suscripción para gestionar.")
+    front = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    session = _stripe_post("/billing_portal/sessions",
+                           {"customer": sub["stripe_customer_id"],
+                            "return_url": f"{front}/subscription"})
+    return {"url": session.get("url")}
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe llama aquí al pagar / renovar / cancelar. Actualiza el plan."""
+    raw = await request.body()
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    if secret and not _verify_stripe_sig(raw, request.headers.get("stripe-signature", ""), secret):
+        raise HTTPException(400, "bad signature")
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(400, "bad payload")
+    typ = event.get("type", "")
+    obj = (event.get("data") or {}).get("object") or {}
+    try:
+        if typ == "checkout.session.completed":
+            _sub_from_checkout(obj)
+        elif typ in ("customer.subscription.created", "customer.subscription.updated"):
+            _sub_from_subscription(obj)
+        elif typ == "customer.subscription.deleted":
+            _sub_mark_canceled(obj)
+    except Exception as e:
+        print("[billing webhook] error:", e)
+    return {"received": True}
