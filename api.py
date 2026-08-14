@@ -2590,10 +2590,27 @@ async def billing_plans():
     """Catálogo de planes para pintar la pantalla de precios."""
     return {"currency": "usd", "plans": [
         {"id": "basic", "name": "Básica", "monthly": 50, "annual": None,
-         "features": ["1 cliente", "Solo Round 1"]},
+         "tagline": "Para empezar con un cliente",
+         "features": [
+             "1 cliente",
+             "Disputas Round 1 (burós y acreedores)",
+             "Análisis completo del reporte (motor FCRA)",
+             "Generación de cartas de disputa",
+             "Correo certificado USPS con tu cuenta Postalocity",
+             "Recordatorios automáticos de 30 días",
+         ]},
         {"id": "pro", "name": "Pro", "monthly": 150, "annual": 1530,
          "annual_discount_pct": 15,
-         "features": ["Clientes ilimitados", "Todas las rondas (1, 2, 3)"]},
+         "tagline": "Sin límites, para tu agencia",
+         "features": [
+             "Clientes ilimitados",
+             "Las 3 rondas de disputa (1, 2 y 3)",
+             "Cartas a burós y acreedores",
+             "Seguimiento multi-ronda + recordatorios de 30 días",
+             "Correo certificado con tracking automático",
+             "Reportes de progreso (CIR) y panel de cumplimiento",
+             "Soporte prioritario",
+         ]},
     ]}
 
 @app.get("/billing/status")
