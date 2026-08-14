@@ -2308,3 +2308,82 @@ async def postalocity_sync_all(key: str = ""):
         for k in ("checked", "updated", "sent", "errors", "not_found"):
             total[k] += s.get(k, 0)
     return {"ok": True, **total}
+
+# ═══════════════════════════════════════════════════════════════
+#  REMINDERS AUTOMÁTICOS (seguimiento de 30 días)
+#  No hay tabla aparte: se derivan de letter_receipts. En cuanto una
+#  carta tiene tracking (ya se envió), aparece aquí con el conteo de
+#  30 días. El reloj arranca en la fecha del return receipt si existe
+#  (más precisa), o en date_sent (cuando se asignó el tracking).
+#  Todo trabaja sobre los mismos datos: Dispute Letters, Certified
+#  Mail y Reminders quedan siempre sincronizados.
+# ═══════════════════════════════════════════════════════════════
+
+WAIT_DAYS = 30
+
+def _build_reminders(rows, names):
+    from datetime import timedelta
+    today = datetime.now(timezone.utc).date()
+    out = []
+    for r in rows:
+        tracking = (r.get("tracking_number") or "").strip()
+        if not tracking:
+            continue  # solo cartas ya enviadas (con tracking) generan recordatorio
+        start_s = r.get("return_receipt_date") or r.get("date_sent")
+        if not start_s:
+            continue
+        try:
+            start = datetime.fromisoformat(str(start_s)[:10]).date()
+        except Exception:
+            continue
+        due = start + timedelta(days=WAIT_DAYS)
+        day_x = (today - start).days + 1
+        days_left = (due - today).days
+        out.append({
+            "receipt_id": r.get("id"),
+            "client_id": r.get("client_id"),
+            "client_name": names.get(r.get("client_id"), ""),
+            "recipient_name": r.get("recipient_name"),
+            "recipient_type": r.get("recipient_type"),
+            "round": r.get("round"),
+            "tracking_number": tracking,
+            "start_date": start.isoformat(),
+            "due_date": due.isoformat(),
+            "day_of_30": max(1, min(day_x, WAIT_DAYS)),
+            "days_left": days_left,
+            "done": days_left < 0,                 # ya pasaron los 30 días
+            "based_on": "return_receipt" if r.get("return_receipt_date") else "tracking",
+        })
+    out.sort(key=lambda x: x["due_date"])
+    return out
+
+def _reminders_query(operator_id, client_id=None):
+    q = sb.table("letter_receipts").select("*").eq("operator_id", operator_id)
+    if client_id:
+        q = q.eq("client_id", client_id)
+    rows = (q.execute().data) or []
+    ids = list({r.get("client_id") for r in rows if r.get("client_id")})
+    names = {}
+    if ids:
+        try:
+            cr = sb.table("api_clients").select("id, full_name").in_("id", ids).execute()
+            names = {c["id"]: c.get("full_name") for c in (cr.data or [])}
+        except Exception:
+            names = {}
+    return _build_reminders(rows, names)
+
+@app.get("/reminders")
+async def list_reminders(user=Depends(get_current_user)):
+    """Recordatorios automáticos de TODOS los clientes de la agencia."""
+    try:
+        return _reminders_query(user["id"])
+    except Exception:
+        return []
+
+@app.get("/clients/{client_id}/reminders")
+async def list_client_reminders(client_id: str, user=Depends(get_current_user)):
+    """Recordatorios automáticos de un cliente."""
+    try:
+        return _reminders_query(user["id"], client_id)
+    except Exception:
+        return []
