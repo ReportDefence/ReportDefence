@@ -2577,17 +2577,61 @@ def _sub_mark_canceled(s: dict):
     except Exception:
         pass
 
-def _verify_stripe_sig(raw: bytes, sig_header: str, secret: str) -> bool:
+# Tolerancia de antigüedad de la firma. Stripe recomienda 300s. Configurable
+# por si el reloj del contenedor queda desfasado respecto de Stripe.
+STRIPE_SIG_TOLERANCE_SECONDS = int(os.environ.get("STRIPE_SIG_TOLERANCE_SECONDS", "300"))
+
+def _verify_stripe_sig(raw: bytes, sig_header: str, secret: str) -> tuple:
+    """Verifica la firma del webhook de Stripe.
+
+    Devuelve (ok, motivo). El motivo va SOLO al log: al cliente se le
+    responde siempre lo mismo, para no darle un oráculo que le diga en qué
+    se equivocó.
+
+    Valida además la antigüedad del timestamp (anti-replay) y acepta varias
+    firmas v1 en el mismo header, que es lo que Stripe manda mientras se
+    rota el secreto.
+    """
+    if not secret:
+        return (False, "no_secret_configured")
+    if not sig_header:
+        return (False, "missing_signature_header")
+
+    # Header: "t=123,v1=abc,v1=def" — puede traer más de un v1.
+    timestamp = ""
+    signatures = []
+    for part in sig_header.split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k = k.strip()
+        if k == "t":
+            timestamp = v.strip()
+        elif k == "v1":
+            signatures.append(v.strip())
+
+    if not timestamp or not signatures:
+        return (False, "malformed_signature_header")
+
     try:
-        parts = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
-        t, v1 = parts.get("t"), parts.get("v1")
-        if not t or not v1:
-            return False
-        signed = t.encode() + b"." + raw
-        mac = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(mac, v1)
-    except Exception:
-        return False
+        ts = int(timestamp)
+    except ValueError:
+        return (False, "non_numeric_timestamp")
+
+    age = abs(time.time() - ts)
+    if age > STRIPE_SIG_TOLERANCE_SECONDS:
+        return (False, f"timestamp_outside_tolerance({int(age)}s)")
+
+    # HMAC sobre "<t>.<cuerpo crudo>". Tienen que ser los bytes EXACTOS que
+    # llegaron: si se re-serializa el JSON, la firma no da.
+    signed = timestamp.encode() + b"." + raw
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+
+    ok = False
+    for sig in signatures:
+        if hmac.compare_digest(expected, sig):
+            ok = True
+    return (ok, "" if ok else "signature_mismatch")
 
 def _subscription_url():
     """URL de la pantalla de suscripción (a donde vuelve Stripe). Configurable con
@@ -2696,8 +2740,22 @@ async def billing_webhook(request: Request):
     """Stripe llama aquí al pagar / renovar / cancelar. Actualiza el plan."""
     raw = await request.body()
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-    if secret and not _verify_stripe_sig(raw, request.headers.get("stripe-signature", ""), secret):
+
+    # FALLA CERRADO. Antes era `if secret and not _verify_stripe_sig(...)`:
+    # si la variable faltaba o quedaba vacía, el chequeo entero se salteaba
+    # y el webhook aceptaba cualquier POST sin firma — un
+    # checkout.session.completed forjado activaba el plan Pro de cualquier
+    # cuenta. Sin secreto no se procesa nada, y el fallo queda en el log.
+    if not secret:
+        print("[billing webhook] RECHAZADO: STRIPE_WEBHOOK_SECRET no está "
+              "configurada. El webhook no procesa nada sin ella.")
+        raise HTTPException(503, "Webhook not configured")
+
+    ok, motivo = _verify_stripe_sig(raw, request.headers.get("stripe-signature", ""), secret)
+    if not ok:
+        print(f"[billing webhook] firma rechazada: {motivo}")
         raise HTTPException(400, "bad signature")
+
     try:
         event = json.loads(raw.decode("utf-8"))
     except Exception:
@@ -2712,5 +2770,8 @@ async def billing_webhook(request: Request):
         elif typ == "customer.subscription.deleted":
             _sub_mark_canceled(obj)
     except Exception as e:
-        print("[billing webhook] error:", e)
+        # 500 para que Stripe reintente. Antes devolvía 200 y el evento se
+        # perdía para siempre si el upsert fallaba.
+        print(f"[billing webhook] error procesando {typ}: {e}")
+        raise HTTPException(500, "processing error")
     return {"received": True}
