@@ -1,4 +1,3 @@
-
 """
 REPORT DEFENCE — FastAPI backend (Supabase edition)
 ====================================================
@@ -317,20 +316,91 @@ async def login(body: LoginBody, request: Request):
     u = res.data[0]
     return {"access_token": create_token(u["id"], u["role"]), "user": user_response(u)}
 
+def _verify_supabase_token(access_token: str) -> dict:
+    """Valida el access_token contra Supabase y devuelve la identidad REAL.
+
+    Este es el corazón del arreglo: antes el endpoint confiaba en el `email`
+    que mandaba el navegador y ni siquiera leía el token, así que cualquiera
+    que conociera la ruta podía pedir una sesión a nombre de cualquier
+    cuenta, sin contraseña. Ahora el email sale de la respuesta de Supabase,
+    nunca del body.
+
+    Lanza ValueError con el motivo (para el log). El motivo NO se le devuelve
+    al cliente.
+    """
+    import httpx
+
+    if not access_token or len(access_token) < 20:
+        raise ValueError("token ausente o demasiado corto")
+
+    # /auth/v1/user acepta la anon key o la service key como apikey.
+    apikey = os.environ.get("SUPABASE_ANON_KEY") or SUPABASE_KEY
+    try:
+        r = httpx.get(
+            f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+            headers={"Authorization": f"Bearer {access_token}", "apikey": apikey},
+            timeout=10.0,
+        )
+    except Exception as e:
+        # Fallar cerrado: si no podemos comprobar, no emitimos sesión.
+        raise ValueError(f"no se pudo contactar a Supabase: {e}")
+
+    if r.status_code != 200:
+        raise ValueError(f"Supabase rechazó el token (HTTP {r.status_code})")
+
+    data = r.json() or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        raise ValueError("Supabase no devolvió email para ese token")
+    if not data.get("id"):
+        raise ValueError("Supabase no devolvió id de usuario")
+
+    meta = data.get("user_metadata") or {}
+    return {
+        "supabase_id": data["id"],
+        "email": email,
+        "full_name": meta.get("full_name") or meta.get("name") or "",
+    }
+
+
 @app.post("/auth/supabase")
-async def auth_supabase(body: SupabaseAuthBody):
-    existing = sb.table("api_users").select("*").eq("email", body.email).execute()
+async def auth_supabase(body: SupabaseAuthBody, request: Request):
+    # Límite de intentos: este endpoint emite sesiones y antes no tenía ninguno.
+    check_rate_limit(request, "auth/supabase", email=body.email,
+                     max_requests=10, window_seconds=900)
+
+    try:
+        verified = _verify_supabase_token(body.access_token)
+    except ValueError as e:
+        # El motivo va al log, no a la respuesta: no le damos al atacante un
+        # oráculo que le diga en qué se equivocó.
+        print(f"[auth/supabase] rechazado: {e}")
+        raise HTTPException(401, "Invalid Supabase session")
+
+    # La identidad sale de Supabase. body.email queda solo como pista para el
+    # rate limit; ya no decide quién sos.
+    email     = verified["email"]
+    full_name = body.full_name or verified["full_name"] or email.split("@")[0]
+
+    existing = sb.table("api_users").select("*").eq("email", email).execute()
     if existing.data and len(existing.data) > 0:
         u = existing.data[0]
     else:
-        res = sb.table("api_users").insert({
-            "email": body.email,
-            "full_name": body.full_name,
-            "hashed_password": hash_password(str(uuid.uuid4())),
-            "role": "client",
-            "auth_provider": "google",
-        }).execute()
-        u = res.data[0]
+        # Reintento sin distinguir mayúsculas, para no duplicar cuentas
+        # creadas antes con otra capitalización.
+        alt = sb.table("api_users").select("*").ilike("email", email).execute()
+        if alt.data and len(alt.data) > 0:
+            u = alt.data[0]
+        else:
+            res = sb.table("api_users").insert({
+                "email": email,
+                "full_name": full_name,
+                "hashed_password": hash_password(str(uuid.uuid4())),
+                "role": "client",
+                "auth_provider": "google",
+            }).execute()
+            u = res.data[0]
+
     token = create_token(u["id"], u["role"])
     return {"access_token": token, "token": token, "user": user_response(u)}
 
