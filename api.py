@@ -173,6 +173,70 @@ async def get_current_user(request: Request):
         raise HTTPException(401, "User not found")
     return res.data[0]
 
+# ─── Control de propiedad ─────────────────────────────────────
+# Antes, endpoints como /jobs/{id}, /cir/{id} o PATCH /clients/{id} solo
+# comprobaban que el token fuera válido, nunca que el recurso fuera tuyo.
+# Un token de cualquier cuenta llegaba a los datos de otra: reportes de
+# crédito completos, direcciones, cartas, recibos.
+#
+# Regla:
+#   - la cuenta admin ve todo (soporte)
+#   - un operador ve los clientes donde operator_id == su id
+#   - un consumidor ve el cliente donde user_id == su id (portal)
+#   - cualquier otro caso: 404, NUNCA 403 — un 403 confirma que el
+#     recurso existe, y eso ya es información que no le debemos a nadie.
+
+# Cuentas con vista completa (soporte / dueño del negocio). Configurable por
+# entorno: ADMIN_EMAILS="uno@x.com,dos@y.com". Por defecto, las dos cuentas
+# del dueño, para que la vista global no dependa del rol.
+#
+# Por qué no basta con role == "operator": el rol se auto-otorga con
+# OPERATOR_CODE, que tiene default publico en el codigo. Cualquiera que lo
+# adivine seria "operator". Ser admin, en cambio, exige estar en esta lista,
+# que solo se cambia desde las variables de entorno del servidor.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", ADMIN_EMAIL).split(",")
+    if e.strip()
+}
+
+def _is_admin(user: dict) -> bool:
+    return str(user.get("email", "")).lower() in ADMIN_EMAILS
+
+def _owns_client_row(user: dict, client_row: dict) -> bool:
+    if _is_admin(user):
+        return True
+    uid = user["id"]
+    return client_row.get("operator_id") == uid or client_row.get("user_id") == uid
+
+def _get_client_or_404(user: dict, client_id: str) -> dict:
+    """Devuelve la fila del cliente si el usuario puede verla; si no, 404."""
+    res = sb.table("api_clients").select("*").eq("id", client_id).execute()
+    if not res.data or len(res.data) == 0:
+        raise HTTPException(404, "Client not found")
+    row = res.data[0]
+    if not _owns_client_row(user, row):
+        print(f"[acceso] denegado: user={user['id']} intento cliente={client_id}")
+        raise HTTPException(404, "Client not found")
+    return row
+
+def _get_job_or_404(user: dict, job_id: str) -> dict:
+    """Devuelve la fila del job si el usuario puede verla; si no, 404."""
+    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
+    if not res.data or len(res.data) == 0:
+        raise HTTPException(404, "Job not found")
+    job = res.data[0]
+    if _is_admin(user) or job.get("operator_id") == user["id"]:
+        return job
+    # Puede que el job no tenga operator_id (filas viejas): caemos al cliente.
+    cid = job.get("client_id")
+    if cid:
+        cr = sb.table("api_clients").select("*").eq("id", cid).execute()
+        if cr.data and _owns_client_row(user, cr.data[0]):
+            return job
+    print(f"[acceso] denegado: user={user['id']} intento job={job_id}")
+    raise HTTPException(404, "Job not found")
+
 # ─── Startup: ensure admin exists ─────────────────────────────
 
 @asynccontextmanager
@@ -234,53 +298,6 @@ def user_response(u: dict):
         "role": u["role"],
     }
 
-
-@app.get("/debug/chromium")
-async def debug_chromium():
-    """Temporary endpoint to find Chromium path on Railway."""
-    import subprocess, shutil, glob, os
-    results = {}
-    
-    # which commands
-    for cmd in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]:
-        path = shutil.which(cmd)
-        results[f"which_{cmd}"] = path
-    
-    # glob search in common nix paths
-    nix_paths = glob.glob("/nix/store/*/bin/chromium*")
-    results["nix_glob"] = nix_paths[:5]
-    
-    # find chromium anywhere
-    for search_path in ["/nix", "/usr", "/opt", "/snap", "/home"]:
-        try:
-            out = subprocess.check_output(
-                ["find", search_path, "-name", "chromium*", "-type", "f"],
-                timeout=10, stderr=subprocess.DEVNULL
-            ).decode()
-            results[f"find_{search_path}"] = out.strip().split("\n")[:5]
-        except Exception as e:
-            results[f"find_{search_path}"] = str(e)
-    
-    # check playwright cache
-    pw_cache = glob.glob("/root/.cache/ms-playwright/*/chrome*/chrome*")
-    results["playwright_cache"] = pw_cache[:5]
-    
-    # check /app/.venv playwright
-    venv_pw = glob.glob("/app/.venv/lib/*/site-packages/playwright/driver/*")
-    results["venv_playwright"] = venv_pw[:5]
-    
-    # check PATH
-    results["PATH"] = os.environ.get("PATH", "")
-    
-    # ls /usr/bin chromium
-    try:
-        out = subprocess.check_output(["ls", "/usr/bin/"], timeout=5).decode()
-        chrome_bins = [x for x in out.split() if "chrom" in x.lower()]
-        results["usr_bin_chrome"] = chrome_bins
-    except Exception as e:
-        results["usr_bin_chrome"] = str(e)
-
-    return results
 
 @app.post("/auth/register")
 async def register(body: RegisterBody, request: Request):
@@ -482,12 +499,20 @@ def enrich_client(c: dict) -> dict:
 
 @app.get("/clients")
 async def list_clients(user=Depends(get_current_user)):
-    # Operators see all clients, clients see only their own
-    if user.get("role") == "operator":
-        res = sb.table("api_clients").select("*").order("created_at", desc=True).execute()
+    # Coherente con _get_client_or_404: si aparece en la lista, se puede abrir.
+    # Antes un operador veia los clientes de TODAS las agencias.
+    if _is_admin(user):
+        filas = sb.table("api_clients").select("*").order("created_at", desc=True).execute().data or []
     else:
-        res = sb.table("api_clients").select("*").eq("operator_id", user["id"]).order("created_at", desc=True).execute()
-    return [enrich_client(c) for c in (res.data or [])]
+        uid = user["id"]
+        a = sb.table("api_clients").select("*").eq("operator_id", uid).execute().data or []
+        b = sb.table("api_clients").select("*").eq("user_id", uid).execute().data or []
+        vistos, filas = set(), []
+        for c in a + b:
+            if c["id"] not in vistos:
+                vistos.add(c["id"]); filas.append(c)
+        filas.sort(key=lambda c: c.get("created_at", ""), reverse=True)
+    return [enrich_client(c) for c in filas]
 
 @app.post("/clients", status_code=201)
 async def create_client(body: ClientCreate, user=Depends(get_current_user)):
@@ -500,10 +525,7 @@ async def create_client(body: ClientCreate, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}")
 async def get_client(client_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("*").eq("id", client_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Client not found")
-    c = res.data[0]
+    c = _get_client_or_404(user, client_id)
     job_ids = c.get("job_ids") or []
     jobs = []
     if job_ids:
@@ -534,6 +556,7 @@ async def update_client(client_id: str, body: ClientUpdate, user=Depends(get_cur
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(400, "No fields to update")
+    _get_client_or_404(user, client_id)          # solo el dueno puede modificar
     sb.table("api_clients").update(updates).eq("id", client_id).execute()
     return await get_client(client_id, user)
 
@@ -544,10 +567,8 @@ async def delete_client(client_id: str, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}/history")
 async def client_history(client_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Client not found")
-    job_ids = res.data[0].get("job_ids") or []
+    row = _get_client_or_404(user, client_id)
+    job_ids = row.get("job_ids") or []
     if not job_ids:
         return []
     jr = sb.table("api_jobs").select("*").in_("job_id", job_ids).order("created_at", desc=True).execute()
@@ -565,10 +586,8 @@ async def client_history(client_id: str, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}/letters")
 async def client_letters(client_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
-    if not res.data or len(res.data) == 0:
-        return []
-    job_ids = res.data[0].get("job_ids") or []
+    row = _get_client_or_404(user, client_id)
+    job_ids = row.get("job_ids") or []
     if not job_ids:
         return []
     jr = sb.table("api_jobs").select("job_id, letter_files, letters_generated").in_("job_id", job_ids).execute()
@@ -608,12 +627,14 @@ class ReceiptUpdate(BaseModel):
 @app.post("/letter-receipts", status_code=201)
 async def create_receipt(body: ReceiptCreate, user=Depends(get_current_user)):
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    _get_client_or_404(user, body.client_id)     # el cliente tiene que ser tuyo
     data["operator_id"] = user["id"]
     res = sb.table("letter_receipts").insert(data).execute()
     return res.data[0] if res.data else {"ok": True}
 
 @app.get("/clients/{client_id}/receipts")
 async def list_receipts(client_id: str, user=Depends(get_current_user)):
+    _get_client_or_404(user, client_id)
     res = (sb.table("letter_receipts").select("*")
            .eq("client_id", client_id).order("created_at", desc=True).execute())
     return res.data or []
@@ -623,6 +644,10 @@ async def update_receipt(receipt_id: str, body: ReceiptUpdate, user=Depends(get_
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(400, "No fields to update")
+    _own = sb.table("letter_receipts").select("id").eq("id", receipt_id).eq(
+        "operator_id", user["id"]).execute()
+    if not _own.data and not _is_admin(user):
+        raise HTTPException(404, "Receipt not found")
     sb.table("letter_receipts").update(updates).eq("id", receipt_id).execute()
     r = sb.table("letter_receipts").select("*").eq("id", receipt_id).execute()
     return r.data[0] if r.data else {"ok": True}
@@ -638,10 +663,7 @@ async def delete_receipt(receipt_id: str, user=Depends(get_current_user)):
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Job not found")
-    return res.data[0]
+    return _get_job_or_404(user, job_id)
 
 @app.post("/upload-report")
 async def upload_report(
@@ -651,6 +673,7 @@ async def upload_report(
     source: str = Form("identityiq"),
     user=Depends(get_current_user),
 ):
+    _get_client_or_404(user, client_id)   # no se sube a un cliente ajeno
     job_id = str(uuid.uuid4())
     pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
     with open(pdf_path, "wb") as f:
@@ -795,12 +818,10 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
     import asyncio
     from functools import partial
 
-    # Validate client exists
-    client_res = sb.table("api_clients").select("*").eq("id", body.client_id).execute()
-    if not client_res.data:
-        raise HTTPException(404, "Client not found")
-    client_data = client_res.data[0]
-    consumer_name = client_data.get("name", "")
+    # Validate client exists Y que sea tuyo
+    client_data = _get_client_or_404(user, body.client_id)
+    # BUG: la columna es full_name; con "name" consumer_name quedaba siempre "".
+    consumer_name = client_data.get("full_name", "")
 
     job_id = str(uuid.uuid4())
 
@@ -944,12 +965,10 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
     import asyncio
     from functools import partial
 
-    # Validate client
-    client_res = sb.table("api_clients").select("*").eq("id", body.client_id).execute()
-    if not client_res.data:
-        raise HTTPException(404, "Client not found")
-    client_data  = client_res.data[0]
-    consumer_name = client_data.get("name", "")
+    # Validate client Y que sea tuyo
+    client_data = _get_client_or_404(user, body.client_id)
+    # BUG: la columna es full_name; con "name" consumer_name quedaba siempre "".
+    consumer_name = client_data.get("full_name", "")
 
     job_id = str(uuid.uuid4())
 
@@ -1088,10 +1107,7 @@ class GenerateLettersBody(BaseModel):
 @app.post("/generate-letters")
 async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_user)):
     _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
-    res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Job not found")
-    job = res.data[0]
+    job = _get_job_or_404(user, body.job_id)
 
     from original_parser import build_dispute_letter_engine
 
@@ -1432,10 +1448,7 @@ class GenerateFurnisherLettersBody(BaseModel):
 @app.post("/generate-furnisher-letters")
 async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=Depends(get_current_user)):
     _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
-    res = sb.table("api_jobs").select("*").eq("job_id", body.job_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Job not found")
-    job = res.data[0]
+    job = _get_job_or_404(user, body.job_id)
 
     from original_parser import build_furnisher_letter_engine, validate_eoscar_compliance
 
@@ -1545,10 +1558,7 @@ def _letter_text_to_pdf(text: str, out_path: str) -> str:
 async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_user)):
     _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
     # 1) remitente = el cliente (dirección dinámica por job)
-    cr = sb.table("api_clients").select("*").eq("id", body.client_id).execute()
-    if not cr.data:
-        raise HTTPException(404, "Client not found")
-    cl = cr.data[0]
+    cl = _get_client_or_404(user, body.client_id)
 
     # 2) validar que la carta no tenga placeholders de dirección sin resolver
     if "[Address]" in body.letter_text or "[Collector Address]" in body.letter_text:
@@ -1863,10 +1873,7 @@ def _client_jobs_ordered(client_id: str) -> list:
 
 @app.get("/cir/{job_id}")
 async def get_cir(job_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Job not found")
-    job = res.data[0]
+    job = _get_job_or_404(user, job_id)
     # infer round number from the client's job order (1 = first report)
     round_num = 1
     cid = job.get("client_id")
@@ -1881,6 +1888,7 @@ async def get_cir(job_id: str, user=Depends(get_current_user)):
 
 @app.get("/progress/{client_id}")
 async def get_progress(client_id: str, user=Depends(get_current_user)):
+    _get_client_or_404(user, client_id)
     jobs = _client_jobs_ordered(client_id)
     if len(jobs) < 2:
         raise HTTPException(400, "Need at least two reports (rounds) to build a progress report.")
@@ -2002,10 +2010,7 @@ def build_cir_summary_pdf(cir: dict) -> bytes:
 
 @app.get("/cir/{job_id}/pdf")
 async def get_cir_pdf(job_id: str, user=Depends(get_current_user)):
-    res = sb.table("api_jobs").select("*").eq("job_id", job_id).execute()
-    if not res.data or len(res.data) == 0:
-        raise HTTPException(404, "Job not found")
-    job = res.data[0]
+    job = _get_job_or_404(user, job_id)
     round_num = 1
     cid = job.get("client_id")
     if cid:
@@ -2058,112 +2063,6 @@ async def portal_letters(user=Depends(get_current_user)):
 @app.get("/health")
 async def health():
     return {"status": "ok", "storage": "supabase", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-
-# ═══════════════════════════════════════════════════════════════
-#  TEMPORAL — DRY-RUN DE POSTALOCITY DESDE EL NAVEGADOR
-#  (sin reportlab, sin requests). BORRAR este bloque tras usarlo.
-# ═══════════════════════════════════════════════════════════════
-
-@app.get("/debug/postalocity-dryrun")
-async def debug_postalocity_dryrun(key: str = "", mode: str = "direct", url: str = "",
-                                   jobid: str = "", zone: str = ""):
-    import os, io, contextlib, traceback
-    expected = os.environ.get("POSTALOCITY_DEBUG_KEY", "reportdefence-2026")
-    if key != expected:
-        raise HTTPException(403, "bad key")
-
-    buf = io.StringIO()
-    result = {}
-    with contextlib.redirect_stdout(buf):
-        try:
-            from postalocity_dispatch import (Address, send_certified_letter,
-                                              dryrun_addsource, BUREAU_ADDRESSES,
-                                              ENV, BASE, write_text_pdf, PostalocityClient)
-            print(f"ENV={ENV}  BASE={BASE}  mode={mode}  jobid={jobid}  zone={zone}")
-
-            if jobid:
-                # Inspeccionar un job existente (ya procesado): precio + destinatario.
-                c = PostalocityClient()
-                job = c.get_job(int(jobid))
-                if not isinstance(job, dict):
-                    job = {"id": job}
-                jp = job.get("jobProfile", {}) if isinstance(job, dict) else {}
-                result = {
-                    "job_id": int(jobid),
-                    "state": job.get("state"),
-                    "progress": job.get("progress"),
-                    "total_price": job.get("totalPrice"),
-                    "total_postage": job.get("totalPostage"),
-                    "mail_piece_count": job.get("mailPieceCount"),
-                    "source_count": job.get("sourceCount"),
-                    "error_reason": job.get("errorReason"),
-                    "sample_address": job.get("sampleAddress"),
-                    "detected_recipient": job.get("mailTo"),
-                    "addressZone_usado": jp.get("addressZone"),
-                    "mailingClass": jp.get("mailingClass"),
-                    "raw": job,
-                }
-            elif mode == "full":
-                # CALIBRACIÓN: carta con FORMATO REAL (cliente arriba, buró debajo,
-                # cuerpo) + addressZone tomado del query ?zone=x,y,w,h. Sirve para
-                # probar valores de zona SIN redeploy: solo cambia la URL.
-                letter = ("Nolberto Valdez Pinales\n"
-                          "4809 Windsor Rd, Lot G20 (Unit G20)\n"
-                          "Champaign, IL 61822\n\n"
-                          "TransUnion\n"
-                          "PO Box 2000\n"
-                          "Chester, PA 19016\n\n"
-                          "August 12, 2026\n\n"
-                          "Hi,\n\n"
-                          "I recently went through my credit report and found 8 accounts "
-                          "I do not believe are being reported correctly.\n\n"
-                          "Nolberto Valdez Pinales")
-                pdf_path = os.path.join(UPLOAD_DIR, "dryrun_full.pdf")
-                write_text_pdf(pdf_path, letter, font="Helvetica", size=11)
-                print(f"addressZone de prueba = {zone or '(vacío -> auto)'}")
-                res = send_certified_letter(
-                    pdf_path,
-                    sender=Address("Nolberto Valdez Pinales", "4809 Windsor Rd, Lot G20 (Unit G20)",
-                                   "Champaign", "IL", "61822"),
-                    recipient=None,
-                    address_zone=zone,   # "" => no fija zona (auto). Un valor => la fija.
-                )
-                result = res
-                print("\n>>> Ahora consulta el job con &jobid=%s para ver a quién le puso "
-                      "la dirección (sample_address / addressZone)." % res.get("job_id"))
-            elif mode == "addsource":
-                # Ruta AddSource: Postalocity descarga la URL + dirección explícita.
-                test_url = url or "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
-                print(f"AddSource url={test_url}")
-                result = dryrun_addsource(test_url, recipient=BUREAU_ADDRESSES["equifax"])
-            else:
-                # Ruta DIRECTA: subir PDF a S3 -> SplitSource.
-                # La carta lleva SOLO el destinatario arriba (en la posicion de
-                # ventana ~2"), sin remitente: Postalocity imprime el remitente
-                # el mismo (renderFromAddress=true). Asi detecta al destinatario.
-                pdf_path = os.path.join(UPLOAD_DIR, "dryrun_test.pdf")
-                write_text_pdf(pdf_path,
-                    "\n\n\n\n\n\n"                                 # baja la dirección a la ventana (~2.2")
-                    "EQUIFAX INFORMATION SERVICES LLC\n"
-                    "PO BOX 740256\n"
-                    "ATLANTA GA 30374\n"
-                    "\n\n\n"
-                    "August 12, 2026\n\n"
-                    "To whom it may concern:\n\n"
-                    "This is a TEST letter for pipeline validation only. "
-                    "Not approved, not mailed.",
-                    font="Helvetica", size=12)
-                result = send_certified_letter(
-                    pdf_path,
-                    sender=Address("Cliente Prueba", "123 Main St", "Orlando", "FL", "32801"),
-                    recipient=BUREAU_ADDRESSES["equifax"],
-                )
-        except Exception as e:
-            print("ERROR:", e)
-            print(traceback.format_exc())
-
-    return {"log": buf.getvalue(), "result": result}
 
 
 # ═══════════════════════════════════════════════════════════════
