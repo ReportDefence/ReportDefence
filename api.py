@@ -1756,8 +1756,842 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
             "needs_collector_address": "[Collector Address]" in text,
         })
 
+    # Guardar, igual que las cartas a burós: sin esto se pierden al cerrar
+    # la respuesta y el bundle no las puede incluir.
+    try:
+        if letters_out:
+            ahora = datetime.now(timezone.utc).isoformat()
+            claves = {(l["furnisher"], l["round"]) for l in letters_out}
+            acumuladas = [
+                lf for lf in (job.get("letter_files") or [])
+                if (lf.get("furnisher"), lf.get("round")) not in claves
+                or lf.get("category") != "furnisher"
+            ]
+            for l in letters_out:
+                acumuladas.append({
+                    "bureau": None, "category": "furnisher",
+                    "furnisher": l["furnisher"], "round": l["round"],
+                    "filename": f"furnisher_{l['furnisher'].replace(' ', '_')}_{l['round']}.txt",
+                    "text": l["text"], "generated_at": ahora,
+                    "eoscar_score": (l.get("eoscar") or {}).get("score"),
+                })
+            sb.table("api_jobs").update(_solo_columnas_de_api_jobs({
+                "letter_files": acumuladas, "letter_count": len(acumuladas),
+            })).eq("job_id", body.job_id).execute()
+    except Exception as e:
+        print(f"[furnisher-letters] no se pudieron guardar: {e}")
+
     return {"letters": letters_out, "blocked": blocked, "job_id": body.job_id,
             "count": len(letters_out)}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ENTREGA — BUNDLE PDF CON MEMBRETE
+#
+#  Hasta ahora la web entregaba texto plano y el PDF armado existía sólo
+#  en el Desktop. build_bundle_v2 arma las dos partes: la guía interna
+#  con membrete para el especialista, y las cartas limpias para imprimir
+#  y mandar.
+#
+#  Se arma desde letter_files, o sea desde lo que YA se generó y pasó el
+#  gate de e-OSCAR. No se regenera nada: el PDF contiene exactamente las
+#  cartas que el operador aprobó.
+# ═══════════════════════════════════════════════════════════════
+
+def _cartas_para_bundle(job: dict, round_key: str) -> tuple:
+    """
+    Rearma las tres estructuras que espera build_bundle a partir de
+    letter_files:
+        dispute_letters   {bureau: {categoria: {round: texto}}}
+        furnisher_letters {nombre: {round: texto}}
+        inquiry_letters   {bureau: texto}
+    """
+    disputas: dict = {}
+    furnishers: dict = {}
+    consultas: dict = {}
+    for lf in (job.get("letter_files") or []):
+        if not isinstance(lf, dict) or not lf.get("text"):
+            continue
+        if str(lf.get("round", "")) != round_key:
+            continue
+        cat = lf.get("category", "")
+        if cat == "furnisher":
+            nombre = lf.get("furnisher") or "furnisher"
+            furnishers.setdefault(nombre, {})[round_key] = lf["text"]
+        elif cat == "inquiries":
+            if lf.get("bureau"):
+                consultas[lf["bureau"]] = lf["text"]
+        elif cat in ("identity_theft", "bureau_response"):
+            continue          # se despachan aparte, no van en el bundle de ronda
+        else:
+            if lf.get("bureau"):
+                disputas.setdefault(lf["bureau"], {}).setdefault(
+                    cat or "collections", {})[round_key] = lf["text"]
+    return disputas, furnishers, consultas
+
+
+class GenerateBundleBody(BaseModel):
+    job_id: str
+    consumer_name: Optional[str] = None
+    consumer_address: Optional[str] = None
+    consumer_city_state_zip: Optional[str] = None
+    round: Optional[str] = "round_1"
+
+
+@app.post("/generate-bundle")
+async def generate_bundle(body: GenerateBundleBody, user=Depends(get_current_user)):
+    try:
+        from build_bundle_v2 import build_bundle
+    except ImportError as e:
+        raise HTTPException(
+            500,
+            f"Falta build_bundle_v2.py en el servidor ({e}). Es un archivo "
+            f"aparte que va junto a api.py."
+        )
+
+    job = _get_job_or_404(user, body.job_id)
+    round_key = body.round or "round_1"
+    try:
+        round_num = int(str(round_key).split("_")[-1])
+    except (ValueError, IndexError):
+        round_num = 1
+
+    disputas, furnishers, consultas = _cartas_para_bundle(job, round_key)
+    if not (disputas or furnishers or consultas):
+        raise HTTPException(
+            400,
+            f"No hay cartas guardadas para {round_key} en este job. Genera "
+            f"primero las cartas (a buros, al acreedor o de consultas)."
+        )
+
+    consumer = {
+        "name": body.consumer_name or job.get("consumer_name") or "",
+        "address": body.consumer_address or "[Address]",
+        "city_state_zip": body.consumer_city_state_zip or "[City, State ZIP]",
+    }
+    if not consumer["name"]:
+        raise HTTPException(400, "Falta consumer_name.")
+
+    # El logo es opcional: si la variable no esta o el archivo no existe,
+    # build_bundle arma la portada sin logo en vez de fallar.
+    logo = os.environ.get("RD_LOGO_PATH") or None
+    if logo and not os.path.exists(logo):
+        print(f"[bundle] RD_LOGO_PATH apunta a un archivo que no existe: {logo}")
+        logo = None
+
+    import tempfile
+    destino = os.path.join(
+        tempfile.mkdtemp(prefix="rd_bundle_"),
+        f"bundle_{body.job_id}_{round_key}.pdf",
+    )
+    try:
+        ruta = build_bundle(
+            consumer=consumer,
+            dispute_letters=disputas or None,
+            furnisher_letters=furnishers or None,
+            inquiry_letters=consultas or None,
+            report_date=job.get("report_date", ""),
+            round_num=round_num,
+            output_path=destino,
+            logo_path=logo,
+            letter_input_engine=job.get("letter_input_engine") or None,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        import traceback
+        print(f"[bundle] fallo: {traceback.format_exc()[:900]}")
+        raise HTTPException(500, f"No se pudo armar el bundle: {e}")
+
+    with open(ruta, "rb") as f:
+        contenido = f.read()
+    try:
+        os.remove(ruta)
+        os.rmdir(os.path.dirname(ruta))
+    except OSError:
+        pass
+
+    total = (sum(len(r) for g in disputas.values() for r in g.values())
+             + len(furnishers) + len(consultas))
+    seguro = (consumer["name"] or "cliente").replace(" ", "_")
+    print(f"[bundle] job={body.job_id} {round_key} cartas={total} "
+          f"bytes={len(contenido)}")
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(contenido),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="Bundle_{seguro}_R{round_num}.pdf"',
+            "X-Letter-Count": str(total),
+        },
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PATH B — COMPARACIÓN DE RONDAS
+#
+#  Es el path de más valor y el que faltaba entero. Sin él, la web no
+#  puede detectar REINSERCIÓN desde los reportes: una cuenta que el buró
+#  borró y que vuelve a aparecer viola 15 U.S.C. section 1681i(a)(5)(B)(ii),
+#  y es el argumento más fuerte del sistema.
+#
+#  NO HACE FALTA COLUMNA NUEVA. build_round_snapshot pide un `result` de
+#  build_report, pero de todo eso sólo usa negatives_by_bureau, report_date
+#  y unos contadores. Los negativos ya están guardados en api_jobs y los
+#  contadores se rearman desde `attacks` y `letter_files`. O sea que el
+#  snapshot se construye al vuelo desde el job, sin tocar el esquema.
+# ═══════════════════════════════════════════════════════════════
+
+def _resultado_desde_job(job: dict) -> dict:
+    """
+    Arma la forma que espera build_round_snapshot a partir de lo guardado.
+
+    `attacks` viene aplanado (una fila por cuenta) y el snapshot espera la
+    forma {bureau: [attack, ...]}, así que se reagrupa. Sólo se usa para
+    contar, no para generar texto.
+    """
+    por_bureau: dict = {}
+    for a in (job.get("attacks") or []):
+        if isinstance(a, dict) and a.get("bureau"):
+            por_bureau.setdefault(a["bureau"], []).append(
+                {"attack_type": a.get("attack_type", "")}
+            )
+    cartas_por_bureau: dict = {}
+    for lf in (job.get("letter_files") or []):
+        b = lf.get("bureau", "")
+        if b:
+            cartas_por_bureau.setdefault(b, {}).setdefault(
+                lf.get("category", "?"), {})[lf.get("round", "?")] = ""
+    return {
+        "negatives_by_bureau":    job.get("negatives_by_bureau", {}) or {},
+        "report_date":            job.get("report_date", ""),
+        "legal_detection_engine": por_bureau,
+        "dispute_letters":        cartas_por_bureau,
+        "furnisher_letters":      {},
+        "inquiry_letters":        {},
+        "letter_input_engine":    job.get("letter_input_engine", {}) or {},
+    }
+
+
+def _numero_de_ronda(client_id: str, job_id: str) -> int:
+    """Posición de ese job entre las rondas del cliente, ordenadas por fecha
+    de reporte. 1 = el reporte más viejo."""
+    if not client_id:
+        return 1
+    for idx, j in enumerate(_client_jobs_ordered(client_id), 1):
+        if j.get("job_id") == job_id:
+            return idx
+    return 1
+
+
+def _borradas_en_comparaciones_previas(job: dict) -> set:
+    """
+    Huellas de cuentas que YA se habían borrado en comparaciones anteriores.
+
+    Hace falta para detectar reinserción a partir de la ronda 3: una cuenta
+    que se fue en R1, no estaba en R2 y reaparece en R3 sigue siendo una
+    reinserción, aunque entre R2 y R3 no haya cambiado nada.
+    """
+    huellas = set()
+    for ev in (job.get("response_history") or []):
+        if isinstance(ev, dict) and ev.get("type") == "round_comparison":
+            for fp in (ev.get("removed_fingerprints") or []):
+                huellas.add(fp)
+    return huellas
+
+
+class CompareRoundsBody(BaseModel):
+    job_id_anterior: Optional[str] = None      # ronda vieja
+    job_id_actual: Optional[str] = None        # ronda nueva
+    client_id: Optional[str] = None            # si se pasa solo esto, usa las 2 ultimas
+    consumer_name: Optional[str] = None
+    generar_cartas: Optional[bool] = False     # ademas de comparar, escribir la R2
+    round: Optional[str] = "round_2"
+    variation_seed: Optional[int] = 0
+
+
+@app.post("/compare-rounds")
+async def compare_rounds_endpoint(body: CompareRoundsBody, user=Depends(get_current_user)):
+    from original_parser import (
+        build_round_snapshot, compare_rounds, build_comparison_report,
+        filter_remaining_for_r2, build_dispute_letter_engine,
+        validate_eoscar_compliance,
+    )
+
+    # ── Elegir las dos rondas ────────────────────────────────────────────
+    if body.job_id_anterior and body.job_id_actual:
+        job_a = _get_job_or_404(user, body.job_id_anterior)
+        job_b = _get_job_or_404(user, body.job_id_actual)
+    elif body.client_id:
+        _get_client_or_404(user, body.client_id)
+        rondas = _client_jobs_ordered(body.client_id)
+        if len(rondas) < 2:
+            raise HTTPException(
+                400, "Hacen falta dos reportes del mismo cliente para comparar. "
+                     f"Este tiene {len(rondas)}."
+            )
+        job_a, job_b = rondas[-2], rondas[-1]
+    else:
+        raise HTTPException(
+            400, "Pasa job_id_anterior + job_id_actual, o client_id para "
+                 "comparar las dos ultimas rondas."
+        )
+
+    if job_a.get("job_id") == job_b.get("job_id"):
+        raise HTTPException(400, "Las dos rondas son el mismo reporte.")
+
+    # El orden lo decide la fecha del REPORTE, no la de subida. Si vienen al
+    # reves se dan vuelta solos: comparar al reves publica retrocesos falsos.
+    invertido = False
+    if _clave_de_ronda(job_a) > _clave_de_ronda(job_b):
+        job_a, job_b = job_b, job_a
+        invertido = True
+
+    client_id = job_b.get("client_id") or job_a.get("client_id") or body.client_id or ""
+    consumer_name = (body.consumer_name or job_b.get("consumer_name")
+                     or job_a.get("consumer_name") or "")
+    n_a = _numero_de_ronda(client_id, job_a.get("job_id", ""))
+    n_b = _numero_de_ronda(client_id, job_b.get("job_id", ""))
+
+    # ── Comparar ─────────────────────────────────────────────────────────
+    snap_a = build_round_snapshot(_resultado_desde_job(job_a), round_num=n_a,
+                                  consumer_name=consumer_name)
+    snap_b = build_round_snapshot(_resultado_desde_job(job_b), round_num=n_b,
+                                  consumer_name=consumer_name)
+    previas = _borradas_en_comparaciones_previas(job_b) | _borradas_en_comparaciones_previas(job_a)
+    comparacion = compare_rounds(snap_a, snap_b, prior_removed_fingerprints=previas or None)
+
+    # OJO con las claves: el docstring de compare_rounds anuncia
+    # "reinserted_fingerprints", pero lo que el codigo devuelve es
+    # "removed_fingerprints". Las huellas de lo reinsertado hay que sacarlas
+    # de by_bureau[*]["reinserted"]. Leer la clave del docstring devolvia
+    # vacio siempre y la reinsercion nunca se reportaba.
+    borradas_fp = sorted(comparacion.get("removed_fingerprints") or [])
+    reinsertadas_fp = sorted({
+        acc.get("fingerprint", "")
+        for data in comparacion.get("by_bureau", {}).values()
+        for acc in (data.get("reinserted") or [])
+        if acc.get("fingerprint")
+    })
+
+    # escalation_required del motor mira remained/worsened y NO contempla
+    # reinsercion. Una ronda donde se borro todo salvo una cuenta que
+    # reaparecio diria "no hay que escalar", que es justo al reves: la
+    # reinsercion es el motivo de escalacion mas fuerte que existe.
+    escalar = bool(comparacion.get("escalation_required")) or bool(reinsertadas_fp)
+
+    comparacion_json = {
+        "by_bureau": comparacion.get("by_bureau", {}),
+        "summary":   comparacion.get("summary", {}),
+        "escalation_required": escalar,
+        "escalation_required_motor": bool(comparacion.get("escalation_required")),
+        "reinsertion_alerts":  comparacion.get("reinsertion_alerts", []),
+        "reinserted_fingerprints": reinsertadas_fp,
+        "removed_fingerprints": borradas_fp,
+    }
+    reporte_texto = build_comparison_report(comparacion, consumer_name=consumer_name)
+
+    print(f"[compare-rounds] {job_a.get('job_id')}(R{n_a}, {job_a.get('report_date')}) "
+          f"-> {job_b.get('job_id')}(R{n_b}, {job_b.get('report_date')}) "
+          f"| borradas={len(borradas_fp)} reinsertadas={len(reinsertadas_fp)} "
+          f"invertido={invertido}")
+
+    # ── Cartas de escalación, sólo si se piden ───────────────────────────
+    letters_out, bloqueadas = [], []
+    if body.generar_cartas:
+        _enforce_round(user, body.round)
+        filtrado = filter_remaining_for_r2(comparacion, _resultado_desde_job(job_b))
+        hay = any(len(items) > 0 for g in filtrado.values() for items in g.values())
+        if not hay:
+            print("[compare-rounds] no queda nada que escalar")
+        else:
+            raw_report_text = _raw_report_text_for_job(job_b)
+            cartas = build_dispute_letter_engine(
+                filtrado,
+                consumer_name=consumer_name,
+                report_date=job_b.get("report_date", ""),
+                variation_seed=body.variation_seed or 0,
+                target_round=body.round or "round_2",
+            )
+            planas = [(b, grp, rnd, txt)
+                      for b, g in cartas.items()
+                      for grp, r in g.items()
+                      for rnd, txt in r.items()]
+            todos = [t for _, _, _, t in planas]
+            for b, grp, rnd, txt in planas:
+                v = validate_eoscar_compliance(
+                    txt, raw_report_text=raw_report_text,
+                    other_letters=[t for t in todos if t != txt] or None,
+                    letter_type="bureau_dispute",
+                )
+                c = v["checks"]
+                if not (c["ascii"]["pass"] and not c["forbidden_phrases"]["found"]
+                        and c.get("fidelity_to_report", {}).get("pass", True)):
+                    bloqueadas.append({"bureau": b, "category": grp, "round": rnd,
+                                       "reason": "eoscar_critical_fail",
+                                       "forbidden": c["forbidden_phrases"]["found"]})
+                    continue
+                letters_out.append({
+                    "bureau": b, "category": grp, "round": rnd, "text": txt,
+                    "eoscar": {"passed": v["passed"], "score": v["score"]},
+                })
+
+    # ── Guardar en el job NUEVO ──────────────────────────────────────────
+    try:
+        ahora = datetime.now(timezone.utc).isoformat()
+        hist = list(job_b.get("response_history") or [])
+        hist.append({
+            "type": "round_comparison",
+            "compared_with_job_id": job_a.get("job_id", ""),
+            "round_prev": n_a, "round_now": n_b,
+            "report_date_prev": job_a.get("report_date", ""),
+            "report_date_now":  job_b.get("report_date", ""),
+            "recorded_at": ahora,
+            "summary": comparacion_json["summary"],
+            "removed_fingerprints": borradas_fp,
+            "reinserted_fingerprints": reinsertadas_fp,
+            "escalation_required": comparacion_json["escalation_required"],
+        })
+        actualizacion = {"response_history": hist}
+        if letters_out:
+            claves = {(l["bureau"], l["category"], l["round"]) for l in letters_out}
+            acumuladas = [
+                lf for lf in (job_b.get("letter_files") or [])
+                if (lf.get("bureau"), lf.get("category"), lf.get("round")) not in claves
+            ]
+            for l in letters_out:
+                acumuladas.append({
+                    "bureau": l["bureau"], "category": l["category"], "round": l["round"],
+                    "filename": f"{l['bureau']}_{l['category']}_{l['round']}.txt",
+                    "text": l["text"], "generated_at": ahora,
+                    "eoscar_score": l["eoscar"]["score"],
+                })
+            actualizacion["letter_files"] = acumuladas
+            actualizacion["letter_count"] = len(acumuladas)
+            actualizacion["letters_generated"] = True
+        sb.table("api_jobs").update(
+            _solo_columnas_de_api_jobs(actualizacion)
+        ).eq("job_id", job_b.get("job_id")).execute()
+    except Exception as e:
+        print(f"[compare-rounds] no se pudo guardar la comparacion: {e}")
+
+    s = comparacion_json["summary"]
+    return {
+        "ronda_anterior": {"job_id": job_a.get("job_id"), "numero": n_a,
+                           "report_date": job_a.get("report_date", "")},
+        "ronda_actual":   {"job_id": job_b.get("job_id"), "numero": n_b,
+                           "report_date": job_b.get("report_date", "")},
+        "orden_corregido": invertido,
+        "comparacion": comparacion_json,
+        "reporte_texto": reporte_texto,
+        "letters": letters_out,
+        "blocked": bloqueadas,
+        "reinsercion_detectada": bool(reinsertadas_fp),
+        "titular": (
+            f"{s.get('removed_count', 0)} de {s.get('total_r1_negatives', 0)} "
+            f"negativos eliminados ({s.get('removal_rate', 0)}%). "
+            f"Quedan {s.get('total_r2_negatives', 0)}."
+            + (f" ATENCION: {s.get('reinserted_count', 0)} reinsertadas."
+               if s.get("reinserted_count") else "")
+        ),
+    }
+
+
+@app.get("/clients/{client_id}/rounds")
+async def client_rounds(client_id: str, user=Depends(get_current_user)):
+    """Rondas del cliente en orden real, por fecha de reporte."""
+    _get_client_or_404(user, client_id)
+    salida = []
+    for idx, j in enumerate(_client_jobs_ordered(client_id), 1):
+        comparaciones = [
+            ev for ev in (j.get("response_history") or [])
+            if isinstance(ev, dict) and ev.get("type") == "round_comparison"
+        ]
+        salida.append({
+            "numero": idx,
+            "job_id": j.get("job_id"),
+            "report_date": j.get("report_date", ""),
+            "created_at": j.get("created_at", ""),
+            "scores": j.get("scores", {}),
+            "negativos": sum(len(v or []) for v in (j.get("negatives_by_bureau") or {}).values()),
+            "attack_count": j.get("attack_count", 0),
+            "letters_generated": j.get("letters_generated", False),
+            "comparada": bool(comparaciones),
+            "ultima_comparacion": comparaciones[-1] if comparaciones else None,
+        })
+    return salida
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PATH A (lo que faltaba) — CARTAS DE CONSULTAS
+#
+#  Las consultas se detectaban y se guardaban en el job desde siempre,
+#  pero no había endpoint: se quedaban ahí. 15 U.S.C. section 1681b exige
+#  propósito permisible para CADA acceso al reporte.
+#
+#  El detector se llama acá con accounts_opened, que build_inquiry_letters
+#  por sí solo no puede pasarle. Eso importa: sin esa lista, una jalada
+#  que SÍ terminó en cuenta abierta se dispara igual y produce una disputa
+#  débil que invita a una determinación de frívolo.
+# ═══════════════════════════════════════════════════════════════
+
+class GenerateInquiryLettersBody(BaseModel):
+    job_id: str
+    consumer_name: Optional[str] = None
+    round: Optional[str] = "round_1"
+
+
+@app.post("/generate-inquiry-letters")
+async def generate_inquiry_letters(
+    body: GenerateInquiryLettersBody, user=Depends(get_current_user)
+):
+    _enforce_round(user, body.round)
+    from original_parser import (
+        detect_inquiry_attacks, build_inquiry_dispute_letter,
+        validate_eoscar_compliance,
+    )
+
+    job = _get_job_or_404(user, body.job_id)
+    consumer_name = body.consumer_name or job.get("consumer_name") or ""
+    report_date   = job.get("report_date", "")
+    inquiries     = job.get("inquiries") or []
+
+    if not inquiries:
+        return {"job_id": body.job_id, "letters": [], "count": 0, "blocked": [],
+                "nota": "El reporte no trae consultas."}
+
+    # Todas las cuentas del archivo, no sólo las negativas: una jalada que
+    # terminó en una cuenta nueva y sana tiene propósito permisible y no
+    # hay que disputarla.
+    cuentas_abiertas = []
+    for accs in (job.get("inventory_by_bureau") or {}).values():
+        for a in accs or []:
+            if isinstance(a, dict) and a.get("name"):
+                cuentas_abiertas.append({
+                    "name": a.get("name", ""),
+                    "date_opened": a.get("date_opened", ""),
+                })
+
+    ataques = detect_inquiry_attacks(inquiries, cuentas_abiertas)
+    por_bureau: dict = {}
+    for atk in ataques:
+        b = atk.get("bureau", "")
+        if b:
+            por_bureau.setdefault(b, []).append(atk)
+        else:
+            for bb in atk.get("bureaus", []) or []:
+                por_bureau.setdefault(bb, []).append(atk)
+
+    if not por_bureau:
+        return {
+            "job_id": body.job_id, "letters": [], "count": 0, "blocked": [],
+            "inquiries_analizadas": len(inquiries),
+            "nota": (
+                "Hay consultas pero ninguna sostiene una disputa. La regla "
+                "exige 3 o mas jaladas del mismo acreedor dentro de 90 dias "
+                "sin cuenta abierta cerca, o 5 o mas acreedores el mismo dia "
+                "en el mismo buro. Dos jaladas separadas por meses son dos "
+                "solicitudes distintas y disputarlas debilita el caso."
+            ),
+        }
+
+    raw_report_text = _raw_report_text_for_job(job)
+    generadas = []
+    for bureau, atks in por_bureau.items():
+        try:
+            texto = build_inquiry_dispute_letter(
+                bureau=bureau, attacks=atks,
+                consumer_name=consumer_name, report_date=report_date,
+            )
+        except Exception as e:
+            print(f"[inquiry-letters] fallo generando {bureau}: {e}")
+            continue
+        if (texto or "").strip():
+            generadas.append((bureau, atks, texto))
+
+    textos = [t for _, _, t in generadas]
+    letters_out, bloqueadas = [], []
+    for bureau, atks, texto in generadas:
+        v = validate_eoscar_compliance(
+            texto, raw_report_text=raw_report_text,
+            other_letters=[t for t in textos if t != texto] or None,
+            letter_type="inquiry",
+        )
+        c = v["checks"]
+        if not (c["ascii"]["pass"] and not c["forbidden_phrases"]["found"]):
+            bloqueadas.append({"bureau": bureau, "reason": "eoscar_critical_fail",
+                               "forbidden": c["forbidden_phrases"]["found"]})
+            continue
+        letters_out.append({
+            "bureau": bureau, "category": "inquiries",
+            "round": body.round or "round_1", "text": texto,
+            "inquiry_count": len(atks),
+            "creditors": sorted({a.get("creditor_name", "") for a in atks if a.get("creditor_name")}),
+            "attack_types": sorted({a.get("attack_type", "") for a in atks}),
+            "eoscar": {"passed": v["passed"], "score": v["score"],
+                       "ascii": c["ascii"]["pass"],
+                       "forbidden": c["forbidden_phrases"]["found"]},
+        })
+
+    try:
+        ahora = datetime.now(timezone.utc).isoformat()
+        claves = {(l["bureau"], "inquiries", l["round"]) for l in letters_out}
+        acumuladas = [
+            lf for lf in (job.get("letter_files") or [])
+            if (lf.get("bureau"), lf.get("category"), lf.get("round")) not in claves
+        ]
+        for l in letters_out:
+            acumuladas.append({
+                "bureau": l["bureau"], "category": "inquiries",
+                "round": l["round"],
+                "filename": f"{l['bureau']}_inquiries_{l['round']}.txt",
+                "text": l["text"], "generated_at": ahora,
+                "eoscar_score": l["eoscar"]["score"],
+            })
+        if letters_out:
+            sb.table("api_jobs").update(_solo_columnas_de_api_jobs({
+                "letter_files": acumuladas, "letter_count": len(acumuladas),
+            })).eq("job_id", body.job_id).execute()
+    except Exception as e:
+        print(f"[inquiry-letters] no se pudieron guardar: {e}")
+
+    return {
+        "job_id": body.job_id, "letters": letters_out, "blocked": bloqueadas,
+        "count": len(letters_out),
+        "inquiries_analizadas": len(inquiries),
+        "ataques_detectados": len(ataques),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PATH D — IDENTITY THEFT
+#
+#  Tres piezas distintas, con requisitos legales distintos:
+#
+#    BLOQUEO 1681c-2   El buró debe bloquear el item en 4 días hábiles.
+#                      Exige un Identity Theft Report (FTC). Sin ese
+#                      número el estatuto no aplica y el buró rechaza.
+#    ALERTA DE FRAUDE  1681c-1. Se pide a UN solo buró y ese avisa a los
+#                      otros dos. Inicial 1 año, extendida 7 (esta ultima
+#                      exige el reporte de la FTC).
+#    GUÍA DE ACCIÓN    Para el cliente, no se manda a nadie.
+# ═══════════════════════════════════════════════════════════════
+
+class IdentityTheftScanBody(BaseModel):
+    job_id: str
+    # Lista COMPLETA de acreedores que el cliente reconoce. Es una lista
+    # blanca: todo lo que no esté acá se marca como no reconocido. Si la
+    # mandás incompleta vas a marcar cuentas legítimas como fraude, así
+    # que o va completa o no va.
+    known_creditors: Optional[list] = None
+
+
+@app.post("/identity-theft/scan")
+async def identity_theft_scan(body: IdentityTheftScanBody, user=Depends(get_current_user)):
+    from original_parser import detect_potential_identity_theft_indicators
+
+    job = _get_job_or_404(user, body.job_id)
+    cuentas = [a for accs in (job.get("negatives_by_bureau") or {}).values()
+               for a in (accs or []) if isinstance(a, dict)]
+    if not cuentas:
+        return {"job_id": body.job_id, "indicadores": [], "count": 0,
+                "nota": "El job no tiene cuentas negativas."}
+
+    conocidos = body.known_creditors if body.known_creditors else None
+    ind = detect_potential_identity_theft_indicators(cuentas, known_creditors=conocidos)
+
+    return {
+        "job_id": body.job_id,
+        "count": len(ind),
+        "indicadores": ind,
+        "uso_lista_de_conocidos": bool(conocidos),
+        "nota": (
+            "known_creditors funciona como lista blanca: todo acreedor que no "
+            "figure ahi queda marcado como no reconocido. Mandala completa o "
+            "no la mandes."
+            if conocidos else
+            "Sin known_creditors solo se buscan patrones estructurales "
+            "(apertura en rafaga, etc.). Pasa la lista de acreedores que el "
+            "cliente SI reconoce para detectar cuentas ajenas."
+        ),
+    }
+
+
+class IdentityTheftLettersBody(BaseModel):
+    job_id: str
+    consumer_name: Optional[str] = None
+    consumer_address: Optional[str] = "[Address]"
+    consumer_city_state_zip: Optional[str] = "[City, State ZIP]"
+    consumer_phone: Optional[str] = "[Phone Number]"
+    consumer_dob: Optional[str] = ""
+    consumer_ssn_last4: Optional[str] = ""
+    consumer_state: Optional[str] = ""
+    # Cuentas fraudulentas: [{"name": ..., "account_number": ..., "bureau": ...}]
+    fraudulent_accounts: list
+    ftc_report_number: Optional[str] = ""
+    police_report_number: Optional[str] = ""
+    police_department: Optional[str] = ""
+    incluir: Optional[list] = None          # block | fraud_alert | action_guide
+    fraud_alert_type: Optional[str] = "initial"   # initial | extended
+    bureaus: Optional[list] = None          # por defecto los tres
+
+
+_ALERTAS_SOPORTADAS = ("initial", "extended")
+
+
+@app.post("/identity-theft/letters")
+async def identity_theft_letters(body: IdentityTheftLettersBody, user=Depends(get_current_user)):
+    from original_parser import (
+        build_identity_theft_block_letter, build_fraud_alert_letter,
+        build_identity_theft_action_guide, validate_eoscar_compliance,
+    )
+
+    job = _get_job_or_404(user, body.job_id)
+    consumer_name = body.consumer_name or job.get("consumer_name") or ""
+    report_date   = job.get("report_date", "")
+    incluir = [str(x).lower() for x in (body.incluir or ["block", "fraud_alert", "action_guide"])]
+    cuentas = [a for a in (body.fraudulent_accounts or []) if isinstance(a, dict)]
+
+    if ("block" in incluir or "fraud_alert" in incluir) and not consumer_name:
+        raise HTTPException(400, "Falta consumer_name.")
+
+    # 1681c-2(a) exige un Identity Theft Report para pedir el bloqueo. Sin
+    # ese numero la carta sale con el placeholder literal
+    # "[FTC Report Number / Police Report Number]" y el buro la rechaza,
+    # asi que se corta acá en vez de mandar algo que no sirve.
+    if "block" in incluir:
+        if not cuentas:
+            raise HTTPException(400, "Para el bloqueo hay que indicar que cuentas son fraudulentas.")
+        if not (body.ftc_report_number or "").strip():
+            raise HTTPException(
+                400,
+                "El bloqueo del 1681c-2 exige un Identity Theft Report. Saca el "
+                "numero en IdentityTheft.gov y pasalo en ftc_report_number. Sin "
+                "eso el buro no esta obligado a bloquear y la carta se rechaza."
+            )
+
+    tipo_alerta = (body.fraud_alert_type or "initial").strip().lower()
+    if "fraud_alert" in incluir and tipo_alerta not in _ALERTAS_SOPORTADAS:
+        raise HTTPException(
+            400,
+            f"fraud_alert_type solo puede ser 'initial' o 'extended'. "
+            f"'{tipo_alerta}' no esta soportado: el generador citaria "
+            f"1681c-1(a) igual, que es el estatuto equivocado. La alerta de "
+            f"servicio activo (1681c-1(c)) todavia no esta implementada."
+        )
+    if tipo_alerta == "extended" and not (body.ftc_report_number or "").strip():
+        raise HTTPException(
+            400,
+            "La alerta extendida (7 anos, 1681c-1(b)) exige el Identity Theft "
+            "Report de la FTC. Para 1 ano usa fraud_alert_type='initial'."
+        )
+
+    bureaus = [b for b in (body.bureaus or ["transunion", "experian", "equifax"])
+               if _normalizar_bureau(b)]
+    bureaus = [_normalizar_bureau(b) for b in bureaus]
+
+    documentos, bloqueadas = [], []
+
+    if "block" in incluir:
+        for bureau in bureaus:
+            del_bureau = [a for a in cuentas
+                          if not a.get("bureau") or _normalizar_bureau(a.get("bureau", "")) == bureau]
+            if not del_bureau:
+                continue
+            texto = build_identity_theft_block_letter(
+                bureau=bureau, fraudulent_accounts=del_bureau,
+                consumer_name=consumer_name,
+                consumer_address=body.consumer_address or "[Address]",
+                consumer_city_state_zip=body.consumer_city_state_zip or "[City, State ZIP]",
+                consumer_dob=body.consumer_dob or "",
+                consumer_ssn_last4=body.consumer_ssn_last4 or "",
+                ftc_report_number=body.ftc_report_number or "",
+                police_report_number=body.police_report_number or "",
+                police_department=body.police_department or "",
+                report_date=report_date,
+            )
+            v = validate_eoscar_compliance(texto, letter_type="bureau_dispute")
+            c = v["checks"]
+            if not (c["ascii"]["pass"] and not c["forbidden_phrases"]["found"]):
+                bloqueadas.append({"tipo": "block", "bureau": bureau,
+                                   "reason": "eoscar_critical_fail",
+                                   "forbidden": c["forbidden_phrases"]["found"]})
+                continue
+            documentos.append({
+                "tipo": "block_1681c2", "bureau": bureau,
+                "category": "identity_theft", "round": "identity_theft",
+                "text": texto, "account_count": len(del_bureau),
+                "envio": "certificado, con copia del Identity Theft Report",
+                "plazo_legal": "4 dias habiles para bloquear (1681c-2(a))",
+                "eoscar": {"passed": v["passed"], "score": v["score"]},
+            })
+
+    if "fraud_alert" in incluir:
+        texto = build_fraud_alert_letter(
+            alert_type=tipo_alerta, consumer_name=consumer_name,
+            consumer_address=body.consumer_address or "[Address]",
+            consumer_city_state_zip=body.consumer_city_state_zip or "[City, State ZIP]",
+            consumer_phone=body.consumer_phone or "[Phone Number]",
+            consumer_dob=body.consumer_dob or "",
+            consumer_ssn_last4=body.consumer_ssn_last4 or "",
+            report_date=report_date,
+        )
+        documentos.append({
+            "tipo": f"fraud_alert_{tipo_alerta}", "bureau": "transunion",
+            "category": "identity_theft", "round": "identity_theft",
+            "text": texto,
+            "envio": ("Se manda a UN solo buro. Ese buro esta obligado a avisar "
+                      "a los otros dos (1681c-1). Va a TransUnion."),
+            "duracion": "1 ano" if tipo_alerta == "initial" else "7 anos",
+        })
+
+    if "action_guide" in incluir:
+        documentos.append({
+            "tipo": "action_guide", "bureau": None,
+            "category": "identity_theft", "round": "identity_theft",
+            "text": build_identity_theft_action_guide(
+                consumer_name,
+                fraudulent_accounts=cuentas or None,
+                consumer_state=body.consumer_state or "",
+            ),
+            "envio": "Es para el cliente. No se manda a ningun buro.",
+        })
+
+    # Se guardan igual que las demás cartas, menos la guía: esa es material
+    # del cliente y no una carta despachable.
+    try:
+        despachables = [d for d in documentos if d["tipo"] != "action_guide"]
+        if despachables:
+            ahora = datetime.now(timezone.utc).isoformat()
+            claves = {(d["bureau"], d["tipo"]) for d in despachables}
+            acumuladas = [
+                lf for lf in (job.get("letter_files") or [])
+                if (lf.get("bureau"), lf.get("identity_theft_type")) not in claves
+            ]
+            for d in despachables:
+                acumuladas.append({
+                    "bureau": d["bureau"], "category": "identity_theft",
+                    "identity_theft_type": d["tipo"], "round": "identity_theft",
+                    "filename": f"{d['bureau']}_{d['tipo']}.txt",
+                    "text": d["text"], "generated_at": ahora,
+                })
+            sb.table("api_jobs").update(_solo_columnas_de_api_jobs({
+                "letter_files": acumuladas, "letter_count": len(acumuladas),
+            })).eq("job_id", body.job_id).execute()
+    except Exception as e:
+        print(f"[identity-theft] no se pudieron guardar: {e}")
+
+    return {
+        "job_id": body.job_id, "documentos": documentos, "blocked": bloqueadas,
+        "count": len(documentos),
+        "recordatorio": (
+            "Orden recomendado: (1) sacar el Identity Theft Report en "
+            "IdentityTheft.gov, (2) denuncia policial si se puede, (3) alerta "
+            "de fraude, (4) bloqueo 1681c-2 a los tres buros por certificado."
+        ),
+    }
+
 
 # ═══════════════════════════════════════════════════════════════
 #  PATH C — RESPUESTA DEL BURÓ
@@ -2663,8 +3497,33 @@ def compute_progress(prev: dict, now: dict) -> dict:
     }
 
 
+def _clave_de_ronda(job: dict) -> tuple:
+    """
+    Clave de orden de una ronda: la fecha DEL REPORTE, no la de subida.
+
+    Antes se ordenaba por created_at y eso es la fecha en que el operador
+    subió el PDF, que no tiene por qué coincidir con el orden real de los
+    reportes. Un reporte de junio cargado despues de uno de agosto quedaba
+    ultimo, y la comparacion salia al reves: reproducido con el caso
+    Nolberto, publico -310 puntos comparando agosto contra junio.
+
+    created_at queda como desempate, para dos reportes de la misma fecha,
+    y como respaldo cuando el parseo no pudo sacar la fecha del reporte.
+    """
+    crudo = str(job.get("report_date") or "").strip()
+    fecha = (9999, 12, 31)     # sin fecha -> al final, no al principio
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%m/%d/%y"):
+        try:
+            d = datetime.strptime(crudo[:10], fmt)
+            fecha = (d.year, d.month, d.day)
+            break
+        except ValueError:
+            continue
+    return (fecha, str(job.get("created_at") or ""))
+
+
 def _client_jobs_ordered(client_id: str) -> list:
-    """Return the client's full jobs sorted oldest -> newest."""
+    """Jobs del cliente, de la ronda mas vieja a la mas nueva."""
     cr = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
     if not cr.data:
         return []
@@ -2673,7 +3532,7 @@ def _client_jobs_ordered(client_id: str) -> list:
         return []
     jr = sb.table("api_jobs").select("*").in_("job_id", ids).execute()
     jobs = jr.data or []
-    jobs.sort(key=lambda j: j.get("created_at", ""))
+    jobs.sort(key=_clave_de_ronda)
     return jobs
 
 
@@ -3181,14 +4040,34 @@ async def list_client_reminders(client_id: str, user=Depends(get_current_user)):
 # ═══════════════════════════════════════════════════════════════
 
 STRIPE_API = "https://api.stripe.com/v1"
+# La diferencia entre planes es CUANTOS CLIENTES, no cuanto del proceso se
+# deja terminar.
+#
+# Antes Basica era rounds={"round_1"}. Eso vendia medio proceso: el cliente
+# pagaba, mandaba la primera disputa, el buro contestaba "verificado" y ahi
+# se quedaba, porque /bureau-response, /bureau-no-response y las cartas de
+# /compare-rounds son todas round_2. El ciclo del 1681i esta hecho para
+# tener respuesta; la ronda 2 no es un extra, es donde esta el argumento
+# fuerte.
 PLAN_LIMITS = {
-    "basic": {"max_clients": 1, "rounds": {"round_1"}},
+    "basic": {"max_clients": 1,    "rounds": None},   # None = todas las rondas
     "pro":   {"max_clients": None, "rounds": None},   # None = ilimitado
 }
+# Basica es SOLO MENSUAL, por decision del operador. No existe Price anual
+# de Basica y el checkout lo fuerza a mensual mas abajo.
 PRICE_ENV = {
     ("basic", "monthly"): "STRIPE_PRICE_BASIC_MONTHLY",
     ("pro",   "monthly"): "STRIPE_PRICE_PRO_MONTHLY",
     ("pro",   "annual"):  "STRIPE_PRICE_PRO_ANNUAL",
+}
+
+# Precios de referencia, en dolares. Se usan para pintar la pantalla de
+# precios. Los que cobran de verdad son los Price de Stripe: si cambias uno
+# aca, cambialo tambien alla o la pagina va a mentir.
+# annual=None significa "ese plan no se vende por ano".
+PLAN_PRICING = {
+    "basic": {"monthly": 49,  "annual": None},
+    "pro":   {"monthly": 179, "annual": 1790},   # 1790 = 10 meses, 2 gratis
 }
 
 def _billing_enforced() -> bool:
@@ -3423,25 +4302,34 @@ def _subscription_url():
 async def billing_plans():
     """Catálogo de planes para pintar la pantalla de precios."""
     return {"currency": "usd", "plans": [
-        {"id": "basic", "name": "Básica", "monthly": 50, "annual": None,
-         "tagline": "Para empezar con un cliente",
+        {"id": "basic", "name": "Básica",
+         "monthly": PLAN_PRICING["basic"]["monthly"],
+         "annual":  None,               # Básica no se vende por año
+         "annual_discount_pct": None,
+         "tagline": "Tu propio crédito, el proceso completo",
          "features": [
              "1 cliente",
-             "Disputas Round 1 (burós y acreedores)",
-             "Análisis completo del reporte (motor FCRA)",
-             "Generación de cartas de disputa",
-             "Correo certificado USPS con tu cuenta Postalocity",
+             "Las 3 rondas de disputa, de punta a punta",
+             "Análisis del reporte con 61 tipos de ataque FCRA",
+             "Análisis cross-bureau: detecta lo que un solo buró no muestra",
+             "Respuesta del buró: verificado, frívola, sin respuesta",
+             "Comparación entre rondas con detección de reinserción",
+             "Cada carta validada contra e-OSCAR antes de salir",
+             "Correo certificado USPS con tracking",
              "Recordatorios automáticos de 30 días",
          ]},
-        {"id": "pro", "name": "Pro", "monthly": 150, "annual": 1530,
-         "annual_discount_pct": 15,
-         "tagline": "Sin límites, para tu agencia",
+        {"id": "pro", "name": "Pro",
+         "monthly": PLAN_PRICING["pro"]["monthly"],
+         "annual":  PLAN_PRICING["pro"]["annual"],
+         "annual_discount_pct": 17,
+         "tagline": "Clientes ilimitados, sin techo",
          "features": [
-             "Clientes ilimitados",
-             "Las 3 rondas de disputa (1, 2 y 3)",
-             "Cartas a burós y acreedores",
-             "Seguimiento multi-ronda + recordatorios de 30 días",
-             "Correo certificado con tracking automático",
+             "Clientes ilimitados, sin tope de 300 ni de 600",
+             "Todo lo de Básica, para toda tu cartera",
+             "Cartas a burós y a acreedores directamente",
+             "Bloqueo por robo de identidad (15 USC 1681c-2)",
+             "Cartas de consultas no autorizadas (1681b)",
+             "Bundle PDF con tu membrete, listo para imprimir y mandar",
              "Reportes de progreso (CIR) y panel de cumplimiento",
              "Soporte prioritario",
          ]},
@@ -3468,6 +4356,8 @@ async def billing_checkout(body: CheckoutBody, user=Depends(get_current_user)):
     cycle = (body.cycle or "monthly").lower()
     if plan not in ("basic", "pro"):
         raise HTTPException(400, "Plan inválido.")
+    if cycle not in ("monthly", "annual"):
+        raise HTTPException(400, "El ciclo debe ser monthly o annual.")
     if plan == "basic":
         cycle = "monthly"                  # Básica solo mensual
     price = _price_id(plan, cycle)
