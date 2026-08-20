@@ -1760,6 +1760,576 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
             "count": len(letters_out)}
 
 # ═══════════════════════════════════════════════════════════════
+#  PATH C — RESPUESTA DEL BURÓ
+#
+#  Cierra el ciclo de rondas. El operador pega (o sube) la carta de
+#  investigación que mandó el buró y sale la carta de escalación que
+#  corresponde, con el estatuto correcto para cada caso.
+#
+#  Hasta ahora el motor tenía los 6 sub-builders escritos y NINGUNO se
+#  invocaba desde la web: faltaba la tabla de traducción entre los 5
+#  `outcome` que devuelve parse_bureau_response y los 7 `response_type`
+#  del dispatcher. Esa tabla ya vive dentro de original_parser
+#  (classify_response_text_extended / plan_bureau_response_letters);
+#  acá sólo se le abre la puerta.
+#
+#  Se emite UNA carta por response_type, no una por cuenta: cada tipo
+#  invoca un estatuto distinto y mezclarlos hace que e-OSCAR procese
+#  todo bajo el reason code más débil.
+# ═══════════════════════════════════════════════════════════════
+
+# Nombres de buró tal como pueden venir en letter_receipts.recipient_name
+_BUREAU_ALIASES = {
+    "transunion": ("transunion", "trans union", "tu"),
+    "experian":   ("experian", "exp"),
+    "equifax":    ("equifax", "eqf", "eq"),
+}
+
+
+def _normalizar_bureau(valor: str) -> str:
+    v = (valor or "").strip().lower()
+    for canon, alias in _BUREAU_ALIASES.items():
+        if v == canon or v in alias:
+            return canon
+    for canon, alias in _BUREAU_ALIASES.items():
+        if any(a in v for a in alias):
+            return canon
+    return ""
+
+
+def _fecha_de_entrega(job_id: str, bureau: str) -> str:
+    """
+    Fecha desde la que corre el reloj del 1681i para ese buró.
+
+    El plazo de 30 días arranca cuando el buró RECIBE, no cuando el cliente
+    despacha. Por eso se prefiere return_receipt_date y sólo se cae a
+    date_sent si el acuse todavía no se cargó.
+    """
+    try:
+        r = (sb.table("letter_receipts")
+             .select("recipient_name, recipient_type, return_receipt_date, date_sent, created_at")
+             .eq("job_id", job_id).execute())
+    except Exception as e:
+        print(f"[bureau-response] no se pudieron leer los recibos: {e}")
+        return ""
+    candidatos = []
+    for row in (r.data or []):
+        if _normalizar_bureau(row.get("recipient_name", "")) != bureau:
+            continue
+        fecha = row.get("return_receipt_date") or row.get("date_sent") or ""
+        if fecha:
+            candidatos.append(str(fecha)[:10])
+    # El más reciente: si hubo varias rondas, interesa la última enviada.
+    return max(candidatos) if candidatos else ""
+
+
+def _borradas_en_rondas_previas(job: dict, bureau: str) -> set:
+    """
+    Nombres de furnisher que un buró ya había borrado antes.
+
+    Es lo que permite detectar REINSERCIÓN, que es el ataque de mayor
+    valor del sistema: un dato borrado que reaparece viola
+    1681i(a)(5)(B)(ii) aunque el buró ahora diga que lo verificó. No se
+    puede deducir leyendo la carta actual: hace falta el historial.
+
+    Sale de response_history, que ya es una columna de api_jobs.
+    """
+    borradas = set()
+    for ev in (job.get("response_history") or []):
+        if not isinstance(ev, dict) or ev.get("type") != "bureau_response":
+            continue
+        if _normalizar_bureau(ev.get("bureau", "")) != bureau:
+            continue
+        for nombre in (ev.get("deleted_accounts") or []):
+            if nombre:
+                borradas.add(str(nombre).upper())
+    return borradas
+
+
+def _cuentas_del_job(job: dict, bureau: str) -> list:
+    """Todas las cuentas conocidas del job, las del buró primero."""
+    negativos = job.get("negatives_by_bureau", {}) or {}
+    lie = job.get("letter_input_engine", {}) or {}
+
+    ataque_por_nombre = {}
+    for b, grupos in lie.items():
+        for items in (grupos or {}).values():
+            for it in items or []:
+                if isinstance(it, dict) and it.get("furnisher_name") and it.get("attack_type"):
+                    ataque_por_nombre.setdefault(
+                        (b, str(it["furnisher_name"]).upper()), it["attack_type"])
+
+    orden = [bureau] + [b for b in negativos if b != bureau]
+    salida = []
+    for b in orden:
+        for acc in (negativos.get(b) or []):
+            if not isinstance(acc, dict) or not acc.get("name"):
+                continue
+            salida.append({
+                "furnisher_name": acc.get("name", ""),
+                "name":           acc.get("name", ""),
+                "account_number": acc.get("account_number", ""),
+                "balance":        acc.get("balance", ""),
+                "date_opened":    acc.get("date_opened", ""),
+                "payment_status": acc.get("payment_status", ""),
+                "status":         acc.get("status", ""),
+                "attack_type":    ataque_por_nombre.get((b, str(acc["name"]).upper()), ""),
+                "bureau":         b,
+                "_mismo_buro":    b == bureau,
+            })
+    return salida
+
+
+def _lookup_de_cuentas(job: dict, bureau: str, nombres_en_respuesta) -> dict:
+    """
+    Nombre tal como lo escribe el BURÓ -> cuenta real del reporte.
+
+    El buró casi nunca copia el nombre textual del reporte. En el reporte
+    de Genesis, por ejemplo, TransUnion lista
+    "LVNV FUNDING (Original Creditor: 12 CREDIT ONE BANK N A)" y la carta
+    de respuesta dice "LVNV FUNDING LLC". Con igualdad exacta no matchea y
+    la carta sale con "Account #:" en blanco, que es justo el dato que el
+    buró necesita para identificar la cuenta.
+
+    Por eso se resuelve en tres pasos, de más estricto a menos:
+      1. igualdad exacta en mayúsculas
+      2. misma identidad de furnisher, con la misma lógica que usa el
+         detector cross-bureau: ignora sufijos societarios, expande
+         abreviaturas y descarta la anotación "(Original Creditor: X)"
+      3. si no hay match, se deja sin resolver y la carta sale sólo con el
+         nombre. Nunca se adivina un número de cuenta.
+
+    Se prefiere siempre la cuenta del mismo buró que respondió.
+    """
+    try:
+        from original_parser import _same_furnisher_identity
+    except ImportError:
+        _same_furnisher_identity = None
+
+    candidatas = _cuentas_del_job(job, bureau)
+    por_nombre_exacto = {}
+    for c in candidatas:
+        por_nombre_exacto.setdefault(str(c["name"]).upper(), c)
+
+    lookup, sin_resolver = {}, []
+    for nombre in (nombres_en_respuesta or []):
+        clave = str(nombre).upper()
+        elegida = por_nombre_exacto.get(clave)
+        if elegida is None and _same_furnisher_identity is not None:
+            for c in candidatas:            # ya vienen con el buró propio primero
+                try:
+                    if _same_furnisher_identity(nombre, c["name"]):
+                        elegida = c
+                        break
+                except Exception:
+                    continue
+        if elegida is None:
+            sin_resolver.append(nombre)
+            continue
+        lookup[clave] = {k: v for k, v in elegida.items() if not k.startswith("_")}
+    if sin_resolver:
+        print(f"[bureau-response] sin cuenta en el reporte: {sin_resolver}")
+    return lookup
+
+
+class BureauResponseBody(BaseModel):
+    job_id: str
+    bureau: str                                   # transunion | experian | equifax
+    response_text: str                            # texto de la carta del buró
+    response_date: Optional[str] = ""             # fecha que figura en la carta
+    dispute_date: Optional[str] = ""              # acuse de recibo; si falta se busca solo
+    consumer_name: Optional[str] = None           # si falta, sale del job
+    round: Optional[str] = "round_2"
+
+
+def _procesar_respuesta_de_buro(body: "BureauResponseBody", user: dict) -> dict:
+    from original_parser import (
+        classify_response_text_extended,
+        plan_bureau_response_letters,
+        build_bureau_response_letter,
+        validate_eoscar_compliance,
+    )
+
+    job = _get_job_or_404(user, body.job_id)
+
+    bureau = _normalizar_bureau(body.bureau)
+    if not bureau:
+        raise HTTPException(400, "bureau debe ser transunion, experian o equifax")
+    if not (body.response_text or "").strip():
+        raise HTTPException(400, "response_text viene vacío")
+
+    consumer_name = body.consumer_name or job.get("consumer_name") or ""
+    report_date   = job.get("report_date", "")
+
+    # 1) Clasificar. Esto agrega frivolous y unable_to_process, que
+    #    parse_bureau_response solo no detecta y manda a "other".
+    parsed = classify_response_text_extended(body.response_text)
+
+    # 2) Las dos reglas que no salen del texto de la carta.
+    dispute_date = (body.dispute_date or "").strip() or _fecha_de_entrega(body.job_id, bureau)
+    prev_borradas = _borradas_en_rondas_previas(job, bureau)
+    hoy = datetime.now(timezone.utc).date().isoformat()
+
+    # 3) Planificar: una carta por response_type, ordenadas por urgencia.
+    planes = plan_bureau_response_letters(
+        parsed,
+        bureau=bureau,
+        previously_deleted_names=prev_borradas,
+        dispute_date=dispute_date,
+        today=hoy,
+        account_lookup=_lookup_de_cuentas(
+            job, bureau, list((parsed.get("accounts") or {}).keys())
+        ),
+    )
+    print(f"[bureau-response] job={body.job_id} bureau={bureau} "
+          f"cuentas={len(parsed.get('accounts') or {})} "
+          f"nivel_carta={parsed.get('letter_level_outcome') or '-'} "
+          f"dispute_date={dispute_date or '-'} "
+          f"prev_borradas={len(prev_borradas)} planes={len(planes)}")
+
+    # 4) Generar cada carta y pasarla por el mismo gate crítico que las demás.
+    raw_report_text = _raw_report_text_for_job(job)
+    generadas, bloqueadas = [], []
+    textos = []
+    for p in planes:
+        try:
+            res = build_bureau_response_letter(
+                consumer_name=consumer_name,
+                response_date=(body.response_date or "").strip(),
+                report_date=report_date,
+                **p["call"],
+            )
+        except Exception as e:
+            print(f"[bureau-response] fallo generando {p['response_type']}: {e}")
+            bloqueadas.append({"response_type": p["response_type"],
+                               "reason": "generation_error", "detail": str(e)[:300]})
+            continue
+        texto = (res or {}).get("letter", "") if isinstance(res, dict) else str(res or "")
+        if not texto.strip():
+            bloqueadas.append({"response_type": p["response_type"], "reason": "empty_letter"})
+            continue
+        textos.append(texto)
+        generadas.append((p, res, texto))
+
+    letters_out = []
+    for p, res, texto in generadas:
+        v = validate_eoscar_compliance(
+            texto,
+            raw_report_text=raw_report_text,
+            other_letters=[t for t in textos if t != texto] or None,
+            letter_type="bureau_dispute",
+        )
+        c = v["checks"]
+        critical_ok = (c["ascii"]["pass"]
+                       and not c["forbidden_phrases"]["found"]
+                       and c.get("fidelity_to_report", {}).get("pass", True))
+        if not critical_ok:
+            bloqueadas.append({
+                "response_type": p["response_type"],
+                "reason": "eoscar_critical_fail",
+                "forbidden": c["forbidden_phrases"]["found"],
+                "fidelity": c.get("fidelity_to_report", {}),
+            })
+            continue
+        letters_out.append({
+            "bureau":        bureau,
+            "response_type": p["response_type"],
+            "round":         body.round or "round_2",
+            "text":          texto,
+            "next_steps":    (res or {}).get("next_steps", "") if isinstance(res, dict) else "",
+            "account_names": p["account_names"],
+            "account_count": len(p["accounts"]),
+            # por qué esta carta y no otra: qué estatuto se invoca y por qué
+            "why":                 p["why"],
+            "needs_manual_review": p["needs_manual_review"],
+            "eoscar": {"passed": v["passed"], "score": v["score"],
+                       "ascii": c["ascii"]["pass"],
+                       "forbidden": c["forbidden_phrases"]["found"],
+                       "overlap": c.get("overlap", {}).get("detail", "")},
+        })
+
+    # 5) Historial. Se guarda qué borró el buró para que la PRÓXIMA ronda
+    #    pueda detectar reinserción. Sin esto, reinsertion nunca dispara.
+    borradas_ahora = sorted({
+        str(nombre).upper()
+        for nombre, data in (parsed.get("accounts") or {}).items()
+        if (data.get("outcome_extended") or data.get("outcome")) == "deleted"
+    })
+    evento = {
+        "type": "bureau_response",
+        "bureau": bureau,
+        "round": body.round or "round_2",
+        "response_date": (body.response_date or "").strip(),
+        "dispute_date": dispute_date,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "letter_level_outcome": parsed.get("letter_level_outcome", ""),
+        "outcomes": {
+            str(n): (d.get("outcome_extended") or d.get("outcome", ""))
+            for n, d in (parsed.get("accounts") or {}).items()
+        },
+        "deleted_accounts": borradas_ahora,
+        "response_types": [l["response_type"] for l in letters_out],
+    }
+    try:
+        hist = list(job.get("response_history") or [])
+        hist.append(evento)
+        actualizacion = {"response_history": hist}
+
+        # Las cartas también van a letter_files, igual que las de disputa,
+        # para que no se pierdan al cerrar la respuesta.
+        previas = list(job.get("letter_files") or [])
+        claves_nuevas = {(l["bureau"], l["response_type"], l["round"]) for l in letters_out}
+        acumuladas = [
+            lf for lf in previas
+            if (lf.get("bureau"), lf.get("response_type"), lf.get("round")) not in claves_nuevas
+        ]
+        for l in letters_out:
+            acumuladas.append({
+                "bureau":        l["bureau"],
+                "category":      "bureau_response",
+                "response_type": l["response_type"],
+                "round":         l["round"],
+                "filename":      f"{l['bureau']}_response_{l['response_type']}_{l['round']}.txt",
+                "text":          l["text"],
+                "generated_at":  evento["recorded_at"],
+                "eoscar_score":  l["eoscar"]["score"],
+            })
+        if letters_out:
+            actualizacion["letter_files"] = acumuladas
+            actualizacion["letter_count"] = len(acumuladas)
+        sb.table("api_jobs").update(
+            _solo_columnas_de_api_jobs(actualizacion)
+        ).eq("job_id", body.job_id).execute()
+    except Exception as e:
+        # Guardar el historial no puede impedir devolverle las cartas al operador.
+        print(f"[bureau-response] no se pudo guardar el historial: {e}")
+
+    return {
+        "job_id":  body.job_id,
+        "bureau":  bureau,
+        "letters": letters_out,
+        "blocked": bloqueadas,
+        "count":   len(letters_out),
+        "classification": {
+            "letter_level_outcome": parsed.get("letter_level_outcome", ""),
+            "letter_level_evidence": parsed.get("letter_level_evidence", ""),
+            "outcomes": evento["outcomes"],
+            "deleted_accounts": borradas_ahora,
+        },
+        "dispute_date_usada": dispute_date,
+        "reinsertion_detectada": any(
+            l["response_type"] == "reinsertion" for l in letters_out
+        ),
+        "nota": (
+            "dispute_date es la fecha del acuse de recibo: el plazo del 1681i "
+            "corre desde que el buro RECIBE, no desde el despacho."
+            if dispute_date else
+            "Sin fecha de entrega no se puede evaluar el vencimiento de los 30 dias. "
+            "Cargá return_receipt_date en el recibo o pasá dispute_date."
+        ),
+    }
+
+
+@app.post("/bureau-response")
+async def bureau_response(body: BureauResponseBody, user=Depends(get_current_user)):
+    _enforce_round(user, body.round)   # las respuestas son R2+; Básica no las tiene
+    return _procesar_respuesta_de_buro(body, user)
+
+
+class BureauNoResponseBody(BaseModel):
+    job_id: str
+    bureau: str
+    dispute_date: Optional[str] = ""     # acuse de recibo; si falta se busca solo
+    consumer_name: Optional[str] = None
+    round: Optional[str] = "round_2"
+    extended_deadline: Optional[bool] = False   # 45 dias si el consumidor aporto info
+
+
+@app.post("/bureau-no-response")
+async def bureau_no_response(body: BureauNoResponseBody, user=Depends(get_current_user)):
+    """
+    El buró nunca contestó. No hay carta que pegar, así que este caso no
+    puede salir de /bureau-response: sale del calendario.
+
+    15 U.S.C. section 1681i(a)(1)(A): 30 días desde que el buró RECIBE la
+    disputa, 45 si el consumidor aportó información adicional durante el
+    período. Vencido el plazo sin respuesta, la eliminación procede como
+    cuestión de derecho bajo 1681i(a)(5)(A).
+
+    Si todavía estás dentro del plazo NO genera nada y te dice cuántos días
+    faltan: mandar la carta antes de tiempo debilita el reclamo.
+    """
+    _enforce_round(user, body.round)
+    from original_parser import (
+        resolve_response_type, build_bureau_response_letter,
+        validate_eoscar_compliance,
+    )
+
+    job = _get_job_or_404(user, body.job_id)
+    bureau = _normalizar_bureau(body.bureau)
+    if not bureau:
+        raise HTTPException(400, "bureau debe ser transunion, experian o equifax")
+
+    dispute_date = (body.dispute_date or "").strip() or _fecha_de_entrega(body.job_id, bureau)
+    if not dispute_date:
+        raise HTTPException(
+            400,
+            "No hay fecha de entrega para ese buro. El plazo del 1681i corre "
+            "desde que el buro RECIBE, asi que sin esa fecha no se puede "
+            "afirmar que vencio. Carga return_receipt_date en el recibo o "
+            "pasa dispute_date."
+        )
+
+    hoy = datetime.now(timezone.utc).date().isoformat()
+    veredicto = resolve_response_type(
+        "", response_received=False, dispute_date=dispute_date,
+        today=hoy, extended_deadline=bool(body.extended_deadline),
+    )
+    if veredicto["response_type"] != "no_response_30_days":
+        limite = 45 if body.extended_deadline else 30
+        pasados = veredicto.get("days_elapsed")
+        return {
+            "job_id": body.job_id, "bureau": bureau, "letters": [], "count": 0,
+            "days_elapsed": pasados,
+            "days_remaining": (limite - pasados) if isinstance(pasados, int) else None,
+            "nota": veredicto["why"],
+        }
+
+    # Las cuentas que se disputaron en esa ronda a ese buró.
+    cuentas = []
+    for grupo, items in ((job.get("letter_input_engine", {}) or {}).get(bureau, {}) or {}).items():
+        for it in items or []:
+            if not isinstance(it, dict) or not it.get("furnisher_name"):
+                continue
+            cuentas.append({
+                "furnisher_name": it.get("furnisher_name", ""),
+                "name":           it.get("furnisher_name", ""),
+                "account_number": it.get("account_number", ""),
+                "attack_type":    it.get("attack_type", ""),
+                "balance":        it.get("balance", ""),
+                "date_opened":    it.get("date_opened", ""),
+                "bureau":         bureau,
+            })
+    if not cuentas:
+        raise HTTPException(
+            400,
+            "No hay cuentas disputadas registradas para ese buro en este job, "
+            "asi que no se sabe que items reclamar. Genera primero las cartas "
+            "de disputa."
+        )
+
+    consumer_name = body.consumer_name or job.get("consumer_name") or ""
+    res = build_bureau_response_letter(
+        response_type="no_response_30_days",
+        bureau=bureau,
+        accounts=cuentas,
+        consumer_name=consumer_name,
+        report_date=job.get("report_date", ""),
+        dispute_date=dispute_date,
+    )
+    texto = (res or {}).get("letter", "") if isinstance(res, dict) else str(res or "")
+    v = validate_eoscar_compliance(
+        texto, raw_report_text=_raw_report_text_for_job(job),
+        letter_type="bureau_dispute",
+    )
+    c = v["checks"]
+    if not (c["ascii"]["pass"] and not c["forbidden_phrases"]["found"]
+            and c.get("fidelity_to_report", {}).get("pass", True)):
+        return {"job_id": body.job_id, "bureau": bureau, "letters": [], "count": 0,
+                "blocked": [{"response_type": "no_response_30_days",
+                             "reason": "eoscar_critical_fail",
+                             "forbidden": c["forbidden_phrases"]["found"],
+                             "fidelity": c.get("fidelity_to_report", {})}]}
+
+    carta = {
+        "bureau": bureau, "response_type": "no_response_30_days",
+        "round": body.round or "round_2", "text": texto,
+        "next_steps": (res or {}).get("next_steps", "") if isinstance(res, dict) else "",
+        "account_names": [a["furnisher_name"] for a in cuentas],
+        "account_count": len(cuentas),
+        "why": veredicto["why"],
+        "needs_manual_review": False,
+        "eoscar": {"passed": v["passed"], "score": v["score"]},
+    }
+
+    try:
+        ahora = datetime.now(timezone.utc).isoformat()
+        hist = list(job.get("response_history") or [])
+        hist.append({
+            "type": "bureau_response", "bureau": bureau,
+            "round": body.round or "round_2", "recorded_at": ahora,
+            "dispute_date": dispute_date,
+            "letter_level_outcome": "no_response_30_days",
+            "days_elapsed": veredicto.get("days_elapsed"),
+            "outcomes": {}, "deleted_accounts": [],
+            "response_types": ["no_response_30_days"],
+        })
+        previas = [
+            lf for lf in (job.get("letter_files") or [])
+            if not (lf.get("bureau") == bureau
+                    and lf.get("response_type") == "no_response_30_days"
+                    and lf.get("round") == carta["round"])
+        ]
+        previas.append({
+            "bureau": bureau, "category": "bureau_response",
+            "response_type": "no_response_30_days", "round": carta["round"],
+            "filename": f"{bureau}_response_no_response_{carta['round']}.txt",
+            "text": texto, "generated_at": ahora, "eoscar_score": v["score"],
+        })
+        sb.table("api_jobs").update(_solo_columnas_de_api_jobs({
+            "response_history": hist,
+            "letter_files": previas,
+            "letter_count": len(previas),
+        })).eq("job_id", body.job_id).execute()
+    except Exception as e:
+        print(f"[bureau-no-response] no se pudo guardar el historial: {e}")
+
+    return {
+        "job_id": body.job_id, "bureau": bureau,
+        "letters": [carta], "blocked": [], "count": 1,
+        "days_elapsed": veredicto.get("days_elapsed"),
+        "dispute_date_usada": dispute_date,
+        "nota": veredicto["why"],
+    }
+
+
+@app.post("/bureau-response/pdf")
+async def bureau_response_pdf(
+    file: UploadFile = File(...),
+    job_id: str = Form(...),
+    bureau: str = Form(...),
+    response_date: str = Form(""),
+    dispute_date: str = Form(""),
+    consumer_name: str = Form(""),
+    round: str = Form("round_2"),
+    user=Depends(get_current_user),
+):
+    """Igual que /bureau-response pero subiendo el PDF que mandó el buró."""
+    _enforce_round(user, round)
+    ruta = os.path.join(UPLOAD_DIR, f"bureau_response_{uuid.uuid4()}.pdf")
+    with open(ruta, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    try:
+        import pdfplumber
+        with pdfplumber.open(ruta) as pdf:
+            texto = "\n".join((p.extract_text() or "") for p in pdf.pages)
+    except Exception as e:
+        raise HTTPException(400, f"No se pudo leer el PDF de la respuesta: {e}")
+    finally:
+        try:
+            os.remove(ruta)
+        except OSError:
+            pass
+    if not texto.strip():
+        raise HTTPException(400, "El PDF no tiene texto extraible. "
+                                 "Si es un escaneo, pegá el texto a mano.")
+    return _procesar_respuesta_de_buro(BureauResponseBody(
+        job_id=job_id, bureau=bureau, response_text=texto,
+        response_date=response_date, dispute_date=dispute_date,
+        consumer_name=consumer_name or None, round=round,
+    ), user)
+
+# ═══════════════════════════════════════════════════════════════
 #  TASK 2 — POSTALOCITY INTEGRATION (USPS Certified Mail)
 #  Envía una carta ya generada por Certified Mail vía Postalocity.
 #  Se detiene en la COTIZACIÓN (no aprueba / no cobra / no manda).
