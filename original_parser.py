@@ -9581,11 +9581,33 @@ def _is_boilerplate_ngram(ngram: tuple) -> bool:
     return any(m in joined for m in boilerplate_markers)
 
 
-def build_report(pdf_path: str) -> dict[str, Any]:
+def build_report(pdf_path: str, client_state: str = "") -> dict[str, Any]:
+    """
+    client_state es OPCIONAL y por defecto vacio, asi que toda llamada
+    existente sigue funcionando igual. Cuando la API lo provee (viene de
+    api_clients.state), se consulta la tabla de leyes estatales de deuda
+    medica. Sin el, esa rama entera queda muda: no es que falle, es que
+    nunca se evalua.
+    """
     raw_text = extract_text_from_pdf(pdf_path)
     _src = detect_source(raw_text[:3000])
     if _src == SOURCE_THREE_BUREAU:
         import threebureau_adapter
+        # El adaptador de 3 buros que corre hoy en Railway NO acepta
+        # client_state. Se mira la firma antes de llamar, en vez de
+        # atrapar TypeError: un TypeError nacido adentro del adaptador
+        # por otra razon no debe disparar un segundo parseo silencioso.
+        import inspect as _insp
+        try:
+            _acepta = "client_state" in _insp.signature(
+                threebureau_adapter.build_report_threebureau
+            ).parameters
+        except (TypeError, ValueError):
+            _acepta = False
+        if _acepta and client_state:
+            return threebureau_adapter.build_report_threebureau(
+                pdf_path, client_state=client_state
+            )
         return threebureau_adapter.build_report_threebureau(pdf_path)
     clean_text = normalize_text(raw_text)
     lines = split_lines(clean_text)
@@ -9621,7 +9643,7 @@ def build_report(pdf_path: str) -> dict[str, Any]:
     legal_detection_engine = build_legal_detection_engine(
         negatives_by_bureau, base_tradeline_engine,
         report_date=report_date_str,
-        client_state="",          # populated when called via API with client profile
+        client_state=client_state,   # viene de api_clients.state via la API
     )
     legal_detection_summary = build_legal_detection_summary(
         negatives_by_bureau,
