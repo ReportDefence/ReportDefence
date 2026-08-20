@@ -29,15 +29,78 @@ from supabase import create_client, Client
 # attack_type="requires_basic_verification", which forced every account into
 # the generic dispute paragraph. This restores the specialized branches
 # (collector_original_creditor_self_declared, closed_with_balance, dofd, etc.).
-def _compute_letter_input(negatives_by_bureau: dict, report_date: str = "") -> dict:
+def _base_tradelines_from_negatives(negatives_by_bureau: dict) -> list:
+    """
+    Reconstruye base_tradelines a partir de negatives_by_bureau.
+
+    POR QUE HACE FALTA. Los ataques cross-bureau se anclan en el block_id
+    (el bloque del PDF), NO en el numero de cuenta: el mismo tradeline sale
+    enmascarado distinto en cada buro ("3719****" en uno, "0003719****" en
+    otro) y compararlos por numero daria falsos positivos. El ancla la
+    provee base_tradelines, que build_report si arma pero que NO se guarda
+    en api_jobs. Sin el, todo el pase cross-bureau devuelve vacio.
+
+    Los negativos que si guardamos traen block_id y todos los campos que
+    el detector necesita, asi que la estructura se puede rearmar sin tocar
+    el esquema de la base ni volver a leer el PDF.
+
+    Si las cuentas no traen block_id (jobs viejos, intake por connector),
+    devuelve lista vacia y el motor se comporta como hasta hoy.
+    """
+    por_bloque: dict = {}
+    for bureau, accounts in (negatives_by_bureau or {}).items():
+        for acc in accounts or []:
+            if not isinstance(acc, dict):
+                continue
+            bid = acc.get("block_id") or ""
+            if not bid:
+                continue
+            tl = por_bloque.setdefault(bid, {
+                "base_tradeline_id": bid,
+                "furnisher_name": acc.get("name", ""),
+                "bureau_entries": {},
+                "raw_lines": acc.get("raw_lines", []),
+            })
+            if not tl["furnisher_name"]:
+                tl["furnisher_name"] = acc.get("name", "")
+            tl["bureau_entries"][bureau] = {
+                "account_number":        acc.get("account_number", ""),
+                "masked_account_number": acc.get("account_number", ""),
+                "status":                acc.get("status", ""),
+                "payment_status":        acc.get("payment_status", ""),
+                "balance":               acc.get("balance", ""),
+                "past_due":              acc.get("past_due", ""),
+                "comments":              acc.get("comments", ""),
+            }
+    return list(por_bloque.values())
+
+
+def _compute_letter_input(
+    negatives_by_bureau: dict,
+    report_date: str = "",
+    client_state: str = "",
+    base_tradelines: list | None = None,
+) -> dict:
+    """
+    client_state y base_tradelines son los dos parametros que antes iban
+    fijos en "" y None. Con ellos encendidos:
+      - base_tradelines habilita los 8 ataques cross-bureau
+      - client_state habilita la tabla de leyes estatales de deuda medica
+    Los dos siguen siendo opcionales, asi que cualquier llamada vieja
+    sigue funcionando igual que antes.
+    """
     from original_parser import (
         build_dofd_engine, build_legal_detection_engine,
         build_attack_scoring_engine, build_strategy_engine,
         build_letter_input_engine,
     )
     enriched = build_dofd_engine(negatives_by_bureau or {}, report_date or "")
+    if base_tradelines is None:
+        base_tradelines = _base_tradelines_from_negatives(enriched)
     lde      = build_legal_detection_engine(
-        enriched, None, report_date=report_date or "", client_state=""
+        enriched, base_tradelines or None,
+        report_date=report_date or "",
+        client_state=client_state or "",
     )
     strat    = build_strategy_engine(build_attack_scoring_engine(lde))
     return build_letter_input_engine(strat, enriched)
@@ -57,7 +120,61 @@ def _serialize_letter_input(lie: dict) -> dict:
     return out
 
 
-def _resolve_letter_input(result: dict, negatives: dict) -> dict:
+_raw_report_cache: dict = {}
+
+
+def _raw_report_text_for_job(job: dict) -> str:
+    """
+    Texto crudo del PDF del job, para el chequeo de fidelidad de e-OSCAR.
+
+    Se lee una sola vez por job y queda en memoria del proceso. Si el PDF
+    ya no esta (job viejo, contenedor reciclado, intake por connector sin
+    PDF), devuelve cadena vacia y el chequeo se saltea igual que antes: no
+    se bloquea la generacion por no poder leer un archivo.
+    """
+    jid = str(job.get("job_id") or "")
+    if jid and jid in _raw_report_cache:
+        return _raw_report_cache[jid]
+    texto = ""
+    path = job.get("pdf_path") or ""
+    if path and os.path.exists(path):
+        try:
+            from original_parser import extract_text_from_pdf
+            texto = extract_text_from_pdf(path) or ""
+        except Exception as e:
+            print(f"[eoscar] no se pudo leer el PDF del job {jid}: {e}")
+            texto = ""
+    if jid:
+        _raw_report_cache[jid] = texto
+    return texto
+
+
+def _serialize_base_tradelines(base_tradelines) -> list:
+    """
+    Deja base_tradelines en algo que Supabase pueda guardar como JSON.
+    Se descartan raw_lines: pueden ser miles de lineas de texto crudo y el
+    detector cross-bureau no las usa.
+    """
+    out = []
+    for tl in (base_tradelines or []):
+        if not isinstance(tl, dict):
+            continue
+        entries = {}
+        for b, e in (tl.get("bureau_entries") or {}).items():
+            if isinstance(e, dict):
+                entries[b] = {
+                    k: v for k, v in e.items()
+                    if isinstance(v, (str, int, float, bool, type(None)))
+                }
+        out.append({
+            "base_tradeline_id": tl.get("base_tradeline_id", ""),
+            "furnisher_name":    tl.get("furnisher_name", ""),
+            "bureau_entries":    entries,
+        })
+    return out
+
+
+def _resolve_letter_input(result: dict, negatives: dict, client_state: str = "") -> dict:
     """Prefer the letter_input_engine the connector already built (it runs the
     full original_parser pipeline, including a base_tradeline_engine so
     cross-bureau attacks fire). Only if that came back empty (connector hit its
@@ -69,7 +186,12 @@ def _resolve_letter_input(result: dict, negatives: dict) -> dict:
     if has_items:
         return _serialize_letter_input(lie)
     return _serialize_letter_input(
-        _compute_letter_input(negatives, result.get("report_date", ""))
+        _compute_letter_input(
+            negatives,
+            result.get("report_date", ""),
+            client_state=client_state,
+            base_tradelines=result.get("base_tradeline_engine") or None,
+        )
     )
 
 
@@ -673,15 +795,19 @@ async def upload_report(
     source: str = Form("identityiq"),
     user=Depends(get_current_user),
 ):
-    _get_client_or_404(user, client_id)   # no se sube a un cliente ajeno
+    client_row = _get_client_or_404(user, client_id)   # no se sube a un cliente ajeno
     job_id = str(uuid.uuid4())
     pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    # Estado del cliente. Sin esto la tabla de leyes estatales de deuda
+    # medica no se consulta nunca, aunque el dato ya este en la ficha.
+    client_state = str((client_row or {}).get("state") or "").strip()
+
     # ── Run parser ──
     from original_parser import build_report
-    result = build_report(pdf_path)
+    result = build_report(pdf_path, client_state=client_state)
 
     scores = result.get("scores", {"transunion": 0, "experian": 0, "equifax": 0})
 
@@ -771,6 +897,16 @@ async def upload_report(
         "inquiries": result.get("inquiries", []),
         "inquiry_attacks": result.get("inquiry_attacks", []),
         "response_history": [],
+        # Ancla de los ataques cross-bureau. build_report lo arma y hasta
+        # ahora se tiraba: al regenerar cartas no habia con que anclar y
+        # los 8 ataques cross-bureau devolvian vacio. Guardarlo cuesta
+        # unos pocos KB y evita tener que releer el PDF.
+        "base_tradeline_engine": _serialize_base_tradelines(
+            result.get("base_tradeline_engine", [])
+        ),
+        # Estado usado en este analisis, para que al regenerar se use el
+        # mismo aunque despues cambien la ficha del cliente.
+        "client_state": client_state,
     }
     sb.table("api_jobs").insert(job_data).execute()
 
@@ -1055,7 +1191,14 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
                 "attacks":             result.get("attacks", []),
                 "inquiries":           result.get("inquiries", []),
                 "inquiry_attacks":     result.get("inquiry_attacks", []),
-                "letter_input_engine": _resolve_letter_input(result, negatives),
+                "letter_input_engine": _resolve_letter_input(
+                    result, negatives,
+                    client_state=str(client_data.get("state") or "").strip(),
+                ),
+                "base_tradeline_engine": _serialize_base_tradelines(
+                    result.get("base_tradeline_engine", [])
+                ),
+                "client_state":        str(client_data.get("state") or "").strip(),
                 "letters_generated":   False,
                 "letter_files":        [],
                 "response_history":    [],
@@ -1114,6 +1257,30 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
     letter_input = job.get("letter_input_engine", {})
     consumer_name = body.consumer_name
     report_date = job.get("report_date", "")
+
+    # ── Los dos parametros que antes iban fijos ───────────────────────────────
+    # client_state: se prefiere el que quedo grabado en el job (asi la carta
+    # se regenera con el mismo estado con que se analizo), y si el job es
+    # viejo se cae a la ficha del cliente.
+    _client_state = str(job.get("client_state") or "").strip()
+    if not _client_state and job.get("client_id"):
+        try:
+            _cr = sb.table("api_clients").select("state").eq(
+                "id", job["client_id"]).execute()
+            if _cr.data:
+                _client_state = str(_cr.data[0].get("state") or "").strip()
+        except Exception as _e:
+            print(f"[generate-letters] no se pudo leer el estado del cliente: {_e}")
+
+    # base_tradelines: ancla de los 8 ataques cross-bureau. Del job si esta,
+    # y si no reconstruido desde los negativos por block_id.
+    _base_tradelines = job.get("base_tradeline_engine") or None
+    if not _base_tradelines:
+        _base_tradelines = _base_tradelines_from_negatives(
+            job.get("negatives_by_bureau", {})
+        ) or None
+    print(f"[generate-letters] client_state={_client_state!r} "
+          f"base_tradelines={len(_base_tradelines or [])}")
 
     # ── Migrate legacy jobs that stored "collections_chargeoffs" as a single key ──
     # Jobs uploaded before the split (collections / charge_offs) have the old key.
@@ -1188,7 +1355,11 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         # attack_types instead of the generic placeholder. report_date is
         # captured from the enclosing /generate-letters scope.
         try:
-            _real = _compute_letter_input(negatives_by_bureau, report_date)
+            _real = _compute_letter_input(
+                negatives_by_bureau, report_date,
+                client_state=_client_state,
+                base_tradelines=_base_tradelines,
+            )
             if any(len(items) > 0
                    for groups in _real.values() for items in groups.values()):
                 return _real
@@ -1351,20 +1522,41 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
 
     _EOSCAR_MAX_ATTEMPTS = 5
 
-    def _eoscar_check(text: str) -> dict:
-        v = validate_eoscar_compliance(text, letter_type="bureau_dispute")
+    # raw_report_text: habilita el chequeo de fidelidad. Sin el, ese check se
+    # auto-reportaba como aprobado aunque el codigo de abajo lo trate como
+    # critico, o sea que era un candado sin cerradura. El texto se extrae una
+    # sola vez del PDF del job y se cachea en memoria.
+    _raw_report_text = _raw_report_text_for_job(job)
+
+    def _eoscar_check(text: str, others: list | None = None) -> dict:
+        v = validate_eoscar_compliance(
+            text,
+            raw_report_text=_raw_report_text,
+            other_letters=others or None,
+            letter_type="bureau_dispute",
+        )
         c = v["checks"]
+        # CRITICO (bloquea el envio): ascii, frases prohibidas y fidelidad.
+        # INFO (no bloquea): largo, estructura y solapamiento. Una carta con
+        # varias cuentas excede el rango de palabras por diseno, y el
+        # solapamiento entre buros es inevitable en la seccion de informacion
+        # personal, que habla de los mismos hechos.
         critical_ok = (
             c["ascii"]["pass"]
             and not c["forbidden_phrases"]["found"]
             and c.get("fidelity_to_report", {}).get("pass", True)
         )
+        _ov = c.get("overlap", {})
         return {
             "critical_ok": critical_ok,
             "passed":      v["passed"],
             "score":       v["score"],
             "ascii":       c["ascii"]["pass"],
             "forbidden":   c["forbidden_phrases"]["found"],
+            "fidelity":    c.get("fidelity_to_report", {}),
+            "overlap":     {"pass": _ov.get("pass", True),
+                            "skipped": _ov.get("skipped", True),
+                            "detail": _ov.get("detail", "")},
             "warnings":    v.get("warnings", []),
         }
 
@@ -1392,13 +1584,26 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         seed += 1
 
     # Flatten letters for response — deliver only letters that pass criticals.
+    #
+    # other_letters: cada carta se compara contra las DEMAS de esta misma
+    # tanda para el chequeo de solapamiento. Sin esto el check quedaba
+    # apagado y el reporte decia "Skipped". Es informativo, no bloquea: la
+    # seccion de informacion personal habla de los mismos hechos en las tres
+    # cartas y va a solapar siempre.
+    _todas = [
+        text
+        for _b, _g in dispute_letters.items()
+        for _grp, _r in _g.items()
+        for _rnd, text in _r.items()
+    ]
+
     letters_out = []
     blocked     = []
     letter_text = ""
     for b, groups in dispute_letters.items():
         for grp, rounds in groups.items():
             for rnd, text in rounds.items():
-                chk = _eoscar_check(text)
+                chk = _eoscar_check(text, others=[t for t in _todas if t != text])
                 if not chk["critical_ok"]:
                     # Never deliver a non-compliant letter.
                     blocked.append({
@@ -1419,9 +1624,40 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
                 })
                 letter_text = text  # last one for simple preview
 
-    sb.table("api_jobs").update({
-        "letters_generated": True,
-    }).eq("job_id", body.job_id).execute()
+    # letter_files: hasta ahora se escribia [] al crear el job y no se
+    # poblaba nunca, asi que GET /clients/{id}/letters devolvia lista vacia
+    # siempre y las cartas generadas se perdian apenas se cerraba la
+    # respuesta. Se guardan aca, acumulando por ronda: una segunda
+    # generacion de la misma ronda reemplaza la anterior en vez de duplicar.
+    try:
+        _previas = (job.get("letter_files") or [])
+        _rondas_nuevas = {(l["bureau"], l["category"], l["round"]) for l in letters_out}
+        _acumuladas = [
+            lf for lf in _previas
+            if (lf.get("bureau"), lf.get("category"), lf.get("round")) not in _rondas_nuevas
+        ]
+        _ahora = datetime.now(timezone.utc).isoformat()
+        for l in letters_out:
+            _acumuladas.append({
+                "bureau":      l["bureau"],
+                "category":    l["category"],
+                "round":       l["round"],
+                "filename":    f"{l['bureau']}_{l['category']}_{l['round']}.txt",
+                "text":        l["text"],
+                "generated_at": _ahora,
+                "eoscar_score": (l.get("eoscar") or {}).get("score"),
+            })
+        sb.table("api_jobs").update({
+            "letters_generated": True,
+            "letter_files": _acumuladas,
+            "letter_count": len(_acumuladas),
+        }).eq("job_id", body.job_id).execute()
+    except Exception as e:
+        # Guardar las cartas no puede impedir devolverlas al operador.
+        print(f"[generate-letters] no se pudo guardar letter_files: {e}")
+        sb.table("api_jobs").update({
+            "letters_generated": True,
+        }).eq("job_id", body.job_id).execute()
 
     return {
         "letter_text": letter_text,
@@ -1456,8 +1692,16 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
     letter_input = job.get("letter_input_engine", {}) or {}
     _has = any(any(len(i) > 0 for i in g.values()) for g in letter_input.values())
     if not _has:
-        letter_input = _compute_letter_input(job.get("negatives_by_bureau", {}),
-                                              job.get("report_date", ""))
+        letter_input = _compute_letter_input(
+            job.get("negatives_by_bureau", {}),
+            job.get("report_date", ""),
+            client_state=str(job.get("client_state") or "").strip(),
+            base_tradelines=(
+                job.get("base_tradeline_engine")
+                or _base_tradelines_from_negatives(job.get("negatives_by_bureau", {}))
+                or None
+            ),
+        )
 
     report_date = job.get("report_date", "")
     target_round = body.round or "round_1"
