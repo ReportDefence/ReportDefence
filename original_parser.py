@@ -3002,6 +3002,372 @@ def detect_cross_bureau_late_date_conflict(
         ))
     return attacks
 
+
+
+# =============================================================================
+#  DETECTORES DE ATTACK TYPES HUERFANOS  (parche 04, 2026-08-20)
+# =============================================================================
+#  Cuatro attack_type tenian severidad, leyes, rank y narrativa en las tablas
+#  pero ningun detector los emitia. Con esto pasan de estar declarados a estar
+#  disponibles.
+# =============================================================================
+
+
+def _field_present(acc: dict[str, Any], key: str) -> bool:
+    """
+    True si el campo viene realmente informado en el reporte.
+
+    Hace falta porque _parse_dollar devuelve 0.0 ante cualquier cosa que no
+    sepa parsear, incluida la cadena vacia y el guion que los buros usan para
+    "no informado". Sin este chequeo, una cuenta SIN balance informado se
+    leeria como "balance de cero" y dispararia un ataque falso.
+    """
+    raw = acc.get(key, "")
+    if raw is None:
+        return False
+    s = str(raw).strip()
+    if s in {"", "-", "--", "N/A", "NA", "None"}:
+        return False
+    return any(ch.isdigit() for ch in s)
+
+
+def detect_zero_balance_with_past_due(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Balance en cero con past due positivo. 15 U.S.C. section 1681e(b).
+
+    Dato auto-contradictorio: si no se debe nada, no puede haber nada
+    vencido. El furnisher no puede certificar las dos cifras a la vez.
+
+    Primo hermano de paid_status_with_past_due, pero distinto: aquel mira
+    el status, este mira las cifras.
+    """
+    attacks = []
+    for acc in accounts:
+        # Los dos campos tienen que venir informados. Ver _field_present.
+        if not _field_present(acc, "balance") or not _field_present(acc, "past_due"):
+            continue
+
+        balance  = _parse_dollar(acc.get("balance", ""))
+        past_due = _parse_dollar(acc.get("past_due", ""))
+        if balance != 0 or past_due <= 0:
+            continue
+
+        name = acc.get("name", "")
+        acct = acc.get("account_number", "")
+        attacks.append(build_attack_record(
+            attack_type="zero_balance_with_past_due",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681e_b", "internal_contradiction"],
+            reason=(
+                f"{name} account {acct} reports a balance of $0.00 and at "
+                f"the same time a past due amount of ${past_due:,.2f}. "
+                f"An account with no balance owed cannot carry a past due "
+                f"amount. One of the two figures is inaccurate, and the "
+                f"furnisher cannot certify both."
+            ),
+        ))
+    return attacks
+
+
+_BK_CH7_HINTS  = ("CHAPTER 7", "CH 7", "CH. 7", "CHAPTER7", "LIQUIDATION")
+_BK_CH13_HINTS = ("CHAPTER 13", "CH 13", "CH. 13", "CHAPTER13", "WAGE EARNER")
+
+BANKRUPTCY_FCRA_YEARS        = 10   # estatutario, 1681c(a)(1)
+BANKRUPTCY_CH13_BUREAU_YEARS = 7    # politica de los buros, no estatuto
+
+
+def detect_bankruptcy_reporting_period_exceeded(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+    report_date: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Bancarrota reportada mas alla del limite de 15 U.S.C. section 1681c(a)(1).
+
+    Dos guardas antes de disparar:
+      1. Tiene que haber fecha de reporte. La obsolescencia se mide contra
+         la fecha del reporte, no contra hoy: usar hoy sobre un reporte
+         viejo exagera la antiguedad y produce una afirmacion que no se
+         puede sostener.
+      2. Tiene que haber fecha de presentacion. Sin ella no se afirma nada.
+
+    Capitulo 7 y capitulos no identificados: 10 anos, por estatuto.
+    Capitulo 13: 7 anos, por politica propia de los buros. Por eso el
+    fundamento que se cita cambia segun el caso.
+    """
+    attacks = []
+    report_dt = parse_date_field(report_date) if report_date else None
+    if report_dt is None:
+        return attacks
+
+    for acc in accounts:
+        blob = " ".join(str(acc.get(k, "")) for k in
+                        ("name", "account_type", "account_type_detail",
+                         "comments", "payment_status")).upper()
+        if "BANKRUPT" not in blob and "CHAPTER" not in blob:
+            continue
+
+        filed_raw = (acc.get("date_filed") or acc.get("date_opened") or "")
+        filed_dt = parse_date_field(filed_raw) if filed_raw else None
+        if filed_dt is None:
+            continue
+
+        years  = (report_dt - filed_dt).days / 365.25
+        is_ch13 = any(h in blob for h in _BK_CH13_HINTS)
+        is_ch7  = any(h in blob for h in _BK_CH7_HINTS)
+
+        limit = BANKRUPTCY_FCRA_YEARS
+        basis = "15 U.S.C. section 1681c(a)(1)"
+        if is_ch13 and not is_ch7:
+            limit = BANKRUPTCY_CH13_BUREAU_YEARS
+            basis = "the seven year reporting period applied to Chapter 13 filings"
+
+        if years <= limit:
+            continue
+
+        name = acc.get("name", "")
+        acct = acc.get("account_number", "")
+        attacks.append(build_attack_record(
+            attack_type="bankruptcy_reporting_period_exceeded",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681c_a_1", "obsolete", "bankruptcy"],
+            reason=(
+                f"{name} account {acct} reports a bankruptcy filed on "
+                f"{filed_raw}, which is approximately {years:.1f} years "
+                f"before the date of this report. That is beyond the "
+                f"reporting period allowed under {basis}. The entry is "
+                f"obsolete and must be removed."
+            ),
+        ))
+    return attacks
+
+
+_REPO_HINTS = ("REPOSSESS", "REPO", "VOLUNTARY SURRENDER", "SURRENDER",
+               "COLLATERAL SOLD", "REDEEMED")
+
+
+def detect_repossession_proceeds_not_credited(
+    bureau: str,
+    accounts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Repossession donde el balance no refleja el producto de la venta.
+
+    Uniform Commercial Code section 9-615(a): despues de vender el
+    colateral, el acreedor debe aplicar el producto al prestamo. Lo unico
+    reportable es el saldo resultante. Si el balance sigue en el 95 por
+    ciento o mas del credito original, o el producto no se acredito, o no
+    hubo venta comercialmente razonable.
+    """
+    attacks = []
+    for acc in accounts:
+        blob = " ".join(str(acc.get(k, "")) for k in
+                        ("account_type", "account_type_detail", "comments",
+                         "payment_status")).upper()
+        if not any(h in blob for h in _REPO_HINTS):
+            continue
+
+        if not _field_present(acc, "balance") or not _field_present(acc, "high_credit"):
+            continue
+
+        balance = _parse_dollar(acc.get("balance", ""))
+        high_cr = _parse_dollar(acc.get("high_credit", ""))
+        if high_cr <= 0 or balance <= 0:
+            continue
+        if balance < high_cr * 0.95:
+            continue
+
+        name = acc.get("name", "")
+        acct = acc.get("account_number", "")
+        pct = (balance / high_cr) * 100.0
+        attacks.append(build_attack_record(
+            attack_type="repossession_proceeds_not_credited",
+            bureau=bureau,
+            accounts=[acc],
+            strategy_tags=["FCRA_1681e_b", "UCC_9_615", "repossession"],
+            reason=(
+                f"{name} account {acct} reports a repossession with a "
+                f"balance of ${balance:,.2f} against an original amount of "
+                f"${high_cr:,.2f}, which is {pct:.0f} percent of the "
+                f"original. After a repossession the collateral is sold and "
+                f"the proceeds must be credited to the account under "
+                f"Uniform Commercial Code section 9-615(a). A balance at or "
+                f"above the original amount indicates the proceeds were "
+                f"never applied, or that no commercially reasonable sale "
+                f"took place. The reported figure is overstated."
+            ),
+        ))
+    return attacks
+
+
+# --- cross_bureau_furnisher_identity_shift ----------------------------------
+#
+#  Ruido puramente societario. Se quita SOLO para comparar, nunca para
+#  escribir: la regla de fidelidad al reporte exige que el nombre salga en la
+#  carta exactamente como figura en el reporte.
+#
+#  Lo que NO va en esta lista: "funding", "recovery", "credit", "capital" y
+#  similares SI distinguen entidades. LVNV Funding y LVNV Capital no son lo
+#  mismo. Sacarlas produciria falsos negativos.
+_CORP_NOISE = {
+    "llc", "l l c", "inc", "incorporated", "corp", "corporation",
+    "co", "company", "lp", "llp", "plc", "ltd", "limited",
+    "na", "n a", "associates", "associate", "assoc", "assocs",
+    "group", "the", "of", "and",
+}
+
+# Abreviaturas a expandir antes de comparar, porque cada buro las escribe
+# distinto.
+_ABBREV = {
+    "mgmt": "management", "mgt": "management",
+    "svcs": "services",   "svc": "services",
+    "fin": "financial",   "natl": "national",
+    "bk": "bank",         "univ": "university",
+}
+
+# Anotacion de creditor original que agrega un buro y otro no. No es un
+# cambio de identidad del furnisher.
+_OC_MARKER = "original creditor"
+
+
+def _furnisher_identity_tokens(name: str) -> frozenset:
+    """Tokens significativos del nombre de un furnisher. Solo para comparar."""
+    base = clean_name_key(name)
+    tokens = []
+    for t in base.split():
+        t = _ABBREV.get(t, t)
+        if t in _CORP_NOISE:
+            continue
+        if len(t) == 1:            # iniciales sueltas del tipo "N" "A"
+            continue
+        tokens.append(t)
+    return frozenset(tokens)
+
+
+def _strip_original_creditor(name: str) -> str:
+    """
+    Corta la anotacion "(Original Creditor: X)" que TransUnion agrega y los
+    otros dos no. Comparar con la anotacion puesta haria que la misma
+    entidad parezca dos entidades distintas.
+    """
+    low = (name or "").lower()
+    idx = low.find(_OC_MARKER)
+    if idx == -1:
+        return name or ""
+    cut = (name or "")[:idx]
+    return cut.rstrip(" (:-,")
+
+
+def _same_furnisher_identity(a: str, b: str) -> bool:
+    """
+    True si dos nombres son la misma entidad escrita distinto.
+
+    Se considera la misma si los tokens significativos coinciden, o si uno
+    es subconjunto del otro. Eso cubre "PORTFOLIO RECOVERY" contra
+    "PORTFOLIO RECOVERY ASSOCIATES INC" sin cubrir "MIDLAND CREDIT
+    MANAGEMENT" contra "MIDLAND FUNDING", que si son entidades distintas y
+    son justo el caso que hay que detectar.
+    """
+    ta = _furnisher_identity_tokens(_strip_original_creditor(a))
+    tb = _furnisher_identity_tokens(_strip_original_creditor(b))
+    if not ta or not tb:
+        return True              # sin datos suficientes, no afirmar nada
+    return ta == tb or ta <= tb or tb <= ta
+
+
+_IDENTITY_SHIFT_MIN_DIGITS = 8
+
+
+def _account_digits(acct: str) -> str:
+    """Digitos del numero de cuenta, sin mascara ni separadores."""
+    return "".join(ch for ch in str(acct or "") if ch.isdigit())
+
+
+def detect_cross_bureau_furnisher_identity_shift(
+    negatives_by_bureau: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Mismo numero de cuenta, nombres de furnisher distintos entre buros.
+
+    POR QUE NO USA base_tradelines: un base tradeline sale de UN bloque del
+    PDF y lleva UN solo furnisher_name, porque asi lo imprime el reporte.
+    Dentro de un bloque no puede haber dos nombres, de modo que el corrimiento
+    de identidad solo es observable ENTRE bloques. Por eso el ancla aca es el
+    numero de cuenta y no el block_id.
+
+    Guardas contra falso positivo:
+      - Se comparan solo los digitos, y tienen que ser identicos. La mascara
+        cambia entre buros ("3719****" contra "0003719****") pero los
+        digitos significativos no.
+      - Se exigen al menos 8 digitos. Con menos, dos cuentas distintas del
+        mismo emisor pueden coincidir por el BIN.
+      - Se ignora la anotacion "(Original Creditor: X)" que un buro agrega
+        y otro no.
+      - Se ignoran los sufijos societarios y se expanden abreviaturas.
+      - Si un nombre es subconjunto del otro, es la misma entidad.
+
+    Devuelve {bureau: [attack_record, ...]}: el hallazgo es cross-bureau y
+    el ataque se emite en cada buro afectado.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+
+    # digitos -> {bureau: (nombre, cuenta)}
+    por_digitos: dict[str, dict[str, tuple]] = {}
+    for bureau, accounts in (negatives_by_bureau or {}).items():
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            d = _account_digits(acc.get("account_number", ""))
+            if len(d) < _IDENTITY_SHIFT_MIN_DIGITS:
+                continue
+            nombre = (acc.get("name") or "").strip()
+            if not nombre:
+                continue
+            # Si el mismo buro trae el numero dos veces, se queda el primero:
+            # duplicados dentro de un buro los cubre duplicate_account_number.
+            por_digitos.setdefault(d, {}).setdefault(bureau, (nombre, acc))
+
+    for digitos, por_bureau in por_digitos.items():
+        if len(por_bureau) < 2:
+            continue
+
+        bureaus = sorted(por_bureau)
+        hay_conflicto = any(
+            not _same_furnisher_identity(por_bureau[x][0], por_bureau[y][0])
+            for i, x in enumerate(bureaus) for y in bureaus[i + 1:]
+        )
+        if not hay_conflicto:
+            continue
+
+        acct_num = por_bureau[bureaus[0]][1].get("account_number", "")
+        detalle = ", ".join(
+            f"{b.title()} reports it as {por_bureau[b][0]}" for b in bureaus
+        )
+
+        for b in bureaus:
+            _, acc = por_bureau[b]
+            out.setdefault(b, []).append(build_attack_record(
+                attack_type="cross_bureau_furnisher_identity_shift",
+                bureau=b,
+                accounts=[acc],
+                strategy_tags=["FCRA_1681e_b", "cross_bureau", "chain_of_title"],
+                reason=(
+                    f"The same account, number {mask_stars_to_x(acct_num)}, is "
+                    f"reported under different furnisher identities across the "
+                    f"bureaus. {detalle}. A single debt cannot be owed to two "
+                    f"different entities at the same time. Either the chain of "
+                    f"title is broken or one of the bureaus is reporting the "
+                    f"wrong furnisher, and in either case the entry cannot be "
+                    f"verified as accurate."
+                ),
+            ))
+    return out
+
 def build_legal_detection_engine(
     negatives_by_bureau: dict[str, list[dict[str, Any]]],
     base_tradelines: list[dict[str, Any]] | None = None,
@@ -3052,6 +3418,11 @@ def build_legal_detection_engine(
 
         # --- Intra-account field contradiction attacks ---
         bureau_attacks.extend(detect_intra_account_inconsistencies(bureau, accounts))
+        bureau_attacks.extend(detect_zero_balance_with_past_due(bureau, accounts))
+        bureau_attacks.extend(detect_repossession_proceeds_not_credited(bureau, accounts))
+        bureau_attacks.extend(
+            detect_bankruptcy_reporting_period_exceeded(bureau, accounts, report_date)
+        )
 
         # --- Cross-bureau field conflicts (needs full inventory) ---
         bureau_attacks.extend(detect_cross_bureau_field_conflicts(bureau, accounts, negatives_by_bureau))
@@ -3083,6 +3454,14 @@ def build_legal_detection_engine(
         negatives_by_bureau, base_tradelines
     )
     for bureau, attacks in cross_bureau_attacks.items():
+        result.setdefault(bureau, []).extend(attacks)
+
+    # Corrimiento de identidad del furnisher entre buros. Va anclado al
+    # numero de cuenta y no a base_tradelines, por lo explicado en la
+    # docstring del detector: un bloque del PDF trae un solo nombre.
+    for bureau, attacks in detect_cross_bureau_furnisher_identity_shift(
+        negatives_by_bureau
+    ).items():
         result.setdefault(bureau, []).extend(attacks)
 
     # --- Deduplicate: same attack_type + same account_number + same bureau ---
@@ -3169,6 +3548,10 @@ def get_attack_severity_score(attack_type: str) -> int:
         "pay_for_delete_evidence_pattern": 88,
         "disputed_status_not_flagged": 90,
         "mixed_file_contamination": 99,
+        # Contradiccion interna de cifras: balance en cero con past due
+        # positivo. Mismo tramo que closed_with_balance, por debajo de
+        # paid_status_with_past_due porque aquel ademas contradice el status.
+        "zero_balance_with_past_due": 82,
     }
     return mapping.get(attack_type, 70)
 
@@ -3514,6 +3897,10 @@ def get_laws_for_attack(attack_type: str) -> list[str]:
         ],
         "paid_status_with_past_due": [
             "15 USC 1681e(b)",
+        ],
+        "zero_balance_with_past_due": [
+            "15 USC 1681e(b)",
+            "15 USC 1681s-2(a)(1)",
         ],
         "closed_with_balance": [
             "15 USC 1681e(b)",
@@ -3966,6 +4353,12 @@ def build_letter_input_engine(
                     "state_protection_state_name": account.get("state_protection_state_name", ""),
                     "state_protection_effective":  account.get("state_protection_effective", ""),
                     "state_protection_scope":      account.get("state_protection_scope", ""),
+                    # Who the statute obligates: cra | furnisher | both.
+                    # Virginia binds ONLY the furnisher. Asking a bureau to
+                    # comply with a duty the statute does not impose on it is
+                    # exactly what a bureau uses to declare a dispute
+                    # frivolous, so this has to reach _account_reason.
+                    "state_protection_binds":      account.get("state_protection_binds", "both"),
                 }
                 key = (entry["furnisher_name"], entry["account_number"])
                 existing = dedupe_map.get(key)
@@ -4437,6 +4830,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "multi_furnisher_same_balance":         "multiple companies are reporting the same balance for what appears to be one debt",
         "closed_with_balance":                  "the account shows a closed status but is still reporting a balance",
         "paid_status_with_past_due":            "the account shows as paid but also carries a past-due amount, which are contradictory",
+        "zero_balance_with_past_due":           "the balance is reported as zero while a past-due amount is still being reported, which cannot both be true",
         "open_status_chargeoff_conflict":       "the account is listed as open but also shows a charge-off or collection status",
         "balance_exceeds_high_credit":          "the current balance exceeds the original loan amount, which is not possible on an installment account",
         "balance_exceeds_credit_limit":         "the balance significantly exceeds the reported credit limit",
@@ -4467,6 +4861,7 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "multi_furnisher_same_balance":         "several different companies are reporting the exact same balance for what appears to be a single debt",
         "closed_with_balance":                  "the account is marked closed but a balance is still being reported",
         "paid_status_with_past_due":            "the account reads as paid but also shows a past-due amount, which do not agree",
+        "zero_balance_with_past_due":           "the account shows nothing owed and at the same time an amount past due, which do not agree",
         "open_status_chargeoff_conflict":       "the account is flagged open while also being reported as a charge-off or collection",
         "balance_exceeds_high_credit":          "the current balance is higher than the original loan amount, which should be impossible on an installment account",
         "balance_exceeds_credit_limit":         "the reported balance is higher than the credit limit by a significant margin",
@@ -5305,6 +5700,46 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"that the reporting be corrected to reflect the actual state."
             )
 
+    # -- ZERO BALANCE WITH PAST DUE ----------------------------------------
+    # Primo de paid_status_with_past_due, pero mira las CIFRAS, no el status.
+    # Cuatro variantes, igual que el resto, para que la misma cuenta no
+    # repita texto entre buros.
+    elif attack_type == "zero_balance_with_past_due":
+        if v4 == 0:
+            reason = (
+                f"The figures on this account contradict each other. The balance "
+                f"is reported as {balance or 'zero'}, and at the same time a past "
+                f"due amount of {past_due} is being reported. If nothing is owed, "
+                f"nothing can be past due. Under 15 U.S.C. section 1681e(b) the "
+                f"furnisher has to be able to certify both numbers, and it cannot "
+                f"certify these two."
+            )
+        elif v4 == 1:
+            reason = (
+                f"There is an arithmetic problem with this account. A balance of "
+                f"{balance or 'zero'} is being reported alongside a past due "
+                f"amount of {past_due}. Those two figures cannot both be correct. "
+                f"I am asking for the accurate numbers, or for the entry to be "
+                f"removed if they cannot be substantiated."
+            )
+        elif v4 == 2:
+            reason = (
+                f"This account reports nothing owed and something past due at the "
+                f"same time. The balance shows {balance or 'zero'} while the past "
+                f"due field shows {past_due}. A past due amount is by definition "
+                f"a portion of a balance, so a zero balance leaves nothing that "
+                f"can be past due. One of the two fields is wrong."
+            )
+        else:
+            reason = (
+                f"The balance and the past due amount on this account do not "
+                f"agree. The balance is {balance or 'zero'} and the past due "
+                f"figure is {past_due}. Under 15 U.S.C. section 1681s-2(a)(1) the "
+                f"company reporting this information is responsible for its "
+                f"accuracy, and these two numbers cannot both be accurate. I am "
+                f"asking that this be corrected or the item deleted."
+            )
+
     # -- CLOSED WITH BALANCE -----------------------------------------------
     elif attack_type == "closed_with_balance":
         if v4 == 0:
@@ -5713,17 +6148,35 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         sp_state     = item.get("state_protection_state_name", "")
         sp_effective = item.get("state_protection_effective", "")
         sp_scope     = item.get("state_protection_scope", "all_medical_debt")
+        sp_binds     = item.get("state_protection_binds", "both")
 
-        # Scope phrasing: laws like Connecticut P.A. 24-148 cover only
-        # hospital medical debt. Reflect that in the narrative.
+        # Scope phrasing: some statutes cover only hospital medical debt.
+        # Reflect that in the narrative.
         if sp_scope == "hospital_medical_debt_only":
+            subject = "hospital medical debt"
+        else:
+            subject = "medical debt"
+
+        # Who the statute binds decides how the demand is framed.
+        if sp_binds == "furnisher":
+            # The law obligates the provider or collector, NOT the bureau.
+            # Asking the bureau to comply with a duty the statute does not
+            # impose on it is an attackable error. Frame it instead as an
+            # inaccuracy under 1681e(b): the furnisher was not permitted to
+            # furnish it, therefore the data is inaccurate, and the bureau
+            # still owes a reasonable reinvestigation under 1681i.
             scope_phrase = (
-                f"hospital medical debt from being reported on consumer "
-                f"credit reports"
+                f"{subject} from being furnished to consumer reporting "
+                f"agencies by the provider or collector"
+            )
+        elif sp_binds == "cra":
+            scope_phrase = (
+                f"{subject} from being included in consumer credit reports "
+                f"by consumer reporting agencies"
             )
         else:
             scope_phrase = (
-                f"medical debt from being reported on consumer credit reports"
+                f"{subject} from being reported on consumer credit reports"
             )
 
         # Defensive fallback: if for any reason the metadata did not
@@ -7272,128 +7725,289 @@ def detect_student_loan_complex_attacks(
 #   Bureau voluntary policies, still in effect. Primary dispute vehicle.
 
 # States with active medical debt credit reporting restrictions (as of April 2026)
+# States with active medical debt credit reporting restrictions.
+# Verified against primary sources 2026-08-18.
 MEDICAL_DEBT_STATE_PROTECTIONS: dict[str, dict[str, Any]] = {
-    # State protections against medical debt on credit reports.
-    # Used by detect_medical_debt_attacks to fire medical_debt_state_law
-    # only when the report date is on or after the law's effective date,
-    # and (for limited-scope laws) only when the account matches scope.
-    # Notes on accuracy of these citations:
-    #   - "law_name" is the colloquial / commonly cited name of the bill.
-    #   - "statute_cite" is the public act number or session law identifier
-    #     when the codified section is not yet stable or widely cited.
-    #     The detector and narrative prefer law_name when statute_cite is
-    #     uncertain, since the law name is the most defensible reference.
-    #   - "effective" is ISO YYYY-MM-DD; reports dated before this are
-    #     not flagged for the state-law attack (general accuracy still applies).
-    #   - "scope" controls which accounts qualify:
-    #       all_medical_debt          - any medical collection
-    #       hospital_medical_debt_only - only hospital-related furnishers
+    # Fields:
+    #   name         - state display name
+    #   law_name     - bill as commonly cited
+    #   statute_cite - codified section, ASCII "section" (never the sign)
+    #   effective    - ISO YYYY-MM-DD; reports before this do not qualify
+    #   scope        - all_medical_debt | hospital_medical_debt_only
+    #   binds        - cra | furnisher | both   (who the statute obligates)
+    #   excludes     - tuple of exclusion keys; see _MEDICAL_EXCLUSION_TESTS
+    #   note         - free text, surfaced to the operator, never in letters
     "CA": {
         "name": "California",
         "law_name": "SB 1061 (Medical Debt Relief Act)",
-        "statute_cite": "California Civil Code section 1785.13",
+        "statute_cite": "California Civil Code section 1785.13(a)(7)",
         "effective": "2025-01-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": ("general_purpose_credit_card", "cosmetic_surgery"),
+        "note": "Civ. Code 1785.13 binds CRAs; 1785.27 binds furnishers.",
     },
     "NY": {
         "name": "New York",
-        "law_name": "Fair Medical Debt Reporting Act",
-        "statute_cite": "New York General Business Law section 380-l",
+        "law_name": "Fair Medical Debt Reporting Act (S4907A / Ch. 727 of 2023)",
+        "statute_cite": "New York General Business Law section 380-j(f)(1)",
         "effective": "2023-12-13",
         "scope": "all_medical_debt",
+        "binds": "cra",
+        "excludes": ("general_purpose_credit_card",),
+        "note": "Cite was section 380-l in the old table. Correct is 380-j(f)(1).",
     },
     "CO": {
         "name": "Colorado",
-        "law_name": "Senate Bill 23-093",
-        "statute_cite": "Colorado Senate Bill 23-093",
+        "law_name": "HB 23-1126 (Protections Against Medical Debt Collections)",
+        "statute_cite": "Colorado Revised Statutes section 5-18-109",
         "effective": "2023-08-07",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": ("general_purpose_credit_card",),
+        "note": (
+            "Old table said SB 23-093, which is a different bill. "
+            "UNDER ACTIVE CHALLENGE: ACA International v. Fulford, "
+            "D. Colo. 1:25-cv-03530, FCRA preemption plus First Amendment. "
+            "No ruling and no injunction as of 2026-08-18. Still in force."
+        ),
     },
     "IL": {
         "name": "Illinois",
-        "law_name": "Medical Debt Relief Act (HB 4408)",
-        "statute_cite": "Illinois Public Act 103-0867",
+        "law_name": "SB 2933 (Public Act 103-0648)",
+        "statute_cite": "815 ILCS 505/2EEEE",
         "effective": "2025-01-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": ("general_purpose_credit_card",),
+        "note": (
+            "Old table cited HB 4408 / PA 103-0867. The Illinois "
+            "'Medical Debt Relief Act' (305 ILCS 85) is a debt-purchase "
+            "and forgiveness program, NOT the credit reporting ban. "
+            "Amended by PA 104-417 effective 2025-08-15."
+        ),
     },
     "CT": {
         "name": "Connecticut",
-        "law_name": "Public Act 24-148",
-        "statute_cite": "Connecticut Public Act 24-148",
+        "law_name": "Public Act 24-6 (Substitute SB 395)",
+        "statute_cite": "Connecticut General Statutes section 20-7i",
         "effective": "2024-07-01",
-        "scope": "hospital_medical_debt_only",
+        # SCOPE CORREGIDO: la tabla vieja decia hospital_medical_debt_only.
+        # El estatuto cubre a todos los proveedores de salud y a las
+        # entidades de cobro, no solo hospitales.
+        "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (),
+        "note": (
+            "Old table said PA 24-148 and hospital-only scope. Both wrong. "
+            "See also Conn. Gen. Stat. section 19a-673b."
+        ),
     },
     "NJ": {
         "name": "New Jersey",
-        "law_name": "Louisa Carman Medical Debt Relief Act",
-        "statute_cite": "New Jersey P.L. 2024, c. 47",
+        "law_name": "Louisa Carman Medical Debt Relief Act (S2806, P.L. 2024 c. 47)",
+        "statute_cite": "New Jersey Statutes Annotated section 56:11-58",
         "effective": "2024-07-22",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (),
+        "note": (
+            "Asymmetric statute. CRAs may not report medical debt that is "
+            "PAID or UNDER 500 dollars regardless of service date. "
+            "Furnishers may not report any medical debt for services "
+            "rendered on or after 2024-07-22."
+        ),
     },
     "MD": {
         "name": "Maryland",
-        "law_name": "SB 357 (Medical Debt Protection Act)",
-        "statute_cite": "Maryland SB 357 (2024)",
-        "effective": "2024-10-01",
+        "law_name": "HB 1020 / SB 614 (2025)",
+        "statute_cite": "Maryland Code Commercial Law section 14-1213",
+        "effective": "2025-10-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": ("general_purpose_credit_card",),
+        "note": (
+            "Old table said SB 357 (2024) effective 2024-10-01. Wrong bill "
+            "and a full year early. See also Health-General 24-2501, 24-2502."
+        ),
     },
     "VA": {
         "name": "Virginia",
-        "law_name": "HB 1370 / SB 1119",
-        "statute_cite": "Virginia HB 1370 (2024 Session)",
-        "effective": "2025-07-01",
+        "law_name": "HB 1370 (2024 Chapter 751)",
+        "statute_cite": "Virginia Code section 59.1-444.4",
+        "effective": "2024-07-01",
         "scope": "all_medical_debt",
+        # CRITICO: obliga SOLO al furnisher. No le impone deber al buro.
+        "binds": "furnisher",
+        "excludes": ("general_purpose_credit_card",),
+        "note": (
+            "Binds providers, EMS agencies and collectors only. Does NOT "
+            "bind consumer reporting agencies. Old table had effective "
+            "2025-07-01, a year late. Do not confuse with the Virginia "
+            "Medical Debt Protection Act (HB 1725, effective 2026-07-01), "
+            "which is a collections statute and does not touch credit "
+            "reporting."
+        ),
     },
     "WA": {
         "name": "Washington",
-        "law_name": "Patient Bill of Rights amendments",
-        "statute_cite": "Washington Revised Code chapter 19.16",
-        "effective": "2023-07-23",
+        "law_name": "SB 5480 (2025 c 145)",
+        "statute_cite": "Revised Code of Washington section 70.54.475",
+        "effective": "2025-07-27",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (),
+        "note": (
+            "Old table pointed at RCW chapter 19.16 effective 2023-07-23. "
+            "Wrong chapter and two years early. Debt is VOID if furnished. "
+            "See also RCW 70.41.400 and RCW 19.16.250(28). "
+            "Exception for HMO-operated hospitals."
+        ),
     },
     "OR": {
         "name": "Oregon",
-        "law_name": "SB 484 (Medical Debt Reporting amendments)",
-        "statute_cite": "Oregon SB 484 (2023, as amended)",
-        "effective": "2024-01-01",
+        "law_name": "SB 605 (2025)",
+        "statute_cite": "Oregon Revised Statutes section 646A.677",
+        "effective": "2026-01-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": ("cosmetic_surgery",),
+        "note": (
+            "Old table said SB 484 (2023) effective 2024-01-01. Wrong bill, "
+            "two years early. Correct is SB 605, in force since 2026-01-01. "
+            "See also ORS 646.608."
+        ),
     },
     "MN": {
         "name": "Minnesota",
-        "law_name": "Debt Fairness Act (HF 4757)",
-        "statute_cite": "Minnesota Session Laws 2024, chapter 114",
+        "law_name": "SF 4097 (Debt Fairness Act, 2024 Chapter 114)",
+        "statute_cite": "Minnesota Statutes section 332C.03",
         "effective": "2024-10-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (),
+        "note": "Old table said HF 4757. The enacted vehicle was SF 4097.",
     },
     "VT": {
         "name": "Vermont",
-        "law_name": "Act 73 of 2024 (H.514)",
-        "statute_cite": "Vermont Act 73 (2024)",
-        "effective": "2025-01-01",
+        "law_name": "2025 Act No. 21, section 4",
+        "statute_cite": "9 Vermont Statutes Annotated section 2466d",
+        "effective": "2025-07-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (
+            "general_purpose_credit_card",
+            "veterinary",
+            "secured_debt",
+        ),
+        "note": (
+            "Old table said Act 73 of 2024 (H.514) effective 2025-01-01. "
+            "Wrong act and six months early. See also 18 V.S.A. 9485(b). "
+            "Also excludes home equity and general lines of credit."
+        ),
     },
     "RI": {
         "name": "Rhode Island",
-        "law_name": "H 7223 / Medical Debt Reporting amendments",
-        "statute_cite": "Rhode Island H 7223 (2024)",
-        "effective": "2024-09-01",
+        "law_name": "S 2709A / H 7103A (P.L. 2024 Chapter 225)",
+        "statute_cite": "Rhode Island General Laws section 6-60-3",
+        "effective": "2025-01-01",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (),
+        "note": (
+            "Old table said H 7223 effective 2024-09-01. Wrong bill and "
+            "four months early. Chapter runs 6-60-1 through 6-60-5. "
+            "Bill text and the legislature's own release say 2025-01-01; "
+            "NCLC lists 2025-07-01. Using the primary source."
+        ),
     },
     "DE": {
         "name": "Delaware",
-        "law_name": "SB 11 (Medical Debt Reporting)",
-        "statute_cite": "Delaware SB 11 (2024)",
-        "effective": "2024-08-01",
+        "law_name": "Senate Substitute 1 for SB 156 (2025)",
+        "statute_cite": "6 Delaware Code chapter 107",
+        "effective": "2025-10-27",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": ("general_purpose_credit_card",),
+        "note": (
+            "Old table said SB 11 (2024) effective 2024-08-01. Wrong bill "
+            "and over a year early. Signed 2025-07-29, in force 2025-10-27."
+        ),
     },
     "ME": {
         "name": "Maine",
-        "law_name": "LD 1948 (Medical Debt Reporting amendments)",
-        "statute_cite": "Maine LD 1948 (2024)",
-        "effective": "2024-08-09",
+        "law_name": "LD 558 (SP 237, P.L. 2025 Chapter 201)",
+        "statute_cite": "10 Maine Revised Statutes section 1310-H(4)",
+        "effective": "2025-09-24",
         "scope": "all_medical_debt",
+        "binds": "both",
+        "excludes": (),
+        "note": (
+            "Old table said LD 1948 (2024) effective 2024-08-09. Wrong bill "
+            "and a year early. Date per Maine Bureau of Consumer Credit "
+            "Protection; NCLC lists 2025-06-09, which is the signing date."
+        ),
     },
 }
+
+# NOTE - states deliberately NOT in this table, so nobody re-adds them:
+#   NC  - all 99 acute-care hospitals stopped reporting as of 2025-07-01,
+#         but as a Medicaid HASP payment condition, NOT a statute.
+#         There is no citation that can go in a dispute letter.
+#   NM  - NMSA chapter 57 article 32 limits collection actions against
+#         indigent patients. It does not bar credit reporting.
+#   UT, FL, NV, ID, TX - conditional or procedural only. Not bans.
+#   MA  - 105 CMR 95.00 proposed, hearing held 2026-07-27, NOT final.
+#         Add with its effective date once promulgated.
+
+
+# --- Exclusion tests --------------------------------------------------------
+# Cada clave de "excludes" mapea a un predicado sobre la cuenta.
+# Si CUALQUIERA da True, la cuenta queda fuera del alcance del estatuto y
+# el detector NO debe disparar medical_debt_state_law (cae al ataque de
+# exactitud general, que sigue siendo valido).
+
+_GENERAL_CARD_HINTS = (
+    "CREDIT CARD", "CHARGE ACCOUNT", "REVOLVING", "BANKCARD",
+    "CAPITAL ONE", "CHASE", "CITI", "SYNCHRONY", "COMENITY",
+    "DISCOVER", "AMEX", "AMERICAN EXPRESS",
+)
+_COSMETIC_HINTS = ("COSMETIC", "AESTHETIC", "PLASTIC SURGERY", "MEDSPA", "MED SPA")
+_VET_HINTS = ("VETERINARY", "VET CLINIC", "ANIMAL HOSPITAL", "PET ")
+_SECURED_HINTS = ("SECURED", "HOME EQUITY", "HELOC", "LINE OF CREDIT")
+
+
+def _acc_blob(acc: dict[str, Any]) -> str:
+    """Concatena los campos de texto de la cuenta, en mayusculas."""
+    parts = []
+    for key in ("name", "account_type", "account_type_detail", "comments"):
+        val = acc.get(key)
+        if isinstance(val, str):
+            parts.append(val)
+        elif isinstance(val, (list, tuple)):
+            parts.extend(str(v) for v in val)
+    return " ".join(parts).upper()
+
+
+_MEDICAL_EXCLUSION_TESTS = {
+    "general_purpose_credit_card":
+        lambda acc: any(h in _acc_blob(acc) for h in _GENERAL_CARD_HINTS),
+    "cosmetic_surgery":
+        lambda acc: any(h in _acc_blob(acc) for h in _COSMETIC_HINTS),
+    "veterinary":
+        lambda acc: any(h in _acc_blob(acc) for h in _VET_HINTS),
+    "secured_debt":
+        lambda acc: any(h in _acc_blob(acc) for h in _SECURED_HINTS),
+}
+
+
+def _medical_exclusion_hit(acc: dict[str, Any], protection: dict[str, Any]) -> str:
+    """Devuelve la clave de exclusion que aplica, o "" si ninguna."""
+    for key in protection.get("excludes", ()) or ():
+        test = _MEDICAL_EXCLUSION_TESTS.get(key)
+        if test and test(acc):
+            return key
+    return ""
 
 # Full-name aliases so callers can pass either "CA" or "CALIFORNIA"
 _FULL_NAME_TO_ABBR: dict[str, str] = {
@@ -7677,6 +8291,16 @@ def detect_medical_debt_attacks(
                 else:
                     scope_ok = False
 
+                # Exclusion check. Almost no state statute covers "all"
+                # medical debt: most exclude debt charged to a general
+                # purpose credit card, and several exclude cosmetic
+                # surgery. Without this the detector produces false
+                # positives that a bureau can use to declare the dispute
+                # frivolous.
+                exclusion = _medical_exclusion_hit(acc, protection)
+                if exclusion:
+                    scope_ok = False
+
                 qualifies_for_state_law = bool(date_ok and scope_ok)
 
             if qualifies_for_state_law:
@@ -7696,6 +8320,29 @@ def detect_medical_debt_attacks(
                 acc_with_meta["state_protection_state_name"]   = state_display
                 acc_with_meta["state_protection_effective"]    = effective_str
                 acc_with_meta["state_protection_scope"]        = scope_str
+                acc_with_meta["state_protection_binds"]        = protection.get("binds", "both")
+                acc_with_meta["state_protection_note"]         = protection.get("note", "")
+
+                # Same binds distinction as _account_reason. Keeping the two
+                # in sync avoids an operator dashboard that claims a duty on
+                # the bureau while the letter correctly frames it as a
+                # furnisher duty.
+                binds_str = protection.get("binds", "both")
+                if binds_str == "furnisher":
+                    prohibition_phrase = (
+                        "which prohibits the provider or collector from "
+                        "furnishing medical debt to consumer reporting agencies"
+                    )
+                elif binds_str == "cra":
+                    prohibition_phrase = (
+                        "which prohibits consumer reporting agencies from "
+                        "including medical debt in consumer credit reports"
+                    )
+                else:
+                    prohibition_phrase = (
+                        "which prohibits medical debt from being reported "
+                        "on consumer credit reports"
+                    )
 
                 attacks.append(build_attack_record(
                     attack_type="medical_debt_state_law",
@@ -7707,8 +8354,7 @@ def detect_medical_debt_attacks(
                         f"collection being reported for a consumer in "
                         f"{state_display}. {state_display} enacted "
                         f"{law_name} ({statute_cite}), effective "
-                        f"{effective_str}, which prohibits medical debt "
-                        f"from being reported on consumer credit reports. "
+                        f"{effective_str}, {prohibition_phrase}. "
                         f"This account is being reported in violation of "
                         f"that law. I am requesting its removal."
                     ),
@@ -11088,6 +11734,376 @@ def build_bureau_response_letter(
         "account_count": len(accounts),
         "next_steps":    next_steps,
     }
+
+
+# =============================================================================
+#  PUENTE DE RESPUESTA DEL BURO  (2026-08-20)
+# =============================================================================
+#  parse_bureau_response() clasifica en 5 "outcome":
+#      deleted | belongs_to_you | verified_modified | verified_unchanged | other
+#  build_bureau_response_letter() despacha sobre 7 "response_type":
+#      verified | updated | deleted | frivolous
+#      unable_to_process | no_response_30_days | reinsertion
+#
+#  No habia tabla de traduccion entre los dos, y por eso los 6 sub-builders
+#  de respuesta nunca se invocaban.
+#
+#  Y hay algo peor que la falta de traduccion: el clasificador
+#  SUB-CLASIFICA. "frivolous" y "unable_to_process" son detectables del
+#  texto de la carta pero no se buscan, asi que caen a "other" y se
+#  pierden. Son justo los dos con el plazo legal mas corto.
+# =============================================================================
+
+# El reloj de la FCRA. 1681i(a)(1)(A): 30 dias, extensible a 45 si el
+# consumidor aporta informacion adicional durante el periodo.
+FCRA_REINVESTIGATION_DAYS = 30
+FCRA_REINVESTIGATION_DAYS_EXTENDED = 45
+
+
+# "Frivolous or irrelevant", 1681i(a)(3). El buro DEBE notificar dentro de
+# 5 dias habiles y especificar que informacion necesita. Si no lo hace, la
+# determinacion misma es atacable.
+_FRIVOLOUS_PATTERNS = (
+    r"FRIVOLOUS",
+    r"IRRELEVANT",
+    r"SUSPICIOUS REQUEST",
+    r"WE HAVE (?:DETERMINED|CONCLUDED) .{0,40}(?:FRIVOLOUS|IRRELEVANT)",
+    r"THIRD[- ]PARTY .{0,30}(?:CREDIT REPAIR|ORGANIZATION)",
+    r"CREDIT REPAIR ORGANIZATION",
+    r"APPEARS TO (?:HAVE BEEN )?(?:BE )?(?:SUBMITTED|PREPARED) BY A THIRD PARTY",
+    r"DID NOT (?:COME|ORIGINATE) FROM (?:YOU|THE CONSUMER)",
+    r"NO (?:ADDITIONAL |NEW )?INFORMATION .{0,30}(?:PROVIDED|SUBMITTED)",
+    r"PREVIOUSLY (?:INVESTIGATED|VERIFIED) .{0,40}NO NEW",
+)
+
+# "Unable to process": identidad no verificada o informacion insuficiente.
+# 1681i(a)(1): se reprocesa con identificacion y arranca el plazo completo.
+_UNABLE_PATTERNS = (
+    r"UNABLE TO (?:PROCESS|COMPLETE|VERIFY YOUR IDENTITY)",
+    r"COULD NOT (?:PROCESS|VERIFY YOUR IDENTITY|LOCATE YOUR FILE)",
+    r"CANNOT (?:PROCESS|VERIFY YOUR IDENTITY)",
+    r"UNABLE TO LOCATE (?:YOUR |A )?(?:FILE|CREDIT FILE|RECORD)",
+    r"NEED (?:ADDITIONAL |MORE )?(?:INFORMATION|DOCUMENTATION) TO",
+    r"PROOF OF (?:IDENTITY|ADDRESS) (?:IS )?REQUIRED",
+    r"INSUFFICIENT INFORMATION",
+    r"DID NOT (?:INCLUDE|RECEIVE) .{0,40}(?:IDENTIFICATION|PROOF)",
+    r"ILLEGIBLE",
+)
+
+
+def _matches_any_pattern(text_upper: str, patterns: tuple) -> str:
+    """Devuelve el patron que matcheo, o cadena vacia."""
+    import re as _re2
+    for pat in patterns:
+        if _re2.search(pat, text_upper):
+            return pat
+    return ""
+
+
+def classify_response_text_extended(
+    response_text: str,
+    parse_bureau_response_fn=None,
+) -> dict[str, Any]:
+    """
+    Envuelve parse_bureau_response y agrega las dos clasificaciones que le
+    faltan: frivolous y unable_to_process.
+
+    Devuelve la estructura original mas:
+        letter_level_outcome  : "" | "frivolous" | "unable_to_process"
+        letter_level_evidence : el patron que disparo la clasificacion
+        accounts[X]["outcome_extended"] : outcome afinado por cuenta
+
+    frivolous y unable_to_process suelen ser determinaciones a NIVEL CARTA,
+    no por cuenta: el buro rechaza la disputa entera. Por eso se evaluan
+    sobre el texto completo y pisan el outcome de todas las cuentas, salvo
+    las que el buro efectivamente borro, que eso vale igual.
+    """
+    fn = parse_bureau_response_fn or parse_bureau_response
+    parsed = fn(response_text) or {}
+    parsed.setdefault("accounts", {})
+    parsed.setdefault("outcome_summary", {})
+
+    text_up = (response_text or "").upper()
+    frivolous_hit = _matches_any_pattern(text_up, _FRIVOLOUS_PATTERNS)
+    unable_hit    = _matches_any_pattern(text_up, _UNABLE_PATTERNS)
+
+    letter_level = ""
+    evidence = ""
+    if frivolous_hit:
+        letter_level = BUREAU_RESPONSE_FRIVOLOUS
+        evidence = frivolous_hit
+    elif unable_hit:
+        letter_level = BUREAU_RESPONSE_UNABLE
+        evidence = unable_hit
+
+    parsed["letter_level_outcome"]  = letter_level
+    parsed["letter_level_evidence"] = evidence
+
+    for _creditor, data in parsed["accounts"].items():
+        base = data.get("outcome", "other")
+        if letter_level and base != "deleted":
+            data["outcome_extended"] = letter_level
+        else:
+            data["outcome_extended"] = base
+
+    return parsed
+
+
+# La tabla de traduccion. Cada entrada dice POR QUE, porque de eso depende
+# que la carta invoque el estatuto correcto.
+_OUTCOME_TO_RESPONSE_TYPE: dict[str, dict[str, str]] = {
+    "deleted": {
+        "response_type": BUREAU_RESPONSE_DELETED,
+        "why": (
+            "The bureau confirmed deletion. The letter confirms it in writing "
+            "and puts the 1681i(a)(5)(B)(ii) five day reinsertion notice on "
+            "the record, so any later reinsertion is already a violation."
+        ),
+    },
+    "verified_unchanged": {
+        "response_type": BUREAU_RESPONSE_VERIFIED,
+        "why": (
+            "The bureau claims it verified with no changes. Demand the "
+            "description of procedure under 1681i(a)(6)(B)(iii). If all it "
+            "ran was an ACDV, the reinvestigation was not reasonable."
+        ),
+    },
+    "verified_modified": {
+        "response_type": BUREAU_RESPONSE_UPDATED,
+        "why": (
+            "The bureau says verified but modified fields. That is an "
+            "admission the prior data was inaccurate. Attack under "
+            "1681i(a)(5) for incomplete resolution."
+        ),
+    },
+    "belongs_to_you": {
+        "response_type": BUREAU_RESPONSE_VERIFIED,
+        "why": (
+            "Careful: 'the account belongs to you' is not a reinvestigation. "
+            "It answers ownership, not accuracy, which is what was disputed. "
+            "Treated as verified and the procedure is demanded."
+        ),
+    },
+    "frivolous": {
+        "response_type": BUREAU_RESPONSE_FRIVOLOUS,
+        "why": (
+            "1681i(a)(3)(C): the bureau must notify within five business days "
+            "AND specify what information it needs. If it did not specify, "
+            "the determination itself is attackable."
+        ),
+    },
+    "unable_to_process": {
+        "response_type": BUREAU_RESPONSE_UNABLE,
+        "why": (
+            "Identity or information insufficient. Resubmit with "
+            "identification; the full 1681i(a)(1) period starts over. This "
+            "is not a verification."
+        ),
+    },
+    "other": {
+        "response_type": BUREAU_RESPONSE_VERIFIED,
+        "why": (
+            "Conservative default. If it could not be classified, treat as "
+            "verified and demand the procedure: that is the most defensible "
+            "demand without knowing what the bureau said. FLAGGED FOR "
+            "MANUAL OPERATOR REVIEW."
+        ),
+    },
+}
+
+
+def _parse_iso_or_us_date(value: str):
+    """Acepta YYYY-MM-DD y MM/DD/YYYY. Devuelve datetime o None."""
+    import datetime as _d
+    s = (value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
+        try:
+            return _d.datetime.strptime(s[:10], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def resolve_response_type(
+    outcome: str,
+    was_previously_deleted: bool = False,
+    response_received: bool = True,
+    dispute_date: str = "",
+    today: str = "",
+    extended_deadline: bool = False,
+) -> dict[str, Any]:
+    """
+    Traduce un outcome a response_type, aplicando las dos reglas que NO
+    salen del texto de la carta.
+
+      was_previously_deleted -- la cuenta fue borrada en una ronda anterior
+                                y volvio a aparecer. Es reinsercion y pisa
+                                todo lo demas.
+      response_received      -- False si no llego ninguna carta.
+      dispute_date           -- cuando el buro RECIBIO la disputa. Se usa la
+                                fecha del Return Receipt, no la de despacho:
+                                el reloj del 1681i arranca con la entrega.
+      today                  -- se pasa explicito para que la funcion sea
+                                determinista y testeable.
+      extended_deadline      -- True si el consumidor aporto informacion
+                                adicional durante el periodo (30 -> 45 dias).
+    """
+    # REGLA 1 - Reinsercion. Prioridad maxima. Un dato borrado que reaparece
+    # viola 1681i(a)(5)(B)(ii) aunque el buro ahora diga que lo verifico.
+    # No se puede determinar leyendo la carta: hace falta el historial.
+    if was_previously_deleted:
+        return {
+            "response_type": BUREAU_RESPONSE_REINSERTION,
+            "why": (
+                "Account deleted in a prior round that reappeared. "
+                "1681i(a)(5)(B)(ii) required written notice within five "
+                "business days of reinsertion. Demand re-deletion and the "
+                "furnisher certification."
+            ),
+            "needs_manual_review": False,
+            "days_elapsed": None,
+        }
+
+    # REGLA 2 - No respuesta. Tampoco sale del texto: sale del calendario.
+    days_elapsed = None
+    d0 = _parse_iso_or_us_date(dispute_date)
+    d1 = _parse_iso_or_us_date(today)
+    if d0 is not None and d1 is not None:
+        days_elapsed = (d1 - d0).days
+
+    if not response_received:
+        limit = (
+            FCRA_REINVESTIGATION_DAYS_EXTENDED
+            if extended_deadline
+            else FCRA_REINVESTIGATION_DAYS
+        )
+        if days_elapsed is not None and days_elapsed >= limit:
+            return {
+                "response_type": BUREAU_RESPONSE_NO_RESPONSE,
+                "why": (
+                    f"{days_elapsed} days elapsed since delivery with no "
+                    f"response, against the {limit} day limit in "
+                    f"1681i(a)(1)(A). Deletion follows as a matter of law "
+                    f"under 1681i(a)(5)(A)."
+                ),
+                "needs_manual_review": False,
+                "days_elapsed": days_elapsed,
+            }
+        # Todavia dentro del plazo: no hay carta que mandar.
+        return {
+            "response_type": "",
+            "why": (
+                f"No response yet but still inside the window "
+                f"({days_elapsed if days_elapsed is not None else '?'} of "
+                f"{limit} days). Sending now weakens the claim."
+            ),
+            "needs_manual_review": False,
+            "days_elapsed": days_elapsed,
+        }
+
+    # REGLA 3 - Traduccion directa del outcome.
+    key = (outcome or "other").strip().lower()
+    entry = _OUTCOME_TO_RESPONSE_TYPE.get(key, _OUTCOME_TO_RESPONSE_TYPE["other"])
+    return {
+        "response_type": entry["response_type"],
+        "why": entry["why"],
+        "needs_manual_review": key not in _OUTCOME_TO_RESPONSE_TYPE or key == "other",
+        "days_elapsed": days_elapsed,
+    }
+
+
+# Orden de trabajo: primero lo que tiene el reloj mas corto.
+_RESPONSE_TYPE_PRIORITY = {
+    BUREAU_RESPONSE_REINSERTION: 0,   # 5 dias habiles, ya vencidos
+    BUREAU_RESPONSE_NO_RESPONSE: 1,   # eliminacion por derecho
+    BUREAU_RESPONSE_FRIVOLOUS:   2,   # 5 dias habiles para especificar
+    BUREAU_RESPONSE_UNABLE:      3,   # reenviar con identificacion
+    BUREAU_RESPONSE_UPDATED:     4,   # admision de inexactitud
+    BUREAU_RESPONSE_VERIFIED:    5,   # 15 dias para el procedimiento
+    BUREAU_RESPONSE_DELETED:     6,   # solo confirmacion
+}
+
+
+def plan_bureau_response_letters(
+    parsed_extended: dict[str, Any],
+    bureau: str,
+    previously_deleted_names: set | None = None,
+    dispute_date: str = "",
+    today: str = "",
+    account_lookup: dict[str, dict] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Agrupa las cuentas por response_type y devuelve una spec por tipo, lista
+    para build_bureau_response_letter.
+
+    Se emite UNA carta por response_type, no una por cuenta: cada tipo
+    invoca un estatuto distinto, y mezclarlos hace que e-OSCAR procese todo
+    bajo el reason code mas debil. Misma logica que los 7 grupos estrictos
+    del motor de disputas.
+
+      previously_deleted_names -- nombres de furnisher borrados en rondas
+                                  anteriores. Disparan reinsercion.
+      account_lookup           -- nombre en mayusculas -> dict completo de la
+                                  cuenta, para que la carta lleve numero,
+                                  balance, etc.
+
+    Devuelve una lista de dicts con "call" ya armado para la llamada.
+    """
+    prev = {str(n).upper() for n in (previously_deleted_names or set())}
+    account_lookup = account_lookup or {}
+
+    buckets: dict[str, dict[str, Any]] = {}
+
+    for creditor, data in (parsed_extended.get("accounts") or {}).items():
+        outcome = data.get("outcome_extended") or data.get("outcome", "other")
+        verdict = resolve_response_type(
+            outcome,
+            was_previously_deleted=creditor.upper() in prev,
+            response_received=True,
+            dispute_date=dispute_date,
+            today=today,
+        )
+        rtype = verdict["response_type"]
+        if not rtype:
+            continue
+
+        acct = dict(account_lookup.get(creditor.upper()) or {})
+        acct.setdefault("furnisher_name", creditor)
+        acct.setdefault("name", creditor)
+        acct["_bureau_response_text"] = data.get("response_text", "")
+        acct["_modified_fields"] = data.get("modified_fields", [])
+
+        b = buckets.setdefault(rtype, {
+            "response_type": rtype,
+            "bureau": bureau,
+            "accounts": [],
+            "account_names": [],
+            "why": verdict["why"],
+            "needs_manual_review": False,
+        })
+        b["accounts"].append(acct)
+        b["account_names"].append(creditor)
+        b["needs_manual_review"] = (
+            b["needs_manual_review"] or verdict["needs_manual_review"]
+        )
+
+    out = []
+    for rtype, b in buckets.items():
+        b["call"] = {
+            "response_type": rtype,
+            "bureau": bureau,
+            "accounts": b["accounts"],
+            "dispute_date": dispute_date,
+        }
+        if rtype == BUREAU_RESPONSE_REINSERTION:
+            b["call"]["reinserted_accounts"] = b["accounts"]
+        out.append(b)
+
+    out.sort(key=lambda x: _RESPONSE_TYPE_PRIORITY.get(x["response_type"], 99))
+    return out
+
 
 # COMPARISON ENGINE
 # Compares Round N vs Round N+1 credit reports for the same client.
