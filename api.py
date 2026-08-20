@@ -149,29 +149,30 @@ def _raw_report_text_for_job(job: dict) -> str:
     return texto
 
 
-def _serialize_base_tradelines(base_tradelines) -> list:
-    """
-    Deja base_tradelines en algo que Supabase pueda guardar como JSON.
-    Se descartan raw_lines: pueden ser miles de lineas de texto crudo y el
-    detector cross-bureau no las usa.
-    """
-    out = []
-    for tl in (base_tradelines or []):
-        if not isinstance(tl, dict):
-            continue
-        entries = {}
-        for b, e in (tl.get("bureau_entries") or {}).items():
-            if isinstance(e, dict):
-                entries[b] = {
-                    k: v for k, v in e.items()
-                    if isinstance(v, (str, int, float, bool, type(None)))
-                }
-        out.append({
-            "base_tradeline_id": tl.get("base_tradeline_id", ""),
-            "furnisher_name":    tl.get("furnisher_name", ""),
-            "bureau_entries":    entries,
-        })
-    return out
+# Columnas reales de api_jobs. Escribir una clave que no este aca hace que
+# PostgREST rechace el INSERT ENTERO con PGRST204 ("Could not find the
+# 'X' column of 'api_jobs' in the schema cache") y la subida del reporte
+# falla con 500. Filtrar contra esta lista convierte ese 500 en una linea
+# de log.
+#
+# Si alguna vez agregas una columna a la tabla, agregala tambien aca.
+_API_JOBS_COLUMNS = {
+    "job_id", "client_id", "operator_id", "consumer_name", "source",
+    "report_date", "pdf_path", "scores", "attack_count", "letters_generated",
+    "letter_files", "letter_count", "negatives_by_bureau", "inventory_by_bureau",
+    "personal_info", "personal_info_issues", "letter_input_engine", "attacks",
+    "inquiries", "inquiry_attacks", "response_history", "status", "error",
+    "created_at",
+}
+
+
+def _solo_columnas_de_api_jobs(payload: dict) -> dict:
+    """Descarta claves que no son columnas de api_jobs, avisando en el log."""
+    limpio = {k: v for k, v in (payload or {}).items() if k in _API_JOBS_COLUMNS}
+    sobrantes = sorted(set(payload or {}) - _API_JOBS_COLUMNS)
+    if sobrantes:
+        print(f"[api_jobs] descartadas claves que no son columnas: {sobrantes}")
+    return limpio
 
 
 def _resolve_letter_input(result: dict, negatives: dict, client_state: str = "") -> dict:
@@ -190,7 +191,11 @@ def _resolve_letter_input(result: dict, negatives: dict, client_state: str = "")
             negatives,
             result.get("report_date", ""),
             client_state=client_state,
-            base_tradelines=result.get("base_tradeline_engine") or None,
+            base_tradelines=(
+                result.get("base_tradeline_engine")
+                or _base_tradelines_from_negatives(negatives)
+                or None
+            ),
         )
     )
 
@@ -897,18 +902,14 @@ async def upload_report(
         "inquiries": result.get("inquiries", []),
         "inquiry_attacks": result.get("inquiry_attacks", []),
         "response_history": [],
-        # Ancla de los ataques cross-bureau. build_report lo arma y hasta
-        # ahora se tiraba: al regenerar cartas no habia con que anclar y
-        # los 8 ataques cross-bureau devolvian vacio. Guardarlo cuesta
-        # unos pocos KB y evita tener que releer el PDF.
-        "base_tradeline_engine": _serialize_base_tradelines(
-            result.get("base_tradeline_engine", [])
-        ),
-        # Estado usado en este analisis, para que al regenerar se use el
-        # mismo aunque despues cambien la ficha del cliente.
-        "client_state": client_state,
     }
-    sb.table("api_jobs").insert(job_data).execute()
+    # NOTA: base_tradelines NO se guarda. La tabla api_jobs no tiene esa
+    # columna y agregarla obligaria a una migracion. No hace falta: se
+    # reconstruye desde negatives_by_bureau agrupando por block_id, y esa
+    # reconstruccion da exactamente los mismos ataques que el motor
+    # completo (verificado tipo por tipo). Lo mismo con client_state: se
+    # lee de api_clients cuando se generan las cartas.
+    sb.table("api_jobs").insert(_solo_columnas_de_api_jobs(job_data)).execute()
 
     # Update client's job_ids array
     client_res = sb.table("api_clients").select("job_ids").eq("id", client_id).execute()
@@ -962,7 +963,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
     job_id = str(uuid.uuid4())
 
     # Store pending job
-    sb.table("api_jobs").insert({
+    sb.table("api_jobs").insert(_solo_columnas_de_api_jobs({
         "job_id":      job_id,
         "client_id":   body.client_id,
         "operator_id": user["id"],
@@ -970,7 +971,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
         "source":      "identityiq_json",
         "status":      "pending",
         "error":       None,
-    }).execute()
+    })).execute()
 
     # Run in background
     async def _run():
@@ -1109,7 +1110,7 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
     job_id = str(uuid.uuid4())
 
     # Store pending job immediately
-    sb.table("api_jobs").insert({
+    sb.table("api_jobs").insert(_solo_columnas_de_api_jobs({
         "job_id":       job_id,
         "client_id":    body.client_id,
         "operator_id":  user["id"],
@@ -1117,7 +1118,7 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
         "source":       "identityiq_json",
         "status":       "pending",
         "error":        None,
-    }).execute()
+    })).execute()
 
     async def _run():
         try:
@@ -1195,10 +1196,6 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
                     result, negatives,
                     client_state=str(client_data.get("state") or "").strip(),
                 ),
-                "base_tradeline_engine": _serialize_base_tradelines(
-                    result.get("base_tradeline_engine", [])
-                ),
-                "client_state":        str(client_data.get("state") or "").strip(),
                 "letters_generated":   False,
                 "letter_files":        [],
                 "response_history":    [],
@@ -1259,11 +1256,10 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
     report_date = job.get("report_date", "")
 
     # ── Los dos parametros que antes iban fijos ───────────────────────────────
-    # client_state: se prefiere el que quedo grabado en el job (asi la carta
-    # se regenera con el mismo estado con que se analizo), y si el job es
-    # viejo se cae a la ficha del cliente.
-    _client_state = str(job.get("client_state") or "").strip()
-    if not _client_state and job.get("client_id"):
+    # client_state: sale de la ficha del cliente. api_jobs no tiene columna
+    # propia y no hace falta: el estado del cliente es el dato vigente.
+    _client_state = ""
+    if job.get("client_id"):
         try:
             _cr = sb.table("api_clients").select("state").eq(
                 "id", job["client_id"]).execute()
@@ -1272,13 +1268,12 @@ async def generate_letters(body: GenerateLettersBody, user=Depends(get_current_u
         except Exception as _e:
             print(f"[generate-letters] no se pudo leer el estado del cliente: {_e}")
 
-    # base_tradelines: ancla de los 8 ataques cross-bureau. Del job si esta,
-    # y si no reconstruido desde los negativos por block_id.
-    _base_tradelines = job.get("base_tradeline_engine") or None
-    if not _base_tradelines:
-        _base_tradelines = _base_tradelines_from_negatives(
-            job.get("negatives_by_bureau", {})
-        ) or None
+    # base_tradelines: ancla de los 8 ataques cross-bureau. Se reconstruye
+    # desde los negativos agrupando por block_id. Verificado: da exactamente
+    # los mismos ataques que el base_tradeline_engine que arma build_report.
+    _base_tradelines = _base_tradelines_from_negatives(
+        job.get("negatives_by_bureau", {})
+    ) or None
     print(f"[generate-letters] client_state={_client_state!r} "
           f"base_tradelines={len(_base_tradelines or [])}")
 
@@ -1695,12 +1690,9 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
         letter_input = _compute_letter_input(
             job.get("negatives_by_bureau", {}),
             job.get("report_date", ""),
-            client_state=str(job.get("client_state") or "").strip(),
-            base_tradelines=(
-                job.get("base_tradeline_engine")
-                or _base_tradelines_from_negatives(job.get("negatives_by_bureau", {}))
-                or None
-            ),
+            base_tradelines=_base_tradelines_from_negatives(
+                job.get("negatives_by_bureau", {})
+            ) or None,
         )
 
     report_date = job.get("report_date", "")
