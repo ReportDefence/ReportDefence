@@ -689,11 +689,44 @@ async def update_client(client_id: str, body: ClientUpdate, user=Depends(get_cur
 
 @app.delete("/clients/{client_id}")
 async def delete_client(client_id: str, user=Depends(get_current_user)):
-    sb.table("api_clients").delete().eq("id", client_id).eq("operator_id", user["id"]).execute()
-    return {"ok": True}
+    """
+    Borrar un cliente VACIO se permite siempre: es la salida para el que se
+    equivoco escribiendo el nombre el primer dia.
+
+    Borrar un cliente que YA tiene reportes solo lo puede hacer Pro. Si
+    Free o Basica pudieran, tendrian un Pro en cuotas: procesarian un
+    cliente por vez, borrando y recreando, sin pagarlo nunca.
+    """
+    _get_client_or_404(user, client_id)          # tiene que ser tuyo
+    plan = _plan_actual(user)
+
+    try:
+        r = (sb.table("api_jobs").select("job_id", count="exact")
+             .eq("client_id", client_id).execute())
+        n_reportes = r.count if getattr(r, "count", None) is not None else len(r.data or [])
+    except Exception as e:
+        print(f"[delete-client] no se pudieron contar los reportes: {e}")
+        n_reportes = 0
+
+    if n_reportes > 0 and not _limites(plan)["borrar_clientes_con_reportes"]:
+        raise HTTPException(
+            402,
+            "This client already has analyzed reports and your plan does not "
+            "allow deleting it. Upgrade to Pro to manage clients freely.")
+
+    try:
+        sb.table("api_clients").delete().eq("id", client_id).eq(
+            "operator_id", user["id"]).execute()
+    except Exception as e:
+        # Antes devolvia ok:true pasara lo que pasara. Si la base rechaza el
+        # borrado, el operador tiene que enterarse.
+        print(f"[delete-client] fallo el borrado de {client_id}: {e}")
+        raise HTTPException(409, f"Could not delete the client: {e}")
+    return {"ok": True, "reportes_borrados": n_reportes}
 
 @app.get("/clients/{client_id}/history")
 async def client_history(client_id: str, user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "Compliance log")
     row = _get_client_or_404(user, client_id)
     job_ids = row.get("job_ids") or []
     if not job_ids:
@@ -713,6 +746,7 @@ async def client_history(client_id: str, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}/letters")
 async def client_letters(client_id: str, user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "Letters")
     row = _get_client_or_404(user, client_id)
     job_ids = row.get("job_ids") or []
     if not job_ids:
@@ -753,6 +787,7 @@ class ReceiptUpdate(BaseModel):
 
 @app.post("/letter-receipts", status_code=201)
 async def create_receipt(body: ReceiptCreate, user=Depends(get_current_user)):
+    _requiere_plan_pago(user, "Certified mail")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     _get_client_or_404(user, body.client_id)     # el cliente tiene que ser tuyo
     data["operator_id"] = user["id"]
@@ -761,6 +796,7 @@ async def create_receipt(body: ReceiptCreate, user=Depends(get_current_user)):
 
 @app.get("/clients/{client_id}/receipts")
 async def list_receipts(client_id: str, user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "Certified mail")
     _get_client_or_404(user, client_id)
     res = (sb.table("letter_receipts").select("*")
            .eq("client_id", client_id).order("created_at", desc=True).execute())
@@ -790,7 +826,14 @@ async def delete_receipt(receipt_id: str, user=Depends(get_current_user)):
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str, user=Depends(get_current_user)):
-    return _get_job_or_404(user, job_id)
+    job = _get_job_or_404(user, job_id)
+    # El plan gratuito ve el resumen, no el analisis completo. El recorte va
+    # acá y no en el frontend: si no, cualquiera lo lee desde la consola.
+    if not _limites(_plan_actual(user))["paid"]:
+        if _puede_leer_historico(user):
+            return job          # pagó antes: queda en solo lectura, ve lo suyo
+        return _recortar_job_para_free(job)
+    return job
 
 @app.post("/upload-report")
 async def upload_report(
@@ -801,6 +844,7 @@ async def upload_report(
     user=Depends(get_current_user),
 ):
     client_row = _get_client_or_404(user, client_id)   # no se sube a un cliente ajeno
+    _enforce_can_upload(user)     # el plan gratuito analiza un solo reporte
     job_id = str(uuid.uuid4())
     pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
     with open(pdf_path, "wb") as f:
@@ -918,7 +962,7 @@ async def upload_report(
         current_ids.append(job_id)
         sb.table("api_clients").update({"job_ids": current_ids}).eq("id", client_id).execute()
 
-    return {
+    respuesta = {
         "job_id": job_id,
         "consumer_name": consumer_name,
         "report_date": result.get("report_date", ""),
@@ -933,6 +977,10 @@ async def upload_report(
         "inquiries": result.get("inquiries", []),
         "inquiry_attacks": result.get("inquiry_attacks", []),
     }
+    # El plan gratuito recibe el resumen, no el analisis completo.
+    if not _limites(_plan_actual(user))["paid"]:
+        return _recortar_upload_para_free(respuesta)
+    return respuesta
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -952,6 +1000,7 @@ async def connect_identityiq(body: ConnectIdentityIQBody, user=Depends(get_curre
     Authenticates, fetches the JSON report, parses it, and stores the job
     in the same format as /upload-report.
     """
+    _requiere_plan_pago(user, "IdentityIQ")
     import asyncio
     from functools import partial
 
@@ -1099,6 +1148,7 @@ async def parse_identityiq_json_endpoint(body: ParseIdentityIQBody, user=Depends
     This avoids the Imperva WAF that blocks server-side requests.
     The browser fetches the JSON (passes WAF), sends it here for parsing.
     """
+    _requiere_plan_pago(user, "IdentityIQ")
     import asyncio
     from functools import partial
 
@@ -1840,13 +1890,14 @@ class GenerateBundleBody(BaseModel):
 
 @app.post("/generate-bundle")
 async def generate_bundle(body: GenerateBundleBody, user=Depends(get_current_user)):
+    _requiere_plan_pago(user, "Bundle PDF")
     try:
         from build_bundle_v2 import build_bundle
     except ImportError as e:
         raise HTTPException(
             500,
-            f"Falta build_bundle_v2.py en el servidor ({e}). Es un archivo "
-            f"aparte que va junto a api.py."
+            f"build_bundle_v2.py is missing on the server ({e}). It is a separate "
+            f"file that goes next to api.py."
         )
 
     job = _get_job_or_404(user, body.job_id)
@@ -1860,8 +1911,8 @@ async def generate_bundle(body: GenerateBundleBody, user=Depends(get_current_use
     if not (disputas or furnishers or consultas):
         raise HTTPException(
             400,
-            f"No hay cartas guardadas para {round_key} en este job. Genera "
-            f"primero las cartas (a buros, al acreedor o de consultas)."
+            f"No saved letters for {round_key} on this job. Generate the "
+            f"letters first (bureau, furnisher or inquiry)."
         )
 
     consumer = {
@@ -1870,7 +1921,7 @@ async def generate_bundle(body: GenerateBundleBody, user=Depends(get_current_use
         "city_state_zip": body.consumer_city_state_zip or "[City, State ZIP]",
     }
     if not consumer["name"]:
-        raise HTTPException(400, "Falta consumer_name.")
+        raise HTTPException(400, "Missing consumer_name.")
 
     # El logo es opcional: si la variable no esta o el archivo no existe,
     # build_bundle arma la portada sin logo en vez de fallar.
@@ -1901,7 +1952,7 @@ async def generate_bundle(body: GenerateBundleBody, user=Depends(get_current_use
     except Exception as e:
         import traceback
         print(f"[bundle] fallo: {traceback.format_exc()[:900]}")
-        raise HTTPException(500, f"No se pudo armar el bundle: {e}")
+        raise HTTPException(500, f"Could not build the bundle: {e}")
 
     with open(ruta, "rb") as f:
         contenido = f.read()
@@ -2028,18 +2079,18 @@ async def compare_rounds_endpoint(body: CompareRoundsBody, user=Depends(get_curr
         rondas = _client_jobs_ordered(body.client_id)
         if len(rondas) < 2:
             raise HTTPException(
-                400, "Hacen falta dos reportes del mismo cliente para comparar. "
-                     f"Este tiene {len(rondas)}."
+                400, "Two reports from the same client are needed to compare. "
+                     f"This one has {len(rondas)}."
             )
         job_a, job_b = rondas[-2], rondas[-1]
     else:
         raise HTTPException(
-            400, "Pasa job_id_anterior + job_id_actual, o client_id para "
-                 "comparar las dos ultimas rondas."
+            400, "Pass job_id_anterior + job_id_actual, or client_id to compare "
+                 "the two most recent rounds."
         )
 
     if job_a.get("job_id") == job_b.get("job_id"):
-        raise HTTPException(400, "Las dos rondas son el mismo reporte.")
+        raise HTTPException(400, "Both rounds are the same report.")
 
     # El orden lo decide la fecha del REPORTE, no la de subida. Si vienen al
     # reves se dan vuelta solos: comparar al reves publica retrocesos falsos.
@@ -2389,6 +2440,7 @@ class IdentityTheftScanBody(BaseModel):
 
 @app.post("/identity-theft/scan")
 async def identity_theft_scan(body: IdentityTheftScanBody, user=Depends(get_current_user)):
+    _requiere_plan_pago(user, "Identity theft")
     from original_parser import detect_potential_identity_theft_indicators
 
     job = _get_job_or_404(user, body.job_id)
@@ -2442,6 +2494,7 @@ _ALERTAS_SOPORTADAS = ("initial", "extended")
 
 @app.post("/identity-theft/letters")
 async def identity_theft_letters(body: IdentityTheftLettersBody, user=Depends(get_current_user)):
+    _requiere_plan_pago(user, "Identity theft")
     from original_parser import (
         build_identity_theft_block_letter, build_fraud_alert_letter,
         build_identity_theft_action_guide, validate_eoscar_compliance,
@@ -2454,7 +2507,7 @@ async def identity_theft_letters(body: IdentityTheftLettersBody, user=Depends(ge
     cuentas = [a for a in (body.fraudulent_accounts or []) if isinstance(a, dict)]
 
     if ("block" in incluir or "fraud_alert" in incluir) and not consumer_name:
-        raise HTTPException(400, "Falta consumer_name.")
+        raise HTTPException(400, "Missing consumer_name.")
 
     # 1681c-2(a) exige un Identity Theft Report para pedir el bloqueo. Sin
     # ese numero la carta sale con el placeholder literal
@@ -2462,29 +2515,29 @@ async def identity_theft_letters(body: IdentityTheftLettersBody, user=Depends(ge
     # asi que se corta acá en vez de mandar algo que no sirve.
     if "block" in incluir:
         if not cuentas:
-            raise HTTPException(400, "Para el bloqueo hay que indicar que cuentas son fraudulentas.")
+            raise HTTPException(400, "To request a block you must list which accounts are fraudulent.")
         if not (body.ftc_report_number or "").strip():
             raise HTTPException(
                 400,
-                "El bloqueo del 1681c-2 exige un Identity Theft Report. Saca el "
-                "numero en IdentityTheft.gov y pasalo en ftc_report_number. Sin "
-                "eso el buro no esta obligado a bloquear y la carta se rechaza."
+                "A 1681c-2 block requires an Identity Theft Report. Get the number at "
+                "IdentityTheft.gov and pass it in ftc_report_number. Without it "
+                "the bureau is not required to block and the letter is rejected."
             )
 
     tipo_alerta = (body.fraud_alert_type or "initial").strip().lower()
     if "fraud_alert" in incluir and tipo_alerta not in _ALERTAS_SOPORTADAS:
         raise HTTPException(
             400,
-            f"fraud_alert_type solo puede ser 'initial' o 'extended'. "
-            f"'{tipo_alerta}' no esta soportado: el generador citaria "
-            f"1681c-1(a) igual, que es el estatuto equivocado. La alerta de "
-            f"servicio activo (1681c-1(c)) todavia no esta implementada."
+            f"fraud_alert_type can only be 'initial' or 'extended'. "
+            f"'{tipo_alerta}' is not supported: the generator would still cite "
+            f"1681c-1(a), which is the wrong statute. The active duty alert "
+            f"(1681c-1(c)) is not implemented yet."
         )
     if tipo_alerta == "extended" and not (body.ftc_report_number or "").strip():
         raise HTTPException(
             400,
-            "La alerta extendida (7 anos, 1681c-1(b)) exige el Identity Theft "
-            "Report de la FTC. Para 1 ano usa fraud_alert_type='initial'."
+            "The extended alert (7 years, 1681c-1(b)) requires the FTC Identity "
+            "Theft Report. For 1 year use fraud_alert_type='initial'."
         )
 
     bureaus = [b for b in (body.bureaus or ["transunion", "experian", "equifax"])
@@ -2788,9 +2841,9 @@ def _procesar_respuesta_de_buro(body: "BureauResponseBody", user: dict) -> dict:
 
     bureau = _normalizar_bureau(body.bureau)
     if not bureau:
-        raise HTTPException(400, "bureau debe ser transunion, experian o equifax")
+        raise HTTPException(400, "bureau must be transunion, experian or equifax")
     if not (body.response_text or "").strip():
-        raise HTTPException(400, "response_text viene vacío")
+        raise HTTPException(400, "response_text is empty")
 
     consumer_name = body.consumer_name or job.get("consumer_name") or ""
     report_date   = job.get("report_date", "")
@@ -3002,16 +3055,16 @@ async def bureau_no_response(body: BureauNoResponseBody, user=Depends(get_curren
     job = _get_job_or_404(user, body.job_id)
     bureau = _normalizar_bureau(body.bureau)
     if not bureau:
-        raise HTTPException(400, "bureau debe ser transunion, experian o equifax")
+        raise HTTPException(400, "bureau must be transunion, experian or equifax")
 
     dispute_date = (body.dispute_date or "").strip() or _fecha_de_entrega(body.job_id, bureau)
     if not dispute_date:
         raise HTTPException(
             400,
-            "No hay fecha de entrega para ese buro. El plazo del 1681i corre "
-            "desde que el buro RECIBE, asi que sin esa fecha no se puede "
-            "afirmar que vencio. Carga return_receipt_date en el recibo o "
-            "pasa dispute_date."
+            "No delivery date for that bureau. The 1681i clock starts when the "
+            "bureau RECEIVES the dispute, so without that date we cannot "
+            "claim it expired. Set return_receipt_date on the receipt or "
+            "pass dispute_date."
         )
 
     hoy = datetime.now(timezone.utc).date().isoformat()
@@ -3047,9 +3100,8 @@ async def bureau_no_response(body: BureauNoResponseBody, user=Depends(get_curren
     if not cuentas:
         raise HTTPException(
             400,
-            "No hay cuentas disputadas registradas para ese buro en este job, "
-            "asi que no se sabe que items reclamar. Genera primero las cartas "
-            "de disputa."
+            "No disputed accounts recorded for that bureau on this job, so there "
+            "is nothing to claim. Generate the dispute letters first."
         )
 
     consumer_name = body.consumer_name or job.get("consumer_name") or ""
@@ -3148,15 +3200,15 @@ async def bureau_response_pdf(
         with pdfplumber.open(ruta) as pdf:
             texto = "\n".join((p.extract_text() or "") for p in pdf.pages)
     except Exception as e:
-        raise HTTPException(400, f"No se pudo leer el PDF de la respuesta: {e}")
+        raise HTTPException(400, f"Could not read the response PDF: {e}")
     finally:
         try:
             os.remove(ruta)
         except OSError:
             pass
     if not texto.strip():
-        raise HTTPException(400, "El PDF no tiene texto extraible. "
-                                 "Si es un escaneo, pegá el texto a mano.")
+        raise HTTPException(400, "The PDF has no extractable text. "
+                                 "If it is a scan, paste the text manually.")
     return _procesar_respuesta_de_buro(BureauResponseBody(
         job_id=job_id, bureau=bureau, response_text=texto,
         response_date=response_date, dispute_date=dispute_date,
@@ -3216,9 +3268,9 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
     # fallback a la cuenta global). Se valida ANTES de crear/despachar nada.
     pu, pp, penv = _agency_postalocity_creds(user["id"])
     if not pu:
-        raise HTTPException(400, "Conecta tu cuenta de Postalocity antes de enviar "
-                                 "(Ajustes → Postalocity). Cada envío sale desde tu "
-                                 "propia cuenta.")
+        raise HTTPException(400, "Connect your Postalocity account before sending "
+                                 "(Settings, Postalocity). Every mailing goes out "
+                                 "from your own account.")
 
     # Nombre del job en Postalocity: usar el que manda el frontend (mismo que el
     # nombre del PDF al descargarlo). Si no viene, se arma uno con cliente+buró+ronda.
@@ -3538,6 +3590,7 @@ def _client_jobs_ordered(client_id: str) -> list:
 
 @app.get("/cir/{job_id}")
 async def get_cir(job_id: str, user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "CIR")
     job = _get_job_or_404(user, job_id)
     # infer round number from the client's job order (1 = first report)
     round_num = 1
@@ -3553,6 +3606,7 @@ async def get_cir(job_id: str, user=Depends(get_current_user)):
 
 @app.get("/progress/{client_id}")
 async def get_progress(client_id: str, user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "Progress report")
     _get_client_or_404(user, client_id)
     jobs = _client_jobs_ordered(client_id)
     if len(jobs) < 2:
@@ -3675,6 +3729,7 @@ def build_cir_summary_pdf(cir: dict) -> bytes:
 
 @app.get("/cir/{job_id}/pdf")
 async def get_cir_pdf(job_id: str, user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "CIR")
     job = _get_job_or_404(user, job_id)
     round_num = 1
     cid = job.get("client_id")
@@ -3743,7 +3798,7 @@ def _fernet():
     from cryptography.fernet import Fernet
     key = os.environ.get("POSTALOCITY_ENC_KEY", "")
     if not key:
-        raise HTTPException(500, "POSTALOCITY_ENC_KEY no está configurada en el servidor.")
+        raise HTTPException(500, "POSTALOCITY_ENC_KEY is not configured on the server.")
     return Fernet(key.encode())
 
 def _enc_secret(text: str) -> str:
@@ -3779,7 +3834,7 @@ async def postalocity_connect(body: PostalocityConnectBody, user=Depends(get_cur
         env = "prod"
     check = verify_credentials(body.postalocity_user, body.postalocity_pass, env)
     if not check.get("ok"):
-        raise HTTPException(400, f"No pude validar la cuenta de Postalocity: {check.get('message')}")
+        raise HTTPException(400, f"Could not validate the Postalocity account: {check.get('message')}")
     now = datetime.now(timezone.utc).isoformat()
     data = {
         "user_id": user["id"],
@@ -3917,7 +3972,7 @@ async def postalocity_sync_status(user=Depends(get_current_user)):
     """Botón 'Actualizar estado': consulta AHORA las cartas de esta agencia."""
     pu, pp, penv = _agency_postalocity_creds(user["id"])
     if not pu:
-        raise HTTPException(400, "Conecta tu cuenta de Postalocity para actualizar estados.")
+        raise HTTPException(400, "Connect your Postalocity account to sync statuses.")
     summary = _sync_receipts_for_agency(user["id"], pu, pp, penv)
     return {"ok": True, **summary}
 
@@ -3931,7 +3986,7 @@ async def postalocity_sync_all(key: str = ""):
     try:
         agencies = (sb.table("api_postalocity_accounts").select("*").execute()).data or []
     except Exception as e:
-        raise HTTPException(500, f"No pude leer las cuentas de Postalocity: {e}")
+        raise HTTPException(500, f"Could not read the Postalocity accounts: {e}")
     total = {"agencies": 0, "checked": 0, "updated": 0, "sent": 0,
              "errors": 0, "not_found": 0}
     for a in agencies:
@@ -4014,6 +4069,7 @@ def _reminders_query(operator_id, client_id=None):
 @app.get("/reminders")
 async def list_reminders(user=Depends(get_current_user)):
     """Recordatorios automáticos de TODOS los clientes de la agencia."""
+    _requiere_lectura_historico(user, "Reminders")
     try:
         return _reminders_query(user["id"])
     except Exception:
@@ -4022,6 +4078,7 @@ async def list_reminders(user=Depends(get_current_user)):
 @app.get("/clients/{client_id}/reminders")
 async def list_client_reminders(client_id: str, user=Depends(get_current_user)):
     """Recordatorios automáticos de un cliente."""
+    _requiere_lectura_historico(user, "Reminders")
     try:
         return _reminders_query(user["id"], client_id)
     except Exception:
@@ -4049,9 +4106,27 @@ STRIPE_API = "https://api.stripe.com/v1"
 # /compare-rounds son todas round_2. El ciclo del 1681i esta hecho para
 # tener respuesta; la ronda 2 no es un extra, es donde esta el argumento
 # fuerte.
+# Tres planes. Los dos personales se miden DE POR VIDA, Pro se mide sin
+# limite.
+#
+#   max_clients  cuantos clientes puede tener
+#   max_jobs     cuantos reportes puede analizar en total (None = sin tope)
+#   rounds       None = todas las rondas
+#   paid         False = no puede generar, despachar ni subir nada nuevo
+#   borrar_clientes_con_reportes
+#                si puede borrar un cliente que YA tiene reportes. En Free
+#                y Basica va en False a proposito: si pudieran borrar y
+#                recrear, tendrian un Pro en cuotas, procesando un cliente
+#                por vez sin pagarlo. Borrar un cliente VACIO si se
+#                permite siempre, para que nadie quede trabado por un error
+#                de tipeo el primer dia.
 PLAN_LIMITS = {
-    "basic": {"max_clients": 1,    "rounds": None},   # None = todas las rondas
-    "pro":   {"max_clients": None, "rounds": None},   # None = ilimitado
+    "free":  {"max_clients": 1,    "max_jobs": 1,    "rounds": None,
+              "paid": False, "borrar_clientes_con_reportes": False},
+    "basic": {"max_clients": 1,    "max_jobs": None, "rounds": None,
+              "paid": True,  "borrar_clientes_con_reportes": False},
+    "pro":   {"max_clients": None, "max_jobs": None, "rounds": None,
+              "paid": True,  "borrar_clientes_con_reportes": True},
 }
 # Basica es SOLO MENSUAL, por decision del operador. No existe Price anual
 # de Basica y el checkout lo fuerza a mensual mas abajo.
@@ -4091,43 +4166,279 @@ def _user_plan(user_id):
     except Exception:
         return None
 
-def _active_plan_or_402(user) -> str:
-    """Devuelve 'basic'|'pro'. Si el cobro no está activado o es admin, todo = 'pro'.
-    Si el cobro está activo y no hay plan, corta con 402."""
+def _tuvo_plan_alguna_vez(user_id) -> bool:
+    """
+    True si el usuario tuvo suscripción en algún momento, aunque hoy esté
+    vencida o cancelada.
+
+    Sirve para distinguir dos situaciones que NO son lo mismo:
+      - el que nunca pagó: ve el resumen de su reporte de prueba y nada mas
+      - el que pagó y se dio de baja: además puede SEGUIR VIENDO lo que ya
+        produjo (cartas, recibos, CIR, historial). Bloquearle lo que ya
+        pagó no lo hace volver, lo hace reclamar.
+    En los dos casos generar, despachar o subir algo nuevo requiere plan.
+    """
+    try:
+        r = (sb.table("api_subscriptions").select("user_id")
+             .eq("user_id", user_id).limit(1).execute())
+        return bool(r.data)
+    except Exception:
+        return False
+
+
+def _plan_actual(user) -> str:
+    """
+    Devuelve 'free' | 'basic' | 'pro'. NUNCA corta.
+
+    Si el cobro no está activado o es admin, todo = 'pro'. OJO: mientras
+    BILLING_ENFORCED esté apagada el modo Free no existe, porque todos
+    entran como pro.
+    """
     if not _billing_enforced() or _is_billing_admin(user):
         return "pro"
     row = _user_plan(user["id"])
     if not row:
-        raise HTTPException(402, "Elige un plan para continuar (Suscripción).")
-    return (row.get("plan") or "basic").lower()
+        return "free"
+    plan = (row.get("plan") or "free").lower()
+    return plan if plan in PLAN_LIMITS else "free"
+
+
+def _limites(plan: str) -> dict:
+    return PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+
+
+def _active_plan_or_402(user) -> str:
+    """Compatibilidad: devuelve el plan y corta si es free."""
+    plan = _plan_actual(user)
+    if not _limites(plan)["paid"]:
+        raise HTTPException(402, _MENSAJE_SUSCRIBITE)
+    return plan
+
+
+_MENSAJE_SUSCRIBITE = (
+    "This feature requires an active subscription. The free plan lets you "
+    "analyze one report and see the summary of findings."
+)
+
+
+def _requiere_plan_pago(user, que: str = "") -> str:
+    """Corta con 402 si el usuario no tiene plan pago. Devuelve el plan."""
+    plan = _plan_actual(user)
+    if not _limites(plan)["paid"]:
+        detalle = f"{que}: {_MENSAJE_SUSCRIBITE}" if que else _MENSAJE_SUSCRIBITE
+        raise HTTPException(402, detalle)
+    return plan
+
+
+def _puede_leer_historico(user) -> bool:
+    """Plan pago, o alguien que pagó antes y quedó en solo lectura."""
+    plan = _plan_actual(user)
+    if _limites(plan)["paid"]:
+        return True
+    return _tuvo_plan_alguna_vez(user["id"])
+
+
+def _requiere_lectura_historico(user, que: str = ""):
+    if not _puede_leer_historico(user):
+        detalle = f"{que}: {_MENSAJE_SUSCRIBITE}" if que else _MENSAJE_SUSCRIBITE
+        raise HTTPException(402, detalle)
+
+
+def _contar_clientes(user_id) -> int:
+    try:
+        c = (sb.table("api_clients").select("id", count="exact")
+             .eq("operator_id", user_id).execute())
+        return c.count if getattr(c, "count", None) is not None else len(c.data or [])
+    except Exception:
+        return 0
+
+
+def _contar_jobs(user_id) -> int:
+    """
+    Reportes analizados por este usuario, de por vida.
+
+    Se cuenta por operator_id y no por cliente: asi el numero no se
+    reinicia aunque un cliente desaparezca. Es lo que sostiene el limite
+    del plan gratuito.
+    """
+    try:
+        c = (sb.table("api_jobs").select("job_id", count="exact")
+             .eq("operator_id", user_id).execute())
+        return c.count if getattr(c, "count", None) is not None else len(c.data or [])
+    except Exception:
+        return 0
+
 
 def _enforce_can_add_client(user):
-    plan = _active_plan_or_402(user)
-    lim = PLAN_LIMITS.get(plan, PLAN_LIMITS["basic"])["max_clients"]
+    plan = _plan_actual(user)
+    lim = _limites(plan)["max_clients"]
     if lim is None:
         return
-    try:
-        cnt = (sb.table("api_clients").select("id", count="exact")
-               .eq("operator_id", user["id"]).execute())
-        n = cnt.count if getattr(cnt, "count", None) is not None else len(cnt.data or [])
-    except Exception:
-        n = 0
+    n = _contar_clientes(user["id"])
     if n >= lim:
-        raise HTTPException(402, f"El plan Básico permite {lim} cliente. "
-                                 "Sube a Pro para agregar más.")
+        if plan == "free":
+            raise HTTPException(
+                402,
+                "The free plan includes one test client. "
+                "Subscribe to work with more.")
+        raise HTTPException(
+            402,
+            f"The Basic plan includes {lim} client, meant for your own credit. "
+            f"Upgrade to Pro for unlimited clients.")
+
+
+def _enforce_can_upload(user):
+    """
+    Limite de reportes. Solo el plan gratuito lo tiene: un reporte, para
+    que vea el analisis. Basica y Pro suben los que quieran, porque cada
+    ronda nueva necesita un reporte nuevo para comparar.
+    """
+    plan = _plan_actual(user)
+    lim = _limites(plan)["max_jobs"]
+    if lim is None:
+        return
+    n = _contar_jobs(user["id"])
+    if n >= lim:
+        raise HTTPException(
+            402,
+            "The free plan includes one report analysis, and you already used "
+            "it. Subscribe to upload more and generate letters.")
+
 
 def _enforce_round(user, rnd):
-    plan = _active_plan_or_402(user)
-    allowed = PLAN_LIMITS.get(plan, PLAN_LIMITS["basic"])["rounds"]
+    plan = _requiere_plan_pago(user)
+    allowed = _limites(plan)["rounds"]
     if allowed is not None and (rnd or "round_1") not in allowed:
-        raise HTTPException(402, "El plan Básico solo permite Round 1. "
-                                 "Sube a Pro para Round 2 y 3.")
+        raise HTTPException(402, "Your plan does not include that round.")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  RECORTE DEL ANALISIS PARA EL PLAN GRATUITO
+#
+#  Esconder pestañas en el frontend no alcanza: hoy /upload-report y
+#  /jobs/{id} devuelven TODO en el JSON -- el attack_type de cada cuenta,
+#  la base legal, el letter_input_engine y el inventario completo. Con la
+#  consola del navegador abierta, un usuario gratuito (o un competidor que
+#  se registre) se lleva el motor entero.
+#
+#  Por eso el recorte va acá, en la respuesta. El plan gratuito recibe
+#  exactamente lo que se ve en la pantalla de Analysis Results y ni un
+#  campo mas:
+#      puntajes por buro · cuantos negativos tiene cada uno ·
+#      acreedor, tipo, buro y gravedad de cada hallazgo
+#
+#  Lo que NO viaja: attack_type, la narrativa legal, letter_input_engine,
+#  inventory_by_bureau, personal_info y las cuentas completas.
+# ═══════════════════════════════════════════════════════════════
+
+_ORDEN_SEVERIDAD = {"critical": 3, "high": 2, "medium": 1, "low": 0}
+
+
+def _enmascarar(acct: str) -> str:
+    """Asteriscos a X, igual que en las cartas. Sin depender del parser."""
+    return str(acct or "").replace("*", "X")
+
+
+def _resumen_libre(negativos: dict, ataques: list) -> tuple:
+    """
+    Arma la lista de hallazgos visible en el plan gratuito y el conteo de
+    negativos por buro.
+
+    Una fila por cuenta negativa y por buro, con la gravedad mas alta que
+    esa cuenta haya sacado. El texto descriptivo sale de los comentarios
+    del propio reporte, NO de la narrativa del motor.
+    """
+    detalle: dict = {}
+    conteo: dict = {}
+
+    for bureau, cuentas in (negativos or {}).items():
+        cuentas = cuentas or []
+        conteo[bureau] = len(cuentas)
+        for acc in cuentas:
+            if not isinstance(acc, dict):
+                continue
+            clave = (bureau, str(acc.get("account_number", "")), str(acc.get("name", "")))
+            detalle[clave] = {
+                "account_name":   acc.get("name", ""),
+                "account_number": _enmascarar(acc.get("account_number", "")),
+                "negative_type":  acc.get("negative_type", ""),
+                "bureau":         bureau,
+                "severity":       "low",
+                "reason":         (acc.get("comments", "") or "").strip(),
+            }
+
+    # La gravedad si viene del motor: es un dato del hallazgo, no la receta
+    # para atacarlo.
+    for atk in (ataques or []):
+        if not isinstance(atk, dict):
+            continue
+        clave = (atk.get("bureau", ""), str(atk.get("account_number", "")),
+                 str(atk.get("account_name", "")))
+        fila = detalle.get(clave)
+        if fila is None:
+            continue
+        nueva = str(atk.get("severity", "low")).lower()
+        if _ORDEN_SEVERIDAD.get(nueva, 0) > _ORDEN_SEVERIDAD.get(fila["severity"], 0):
+            fila["severity"] = nueva
+
+    filas = sorted(detalle.values(),
+                   key=lambda f: (-_ORDEN_SEVERIDAD.get(f["severity"], 0),
+                                  f["bureau"], f["account_name"]))
+    return filas, conteo
+
+
+_AVISO_FREE = ("You are seeing the free plan summary. Dispute letters, the "
+               "per-bureau detail and round tracking unlock with a "
+               "subscription.")
+
+
+def _recortar_upload_para_free(payload: dict) -> dict:
+    """Recorta la respuesta de /upload-report."""
+    filas, conteo = _resumen_libre(payload.get("negatives_by_bureau") or {},
+                                   payload.get("attacks") or [])
+    return {
+        "job_id":        payload.get("job_id"),
+        "consumer_name": payload.get("consumer_name", ""),
+        "report_date":   payload.get("report_date", ""),
+        "source":        payload.get("source", ""),
+        "scores":        payload.get("scores", {}),
+        "negatives_by_bureau": conteo,
+        "attack_count":  len(filas),
+        "attacks":       filas,
+        "plan":          "free",
+        "locked":        True,
+        "upgrade_message": _AVISO_FREE,
+    }
+
+
+def _recortar_job_para_free(job: dict) -> dict:
+    """Recorta la fila de /jobs/{job_id}."""
+    filas, conteo = _resumen_libre(job.get("negatives_by_bureau") or {},
+                                   job.get("attacks") or [])
+    return {
+        "job_id":        job.get("job_id"),
+        "client_id":     job.get("client_id"),
+        "consumer_name": job.get("consumer_name", ""),
+        "report_date":   job.get("report_date", ""),
+        "source":        job.get("source", ""),
+        "created_at":    job.get("created_at"),
+        "status":        job.get("status"),
+        "scores":        job.get("scores", {}),
+        "negatives_by_bureau": conteo,
+        "attack_count":  len(filas),
+        "attacks":       filas,
+        "letters_generated": False,
+        "letter_files":  [],
+        "plan":          "free",
+        "locked":        True,
+        "upgrade_message": _AVISO_FREE,
+    }
 
 # ── Stripe REST (httpx, form-encoded) ──────────────────────────
 def _stripe_key():
     k = os.environ.get("STRIPE_SECRET_KEY", "")
     if not k:
-        raise HTTPException(500, "STRIPE_SECRET_KEY no está configurada en el servidor.")
+        raise HTTPException(500, "STRIPE_SECRET_KEY is not configured on the server.")
     return k
 
 def _stripe_post(path, data):
@@ -4148,7 +4459,7 @@ def _price_id(plan, cycle):
     env = PRICE_ENV.get((plan, cycle))
     pid = os.environ.get(env, "") if env else ""
     if not pid:
-        raise HTTPException(400, f"Plan/ciclo no disponible: {plan}/{cycle}")
+        raise HTTPException(400, f"Plan/cycle not available: {plan}/{cycle}")
     return pid
 
 def _plan_from_price(price_id):
@@ -4302,45 +4613,107 @@ def _subscription_url():
 async def billing_plans():
     """Catálogo de planes para pintar la pantalla de precios."""
     return {"currency": "usd", "plans": [
-        {"id": "basic", "name": "Básica",
-         "monthly": PLAN_PRICING["basic"]["monthly"],
-         "annual":  None,               # Básica no se vende por año
+        {"id": "free", "name": "Free", "monthly": 0, "annual": None,
          "annual_discount_pct": None,
-         "tagline": "Tu propio crédito, el proceso completo",
+         "tagline": "See what is wrong on your report",
+         "cta": "Start free",
          "features": [
-             "1 cliente",
-             "Las 3 rondas de disputa, de punta a punta",
-             "Análisis del reporte con 61 tipos de ataque FCRA",
-             "Análisis cross-bureau: detecta lo que un solo buró no muestra",
-             "Respuesta del buró: verificado, frívola, sin respuesta",
-             "Comparación entre rondas con detección de reinserción",
-             "Cada carta validada contra e-OSCAR antes de salir",
-             "Correo certificado USPS con tracking",
-             "Recordatorios automáticos de 30 días",
+             "1 test client",
+             "Analysis of 1 credit report",
+             "Findings summary: scores, negatives per bureau and severity",
+             "No credit card required",
+         ],
+         "not_included": [
+             "Dispute letter generation",
+             "Per-bureau detail and summary validation",
+             "Round tracking and bureau responses",
+             "Certified mail and progress reports",
+         ]},
+        {"id": "basic", "name": "Basic",
+         "monthly": PLAN_PRICING["basic"]["monthly"],
+         "annual":  None,               # Basic is monthly only
+         "annual_discount_pct": None,
+         "tagline": "Your own credit, the full process",
+         "cta": "Get Basic",
+         "features": [
+             "1 client",
+             "All 3 dispute rounds, end to end",
+             "Report analysis across 55+ FCRA attack types",
+             "Cross-bureau analysis: catches what one bureau alone hides",
+             "Bureau responses: verified, frivolous, no response",
+             "Round comparison with reinsertion detection",
+             "Every letter validated against e-OSCAR before it goes out",
+             "USPS certified mail with tracking",
+             "Automatic 30-day reminders",
+         ],
+         "not_included": [
+             "More than one client",
+             "Identity theft block letters",
+             "Branded PDF bundle",
          ]},
         {"id": "pro", "name": "Pro",
          "monthly": PLAN_PRICING["pro"]["monthly"],
          "annual":  PLAN_PRICING["pro"]["annual"],
          "annual_discount_pct": 17,
-         "tagline": "Clientes ilimitados, sin techo",
+         "tagline": "Unlimited clients, no ceiling",
+         "cta": "Get Pro",
          "features": [
-             "Clientes ilimitados, sin tope de 300 ni de 600",
-             "Todo lo de Básica, para toda tu cartera",
-             "Cartas a burós y a acreedores directamente",
-             "Bloqueo por robo de identidad (15 USC 1681c-2)",
-             "Cartas de consultas no autorizadas (1681b)",
-             "Bundle PDF con tu membrete, listo para imprimir y mandar",
-             "Reportes de progreso (CIR) y panel de cumplimiento",
-             "Soporte prioritario",
-         ]},
+             "Unlimited clients, no 300 or 600 cap",
+             "Everything in Basic, across your whole book",
+             "Letters to bureaus and directly to furnishers",
+             "Identity theft block letters (15 USC 1681c-2)",
+             "Unauthorized inquiry letters (1681b)",
+             "Branded PDF bundle, ready to print and mail",
+             "Progress reports (CIR) and compliance panel",
+             "Priority support",
+         ],
+         "not_included": []},
     ]}
 
 @app.get("/billing/status")
 async def billing_status(user=Depends(get_current_user)):
+    """
+    El frontend pinta los candados con lo que dice ACA, no adivinando.
+    Devuelve el plan efectivo, los limites, el uso y que puede hacer.
+    """
     row = _user_plan(user["id"])
-    base = {"enforced": _billing_enforced(), "is_admin": _is_billing_admin(user)}
+    plan = _plan_actual(user)
+    lim = _limites(plan)
+    pago = lim["paid"]
+    solo_lectura = (not pago) and _tuvo_plan_alguna_vez(user["id"])
+
+    usados_clientes = _contar_clientes(user["id"])
+    usados_jobs = _contar_jobs(user["id"])
+
+    base = {
+        "enforced": _billing_enforced(),
+        "is_admin": _is_billing_admin(user),
+        "plan_efectivo": plan,
+        "es_pago": pago,
+        "solo_lectura": solo_lectura,
+        "limites": {
+            "max_clients": lim["max_clients"],
+            "max_jobs": lim["max_jobs"],
+            "puede_borrar_clientes_con_reportes": lim["borrar_clientes_con_reportes"],
+        },
+        "uso": {"clientes": usados_clientes, "reportes": usados_jobs},
+        "puede": {
+            "agregar_cliente": lim["max_clients"] is None or usados_clientes < lim["max_clients"],
+            "subir_reporte":   lim["max_jobs"] is None or usados_jobs < lim["max_jobs"],
+            "generar_cartas":  pago,
+            "cir":             pago or solo_lectura,
+            "progress":        pago or solo_lectura,
+            "compliance_log":  pago or solo_lectura,
+            "certified_mail":  pago or solo_lectura,
+            "ver_cartas":      pago or solo_lectura,
+            "bundle_pdf":      pago,
+            "identity_theft":  pago,
+            "detalle_analisis": pago or solo_lectura,
+        },
+        "mensaje": (_AVISO_FREE if not pago else ""),
+    }
     if not row:
-        return {"plan": None, "status": "none", **base}
+        return {"plan": None, "status": ("expired" if solo_lectura else "none"), **base}
     return {"plan": row.get("plan"), "cycle": row.get("billing_cycle"),
             "status": row.get("status"),
             "current_period_end": row.get("current_period_end"),
@@ -4355,9 +4728,9 @@ async def billing_checkout(body: CheckoutBody, user=Depends(get_current_user)):
     plan = (body.plan or "").lower()
     cycle = (body.cycle or "monthly").lower()
     if plan not in ("basic", "pro"):
-        raise HTTPException(400, "Plan inválido.")
+        raise HTTPException(400, "Invalid plan.")
     if cycle not in ("monthly", "annual"):
-        raise HTTPException(400, "El ciclo debe ser monthly o annual.")
+        raise HTTPException(400, "Billing cycle must be monthly or annual.")
     if plan == "basic":
         cycle = "monthly"                  # Básica solo mensual
     price = _price_id(plan, cycle)
@@ -4395,7 +4768,7 @@ async def billing_portal(user=Depends(get_current_user)):
     r = sb.table("api_subscriptions").select("*").eq("user_id", user["id"]).execute()
     sub = r.data[0] if r.data else None
     if not sub or not sub.get("stripe_customer_id"):
-        raise HTTPException(400, "No hay una suscripción para gestionar.")
+        raise HTTPException(400, "There is no subscription to manage.")
     session = _stripe_post("/billing_portal/sessions",
                            {"customer": sub["stripe_customer_id"],
                             "return_url": _subscription_url()})
