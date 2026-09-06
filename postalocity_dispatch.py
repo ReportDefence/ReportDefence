@@ -134,6 +134,93 @@ def write_text_pdf(path, text, **kw):
     return path
 
 
+def merge_pdfs(paths, out_path):
+    """Une varios PDFs en uno solo, en el orden dado, y lo escribe en out_path.
+    La PRIMERA ruta debe ser la CARTA: así queda como página 1 y Postalocity
+    sigue leyendo la dirección del destinatario en el addressZone de esa página.
+    Los adjuntos (ID, prueba de dirección, etc.) van después.
+    Devuelve el número total de páginas del PDF combinado.
+    Requiere 'pypdf' (o PyPDF2) en el entorno."""
+    try:
+        from pypdf import PdfWriter, PdfReader
+    except Exception:
+        try:
+            from PyPDF2 import PdfWriter, PdfReader
+        except Exception:
+            raise RuntimeError(
+                "Falta la librería para unir PDFs. Agrega 'pypdf' a requirements.txt.")
+    writer = PdfWriter()
+    total = 0
+    for p in paths:
+        try:
+            reader = PdfReader(p)
+        except Exception as e:
+            raise RuntimeError(
+                f"No se pudo leer el PDF '{os.path.basename(p)}' (¿dañado o protegido "
+                f"con contraseña?): {e}")
+        for page in reader.pages:
+            writer.add_page(page)
+            total += 1
+    with open(out_path, "wb") as f:
+        writer.write(f)
+    return total
+
+
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp")
+
+def is_image_file(filename):
+    return (filename or "").lower().endswith(IMAGE_EXTS)
+
+def image_to_pdf(img_path, out_path, dpi=150, margin_pt=36):
+    """Convierte una imagen (ID, prueba de dirección tomada como foto, etc.) en un
+    PDF de una página tamaño CARTA (Letter), centrada y escalada para caber con
+    márgenes. Corrige la orientación EXIF (fotos de celular). Devuelve out_path.
+    Requiere Pillow."""
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        raise RuntimeError(
+            "Falta la librería 'Pillow' para convertir imágenes a PDF. "
+            "Agrégala a requirements.txt (Pillow).")
+    try:
+        im = Image.open(img_path)
+        im = ImageOps.exif_transpose(im)          # respeta la orientación de la foto
+        if im.mode in ("RGBA", "P", "LA"):
+            bg = Image.new("RGB", im.size, "white")
+            bg.paste(im, mask=im.split()[-1] if im.mode in ("RGBA", "LA") else None)
+            im = bg
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+    except Exception as e:
+        raise RuntimeError(
+            f"No se pudo abrir la imagen '{os.path.basename(img_path)}' "
+            f"(¿formato no soportado, p. ej. HEIC?): {e}")
+
+    page_w, page_h = int(8.5 * dpi), int(11 * dpi)   # carta en px a `dpi`
+    margin = int(margin_pt / 72.0 * dpi)
+    avail_w, avail_h = page_w - 2 * margin, page_h - 2 * margin
+    scale = min(avail_w / im.width, avail_h / im.height, 1.0)  # nunca agrandar
+    new_w, new_h = max(1, int(im.width * scale)), max(1, int(im.height * scale))
+    im = im.resize((new_w, new_h), Image.LANCZOS)
+
+    canvas = Image.new("RGB", (page_w, page_h), "white")
+    canvas.paste(im, ((page_w - new_w) // 2, (page_h - new_h) // 2))
+    canvas.save(out_path, "PDF", resolution=float(dpi))
+    return out_path
+
+def attachment_to_pdf(src_path, out_path, filename=None):
+    """Normaliza un adjunto a PDF: si ya es PDF lo deja igual (lo copia a out_path);
+    si es imagen la convierte a PDF tamaño carta. Devuelve la ruta del PDF resultante.
+    `filename` (nombre original) se usa para detectar el tipo si src_path no lo trae."""
+    name = filename or src_path
+    if is_image_file(name):
+        return image_to_pdf(src_path, out_path)
+    # asumir PDF: copiar tal cual
+    with open(src_path, "rb") as fin, open(out_path, "wb") as fout:
+        fout.write(fin.read())
+    return out_path
+
+
 # ----------------------------------------------------------------------------
 # Carta mailable para Postalocity: dirección del destinatario en la posición de
 # ventana (Helvetica + formato USPS => calidad Q1) + cuerpo debajo.
