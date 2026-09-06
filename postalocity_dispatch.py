@@ -148,7 +148,7 @@ def merge_pdfs(paths, out_path):
             from PyPDF2 import PdfWriter, PdfReader
         except Exception:
             raise RuntimeError(
-                "Falta la librería para unir PDFs. Agrega 'pypdf' a requirements.txt.")
+                "Missing library to merge PDFs. Add 'pypdf' to requirements.txt.")
     writer = PdfWriter()
     total = 0
     for p in paths:
@@ -156,8 +156,8 @@ def merge_pdfs(paths, out_path):
             reader = PdfReader(p)
         except Exception as e:
             raise RuntimeError(
-                f"No se pudo leer el PDF '{os.path.basename(p)}' (¿dañado o protegido "
-                f"con contraseña?): {e}")
+                f"Could not read PDF '{os.path.basename(p)}' (corrupted or "
+                f"password-protected?): {e}")
         for page in reader.pages:
             writer.add_page(page)
             total += 1
@@ -180,8 +180,8 @@ def image_to_pdf(img_path, out_path, dpi=150, margin_pt=36):
         from PIL import Image, ImageOps
     except Exception:
         raise RuntimeError(
-            "Falta la librería 'Pillow' para convertir imágenes a PDF. "
-            "Agrégala a requirements.txt (Pillow).")
+            "Missing 'Pillow' library to convert images to PDF. "
+            "Add it to requirements.txt (Pillow).")
     try:
         im = Image.open(img_path)
         im = ImageOps.exif_transpose(im)          # respeta la orientación de la foto
@@ -193,8 +193,8 @@ def image_to_pdf(img_path, out_path, dpi=150, margin_pt=36):
             im = im.convert("RGB")
     except Exception as e:
         raise RuntimeError(
-            f"No se pudo abrir la imagen '{os.path.basename(img_path)}' "
-            f"(¿formato no soportado, p. ej. HEIC?): {e}")
+            f"Could not open image '{os.path.basename(img_path)}' "
+            f"(unsupported format, e.g. HEIC?): {e}")
 
     page_w, page_h = int(8.5 * dpi), int(11 * dpi)   # carta en px a `dpi`
     margin = int(margin_pt / 72.0 * dpi)
@@ -386,17 +386,17 @@ class TokenManager:
 
     def _store(self, data: dict) -> str:
         if data.get("type") and data["type"] != "SUCCESS":
-            raise RuntimeError(f"Auth fallo: {data.get('message') or data}")
+            raise RuntimeError(f"Auth failed: {data.get('message') or data}")
         token = data.get("token")
         if not token:
-            raise RuntimeError(f"Respuesta sin token: {data}")
+            raise RuntimeError(f"Response without token: {data}")
         self._token, self._obtained_at = token, time.time()
         return token
 
     def _login(self) -> str:
         if not self.user or not self.password:
-            raise RuntimeError("Sin credenciales de Postalocity para esta agencia "
-                               "(conecta la cuenta en Ajustes).")
+            raise RuntimeError("No Postalocity credentials for this agency "
+                               "(connect the account in Settings).")
         r = httpx.post(f"{self.base}/user/login", headers=self._hdr(),
                           json={"userName": self.user,
                                 "password": self.password}, timeout=30)
