@@ -3301,7 +3301,7 @@ def _dispatch_core(user, body: "DispatchLetterBody", attachment_paths=None):
         try:
             merge_pdfs([pdf_path] + attachment_paths, merged_path)
         except Exception as e:
-            raise HTTPException(400, f"No se pudieron unir los archivos adjuntos: {e}")
+            raise HTTPException(400, f"Could not merge the attached files: {e}")
         send_path = merged_path
 
     # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
@@ -3418,7 +3418,7 @@ async def dispatch_letter_files(
     attach_paths = []
     incoming = [f for f in (files or []) if f and f.filename]
     if len(incoming) > 5:
-        raise HTTPException(400, "Máximo 5 archivos adjuntos por envío.")
+        raise HTTPException(400, "A maximum of 5 attachments per mailing is allowed.")
     for f in incoming:
         content = await f.read()
         fname = f.filename or ""
@@ -3426,10 +3426,10 @@ async def dispatch_letter_files(
         is_pdf = low.endswith(".pdf") or content[:5] == b"%PDF-"
         is_img = is_image_file(fname)
         if not (is_pdf or is_img):
-            raise HTTPException(400, f"El archivo '{fname}' no es válido. "
-                                     "Formatos aceptados: PDF, JPG, PNG.")
+            raise HTTPException(400, f"File '{fname}' is not valid. "
+                                     "Accepted formats: PDF, JPG, PNG.")
         if len(content) > 15 * 1024 * 1024:
-            raise HTTPException(400, f"El archivo '{fname}' supera 15 MB.")
+            raise HTTPException(400, f"File '{fname}' exceeds 15 MB.")
         uid = uuid.uuid4().hex[:8]
         if is_pdf:
             ap = os.path.join(UPLOAD_DIR, f"attach_{job_id}_{uid}.pdf")
@@ -3446,7 +3446,7 @@ async def dispatch_letter_files(
             try:
                 attachment_to_pdf(raw, ap, filename=fname)
             except Exception as e:
-                raise HTTPException(400, f"No se pudo convertir la imagen '{fname}' a PDF: {e}")
+                raise HTTPException(400, f"Could not convert image '{fname}' to PDF: {e}")
             attach_paths.append(ap)
     return _dispatch_core(user, body, attach_paths)
 
