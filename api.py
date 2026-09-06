@@ -3353,11 +3353,28 @@ def _dispatch_core(user, body: "DispatchLetterBody", attachment_paths=None):
         except Exception:
             receipt = None
 
+    # URL del job en el panel de Postalocity, para abrirla automáticamente y que
+    # el operador apruebe/pague ahí. Configurable por env:
+    #   POSTALOCITY_JOB_URL  -> plantilla con {id}, ej:
+    #        https://prod.postalocity.com/jobs/{id}
+    #   POSTALOCITY_DASHBOARD_URL -> fallback (abre el panel, el job sale arriba)
+    job_url = None
+    tmpl = os.environ.get("POSTALOCITY_JOB_URL", "").strip()
+    dash = os.environ.get("POSTALOCITY_DASHBOARD_URL", "").strip().rstrip("/")
+    if tmpl and pjob is not None:
+        job_url = tmpl.replace("{id}", str(pjob))
+    elif dash:
+        job_url = dash
+    else:
+        # default razonable según el ambiente de la agencia
+        job_url = "https://prod.postalocity.com" if (penv or "prod") == "prod" \
+                  else "https://dev.postalocity.com"
+
     # NOTA: llega hasta la cotización. La APROBACIÓN/PAGO es un paso manual
     # aparte (dashboard de Postalocity), NO se hace en este endpoint.
     return {"status": "quoted", "quote": result, "postalocity_job_id": pjob,
-            "receipt": receipt, "attachments": n_attachments, "note":
-            "Stopped at quote. Approve & pay manually in the Postalocity dashboard."}
+            "receipt": receipt, "attachments": n_attachments, "job_url": job_url,
+            "note": "Stopped at quote. Approve & pay manually in the Postalocity dashboard."}
 
 
 @app.post("/dispatch-letter")
