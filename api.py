@@ -3246,8 +3246,12 @@ def _letter_text_to_pdf(text: str, out_path: str) -> str:
     from postalocity_dispatch import write_text_pdf
     return write_text_pdf(out_path, text or "", size=11, margin=72, leading=15, wrap=95)
 
-@app.post("/dispatch-letter")
-async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_user)):
+def _dispatch_core(user, body: "DispatchLetterBody", attachment_paths=None):
+    """Lógica compartida de despacho a Postalocity. `attachment_paths` es una
+    lista opcional de rutas a PDFs adicionales (ID, prueba de dirección, etc.)
+    que se UNEN a la carta en un solo PDF (la carta primero) y viajan juntos en
+    el mismo sobre certificado."""
+    attachment_paths = attachment_paths or []
     _enforce_round(user, body.round)   # plan requerido; Básica = solo Round 1
     # 1) remitente = el cliente (dirección dinámica por job)
     cl = _get_client_or_404(user, body.client_id)
@@ -3261,7 +3265,7 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
     #    cuerpo) — NO se modifica. Fijamos el addressZone justo sobre el bloque del
     #    buró (coordenadas exactas medidas del render real) para que Postalocity lea
     #    el buró como destino, no el cliente. Render en Helvetica (nítido para OCR).
-    from postalocity_dispatch import Address, send_certified_letter, write_text_pdf
+    from postalocity_dispatch import Address, send_certified_letter, write_text_pdf, merge_pdfs
 
     # Credenciales de Postalocity de LA AGENCIA (multi-cuenta). OBLIGATORIO:
     # si la agencia NO conectó su propia cuenta, NO se permite enviar (sin
@@ -3281,8 +3285,24 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         parts = [cl.get("full_name", ""), body.recipient_name, body.round or ""]
         job_name = "_".join(_slug(p) for p in parts if p) or f"Letter_{body.job_id}"
 
+    # Render de la CARTA (siempre queda como página 1).
     pdf_path = os.path.join(UPLOAD_DIR, f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}.pdf")
     write_text_pdf(pdf_path, body.letter_text, font="Helvetica", size=11)
+
+    # 3b) Adjuntos: unir la carta + los PDFs extra en UN solo documento (carta de
+    #     primera). Todo viaja junto en el mismo envío certificado. Si la unión
+    #     falla, cortamos con un mensaje claro (no mandamos solo la carta en
+    #     silencio, para no perder los documentos que el cliente quiso incluir).
+    send_path = pdf_path
+    n_attachments = len(attachment_paths)
+    if attachment_paths:
+        merged_path = os.path.join(UPLOAD_DIR,
+                                   f"dispatch_{body.job_id}_{uuid.uuid4().hex[:8]}_merged.pdf")
+        try:
+            merge_pdfs([pdf_path] + attachment_paths, merged_path)
+        except Exception as e:
+            raise HTTPException(400, f"No se pudieron unir los archivos adjuntos: {e}")
+        send_path = merged_path
 
     # 4) despachar por Postalocity (se detiene en la cotización, no aprueba/paga)
     try:
@@ -3294,7 +3314,7 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
             cl.get("zip_code", ""),
         )
         # recipient=None: la dirección la lee Postalocity de la propia carta (addressZone).
-        result = send_certified_letter(pdf_path, sender=sender, recipient=None,
+        result = send_certified_letter(send_path, sender=sender, recipient=None,
                                        user=pu, password=pp, env=penv,
                                        job_name=job_name)
     except Exception as e:
@@ -3307,6 +3327,7 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
         job = sb.table("api_jobs").select("response_history").eq("job_id", body.job_id).execute()
         hist = (job.data[0].get("response_history") if job.data else []) or []
         hist.append({"type": "postalocity_dispatch", "recipient": body.recipient_name,
+                     "attachments": n_attachments,
                      "result": result if isinstance(result, dict) else str(result)})
         sb.table("api_jobs").update({"response_history": hist}).eq("job_id", body.job_id).execute()
     except Exception:
@@ -3335,8 +3356,82 @@ async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_use
     # NOTA: llega hasta la cotización. La APROBACIÓN/PAGO es un paso manual
     # aparte (dashboard de Postalocity), NO se hace en este endpoint.
     return {"status": "quoted", "quote": result, "postalocity_job_id": pjob,
-            "receipt": receipt, "note":
+            "receipt": receipt, "attachments": n_attachments, "note":
             "Stopped at quote. Approve & pay manually in the Postalocity dashboard."}
+
+
+@app.post("/dispatch-letter")
+async def dispatch_letter(body: DispatchLetterBody, user=Depends(get_current_user)):
+    # Envío SIN adjuntos (JSON). Mantiene el flujo original intacto.
+    return _dispatch_core(user, body, [])
+
+
+@app.post("/dispatch-letter-files")
+async def dispatch_letter_files(
+    job_id: str = Form(...),
+    letter_text: str = Form(...),
+    client_id: str = Form(...),
+    recipient_name: str = Form(...),
+    recipient_line1: str = Form(...),
+    recipient_city: str = Form(...),
+    recipient_state: str = Form(...),
+    recipient_zip: str = Form(...),
+    recipient_line2: str = Form(""),
+    recipient_type: Optional[str] = Form(None),
+    round: Optional[str] = Form(None),
+    letter_name: Optional[str] = Form(None),
+    save_receipt: bool = Form(True),
+    files: List[UploadFile] = File(default=[]),
+    user=Depends(get_current_user),
+):
+    """Igual que /dispatch-letter pero acepta PDFs adjuntos (multipart/form-data).
+    Los adjuntos (ID, prueba de dirección, etc.) se unen a la carta y viajan
+    juntos en el mismo sobre certificado."""
+    body = DispatchLetterBody(
+        job_id=job_id, letter_text=letter_text, client_id=client_id,
+        recipient_name=recipient_name, recipient_line1=recipient_line1,
+        recipient_line2=recipient_line2 or "", recipient_city=recipient_city,
+        recipient_state=recipient_state, recipient_zip=recipient_zip,
+        recipient_type=recipient_type, round=round, letter_name=letter_name,
+        save_receipt=True if save_receipt is None else save_receipt,
+    )
+    # Guardar y normalizar los adjuntos. Acepta PDF e imágenes (JPG/PNG/etc.);
+    # las imágenes se convierten a PDF tamaño carta. Máx 15 MB c/u, máx 5 archivos.
+    from postalocity_dispatch import is_image_file, attachment_to_pdf
+    attach_paths = []
+    incoming = [f for f in (files or []) if f and f.filename]
+    if len(incoming) > 5:
+        raise HTTPException(400, "Máximo 5 archivos adjuntos por envío.")
+    for f in incoming:
+        content = await f.read()
+        fname = f.filename or ""
+        low = fname.lower()
+        is_pdf = low.endswith(".pdf") or content[:5] == b"%PDF-"
+        is_img = is_image_file(fname)
+        if not (is_pdf or is_img):
+            raise HTTPException(400, f"El archivo '{fname}' no es válido. "
+                                     "Formatos aceptados: PDF, JPG, PNG.")
+        if len(content) > 15 * 1024 * 1024:
+            raise HTTPException(400, f"El archivo '{fname}' supera 15 MB.")
+        uid = uuid.uuid4().hex[:8]
+        if is_pdf:
+            ap = os.path.join(UPLOAD_DIR, f"attach_{job_id}_{uid}.pdf")
+            with open(ap, "wb") as out:
+                out.write(content)
+            attach_paths.append(ap)
+        else:
+            # guardar la imagen cruda y convertirla a PDF tamaño carta
+            ext = os.path.splitext(low)[1] or ".img"
+            raw = os.path.join(UPLOAD_DIR, f"attach_raw_{job_id}_{uid}{ext}")
+            with open(raw, "wb") as out:
+                out.write(content)
+            ap = os.path.join(UPLOAD_DIR, f"attach_{job_id}_{uid}.pdf")
+            try:
+                attachment_to_pdf(raw, ap, filename=fname)
+            except Exception as e:
+                raise HTTPException(400, f"No se pudo convertir la imagen '{fname}' a PDF: {e}")
+            attach_paths.append(ap)
+    return _dispatch_core(user, body, attach_paths)
 
 # ═══════════════════════════════════════════════════════════════
 #  CIR  +  PROGRESS  (pegar este bloque en api.py, ej. justo ANTES
