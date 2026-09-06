@@ -13,3 +13,5 @@ pdf2image
 pytesseract
 playwright
 httpx
+pypdf
+Pillow
