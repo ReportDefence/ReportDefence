@@ -3190,30 +3190,110 @@ async def bureau_response_pdf(
     round: str = Form("round_2"),
     user=Depends(get_current_user),
 ):
-    """Igual que /bureau-response pero subiendo el PDF que mandó el buró."""
+    """Igual que /bureau-response pero subiendo el PDF (o escaneo) que mandó el buró.
+    Si el PDF no trae texto (escaneo), se lee con OCR."""
     _enforce_round(user, round)
-    ruta = os.path.join(UPLOAD_DIR, f"bureau_response_{uuid.uuid4()}.pdf")
-    with open(ruta, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    content = await file.read()
     try:
-        import pdfplumber
-        with pdfplumber.open(ruta) as pdf:
-            texto = "\n".join((p.extract_text() or "") for p in pdf.pages)
+        texto, _src = _extract_text_from_upload(content, file.filename or "response.pdf")
     except Exception as e:
-        raise HTTPException(400, f"Could not read the response PDF: {e}")
-    finally:
-        try:
-            os.remove(ruta)
-        except OSError:
-            pass
+        raise HTTPException(400, f"Could not read the response file: {e}")
     if not texto.strip():
-        raise HTTPException(400, "The PDF has no extractable text. "
-                                 "If it is a scan, paste the text manually.")
+        raise HTTPException(400, "No text could be extracted. If it is a low-quality "
+                                 "scan, try a clearer photo or paste the text manually.")
     return _procesar_respuesta_de_buro(BureauResponseBody(
         job_id=job_id, bureau=bureau, response_text=texto,
         response_date=response_date, dispute_date=dispute_date,
         consumer_name=consumer_name or None, round=round,
     ), user)
+
+# ═══════════════════════════════════════════════════════════════
+#  LECTURA DE LA RESPUESTA DEL BURÓ (PDF con texto, PDF escaneado, o imagen)
+#  OCR con Tesseract en el propio servidor (privado). Devuelve el texto para
+#  que el operador lo REVISE antes de generar las cartas de Round 2/3.
+#  Deps: pytesseract + Pillow (+ pypdfium2 para escaneos). Sistema: tesseract-ocr.
+# ═══════════════════════════════════════════════════════════════
+
+_OCR_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp")
+
+def _ocr_image_bytes(raw: bytes) -> str:
+    import io as _io
+    import pytesseract
+    from PIL import Image, ImageOps
+    im = Image.open(_io.BytesIO(raw))
+    im = ImageOps.exif_transpose(im)          # foto de celular derecha
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+    return pytesseract.image_to_string(im)
+
+def _ocr_pdf_bytes(raw: bytes) -> str:
+    """Rasteriza el PDF con pypdfium2 (pura Python, sin poppler) y le pasa OCR."""
+    import pypdfium2 as pdfium
+    import pytesseract
+    parts = []
+    doc = pdfium.PdfDocument(raw)
+    try:
+        for i in range(len(doc)):
+            pil = doc[i].render(scale=2.5).to_pil()   # ~180 dpi
+            parts.append(pytesseract.image_to_string(pil))
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    return "\n".join(parts)
+
+def _extract_text_from_upload(raw: bytes, filename: str):
+    """Devuelve (texto, fuente). fuente ∈ {'pdf_text','ocr_pdf','ocr_image'}.
+    PDF con texto -> pdfplumber; PDF escaneado -> OCR; imagen -> OCR."""
+    low = (filename or "").lower()
+    is_pdf = low.endswith(".pdf") or raw[:5] == b"%PDF-"
+    if is_pdf:
+        text = ""
+        try:
+            import io as _io
+            import pdfplumber
+            with pdfplumber.open(_io.BytesIO(raw)) as pdf:
+                text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+        except Exception:
+            text = ""
+        if text.strip():
+            return text, "pdf_text"
+        return _ocr_pdf_bytes(raw), "ocr_pdf"     # escaneo -> OCR
+    return _ocr_image_bytes(raw), "ocr_image"      # imagen -> OCR
+
+@app.post("/extract-bureau-response-text")
+async def extract_bureau_response_text(
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    """Lee el texto de la respuesta del buró desde un PDF o imagen (con OCR si hace
+    falta) y lo DEVUELVE para que el operador lo revise. NO genera cartas: eso lo
+    hace luego /generate-letters con el texto revisado."""
+    _requiere_plan_pago(user)   # es parte del flujo de Round 2 (plan pago)
+    content = await file.read()
+    fname = file.filename or ""
+    low = fname.lower()
+    is_ok = (low.endswith(".pdf") or low.endswith(_OCR_IMAGE_EXTS)
+             or content[:5] == b"%PDF-")
+    if not is_ok:
+        raise HTTPException(400, "Unsupported file. Upload a PDF or an image (JPG, PNG).")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(400, "File exceeds 20 MB.")
+    try:
+        text, source = _extract_text_from_upload(content, fname)
+    except Exception as e:
+        msg = str(e)
+        if "tesseract" in msg.lower():
+            raise HTTPException(500, "OCR engine (tesseract) is not installed on the "
+                                     "server. Add the system package 'tesseract-ocr'.")
+        raise HTTPException(400, f"Could not read the file: {e}")
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "No text could be extracted from the file. If it is a "
+                                 "low-quality scan, try a clearer photo or paste the text "
+                                 "manually.")
+    return {"text": text, "source": source, "chars": len(text)}
 
 # ═══════════════════════════════════════════════════════════════
 #  TASK 2 — POSTALOCITY INTEGRATION (USPS Certified Mail)
