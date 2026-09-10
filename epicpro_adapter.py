@@ -74,22 +74,31 @@ def _find_anchors(pages):
 
 
 def _assign(row, anchors):
-    """Separa una fila en (etiqueta, {eq,ex,tu}) por posición X."""
+    """Separa una fila en (etiqueta, {eq,ex,tu}) por posición X.
+
+    Los VALORES están alineados a la IZQUIERDA bajo la cabecera de su columna y
+    pueden extenderse (o partirse) hacia la derecha, a veces pasando el punto
+    medio hacia la siguiente columna (ej. un número de cuenta enmascarado
+    'xxxxxxxxxxxxx 1001' cuyo '1001' cae cerca de la columna vecina). Por eso NO
+    se usa el punto medio: cada palabra se asigna a la ÚLTIMA cabecera cuya X sea
+    <= x0 (+ tolerancia). Así el límite de cada columna es la cabecera de la
+    SIGUIENTE columna, no el punto medio, y los valores multi-palabra/partidos se
+    quedan en su propia columna."""
     eq, ex, tu = anchors["equifax"], anchors["experian"], anchors["transunion"]
     lbl_bound = eq - 14
-    b1 = (eq + ex) / 2
-    b2 = (ex + tu) / 2
+    tol = 10
+    heads = (("equifax", eq), ("experian", ex), ("transunion", tu))
     label, cols = [], {b: [] for b in BUR}
     for w in sorted(row, key=lambda w: w["x0"]):
         x = w["x0"]
         if x < lbl_bound:
             label.append(w["text"])
-        elif x < b1:
-            cols["equifax"].append(w["text"])
-        elif x < b2:
-            cols["experian"].append(w["text"])
-        else:
-            cols["transunion"].append(w["text"])
+            continue
+        chosen = "equifax"
+        for b, hx in heads:
+            if hx <= x + tol:
+                chosen = b
+        cols[chosen].append(w["text"])
     return " ".join(label).strip(), {b: " ".join(cols[b]).strip() for b in BUR}
 
 
@@ -295,14 +304,14 @@ def _build_inventory(accounts):
     for idx, acc in enumerate(accounts):
         fields = acc["fields"]
         name = acc["creditor"] or "UNKNOWN"
-        remarks_all = " ".join(
-            _val(fields, "remarks", b) for b in BUR).strip()
         for b in BUR:
             acct_no = _val(fields, "account_number", b)
             status_code = _val(fields, "status_code", b)
             rating = _val(fields, "rating", b)
             pay_raw = _val(fields, "payment_status", b)
-            remarks = _val(fields, "remarks", b) or remarks_all
+            # SOLO el remark de ESTE buró — nunca mezclar entre burós, o un buró
+            # que no reporta la cuenta aparecería como fantasma con texto ajeno.
+            remarks = _val(fields, "remarks", b)
             portfolio = _val(fields, "portfolio_type", b) + " " + _val(fields, "account_type", b)
             condition = _val(fields, "condition", b)
             compliance = _val(fields, "compliance", b)
@@ -469,18 +478,21 @@ def _parse_accounts(pages, init_anchors):
     lang = None          # idioma de la sección actual ('es' | 'en')
     prev_text = ""       # línea anterior (posible header de cuenta)
     anchors = dict(init_anchors)
+    last_key = None      # último campo capturado (para continuación multi-línea)
 
     def flush():
-        nonlocal cur
+        nonlocal cur, last_key
         if cur and (cur["fields"] or cur.get("late")):
             accounts.append(cur)
         cur = None
+        last_key = None
 
     for p in pages:
         for row in _rows(p["words"]):
             ha = _header_anchors(row)
             if ha:                       # cabecera EQ/EX/TU -> recalibrar columnas
                 anchors = ha
+                last_key = None
                 continue
             label, vals = _assign(row, anchors)
             joined = " ".join(w["text"] for w in sorted(row, key=lambda w: w["x0"])).strip()
@@ -509,6 +521,7 @@ def _parse_accounts(pages, init_anchors):
                         break
                 cur = {"creditor": creditor, "polarity": polarity, "lang": lang,
                        "category": category, "fields": {}, "late": {}}
+                last_key = None
                 prev_text = joined
                 continue
 
@@ -516,11 +529,26 @@ def _parse_accounts(pages, init_anchors):
             ll = label.lower().strip().rstrip(":")
             if cur is not None:
                 key = _match_label(ll)
-                if key and key not in cur["fields"]:
-                    # solo guardar si hay algún valor
-                    if any(vals[b] and vals[b] != "--" for b in BUR):
-                        clean = {b: ("" if vals[b] in ("--", "-") else vals[b]) for b in BUR}
-                        cur["fields"][key] = clean
+                if key:
+                    if key not in cur["fields"]:
+                        # solo guardar si hay algún valor
+                        if any(vals[b] and vals[b] != "--" for b in BUR):
+                            clean = {b: ("" if vals[b] in ("--", "-") else vals[b]) for b in BUR}
+                            cur["fields"][key] = clean
+                    # abrir continuación multi-línea solo para Observaciones/Remarks
+                    last_key = "remarks" if key == "remarks" else None
+                elif last_key == "remarks" and not ll and not _is_page_junk(joined) \
+                        and any(vals[b] for b in BUR):
+                    # fila de continuación del remark: sin etiqueta, con texto en
+                    # columnas -> acumular por buró (cada columna envuelve aparte)
+                    rem = cur["fields"].setdefault("remarks", {b: "" for b in BUR})
+                    for b in BUR:
+                        piece = vals[b]
+                        if piece and piece not in ("--", "-"):
+                            rem[b] = (rem[b] + " " + piece).strip() if rem.get(b) else piece
+                elif ll and not _is_page_junk(joined):
+                    # cualquier otra etiqueta real cierra la continuación
+                    last_key = None
                 # tabla de morosidades
                 lab_late = _LATE_LABELS.get(low_join.split("  ")[0].strip()) or _LATE_LABELS.get(
                     (label.lower().strip()))
