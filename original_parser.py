@@ -9591,6 +9591,15 @@ def build_report(pdf_path: str, client_state: str = "") -> dict[str, Any]:
     """
     raw_text = extract_text_from_pdf(pdf_path)
     _src = detect_source(raw_text[:3000])
+    # Formato epic-pro de MyFreeScore (tri-buró con secciones, ES/EN). Se detecta
+    # por su firma propia y se delega a su adaptador. Va ANTES del three_bureau
+    # porque es un layout distinto. No afecta a los demás formatos.
+    try:
+        import epicpro_adapter as _epicpro
+        if _epicpro.looks_like_epicpro(raw_text[:4000]):
+            return _epicpro.build_report_epicpro(pdf_path)
+    except Exception:
+        pass
     if _src == SOURCE_THREE_BUREAU:
         import threebureau_adapter
         # El adaptador de 3 buros que corre hoy en Railway NO acepta
