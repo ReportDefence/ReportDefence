@@ -7002,6 +7002,21 @@ def parse_bureau_response(response_text: str) -> dict:
           }
         }
     """
+    # Router. Las cartas REALES que los burós mandan por correo al consumidor
+    # (Experian / Equifax / TransUnion "Dispute Results") NO usan el formato
+    # "Trade: NOMBRE - RESULT" (ese viene de herramientas de auditoría). Si el
+    # texto parece una carta real de consumidor, se parsea con el lector nuevo
+    # (tolerante al OCR de fotos). Si no, se usa el parser clásico "Trade:".
+    if _looks_consumer_letter(response_text):
+        merged = _parse_consumer_letter(response_text)
+        # Si por lo que sea no sacó nada, intentar el clásico como respaldo.
+        if merged.get("accounts"):
+            return merged
+    return _parse_trade_format(response_text)
+
+
+def _parse_trade_format(response_text: str) -> dict:
+    """Parser clásico para exportes tipo 'Trade: CREDITOR - RESULT'."""
     import re as _re
 
     outcome_summary: dict[str, list[str]] = {
@@ -7058,6 +7073,155 @@ def parse_bureau_response(response_text: str) -> dict:
         }
 
     return {"accounts": accounts, "outcome_summary": outcome_summary}
+
+
+# ── Lector de cartas REALES de los burós (Round 2/3), tolerante a OCR ──────────
+# Las cartas físicas ("Your Dispute Results") no traen "Trade:". Tienen:
+#   · una sección de resultados por ítem disputado:  "<CREDITOR> <acct>.... Outcome: <VERBO>"
+#     con verbos Experian: Deleted / Remains / Updated / Verified and Updated / Processed.
+#   · una sección "Potentially Negative Account Activity" con cada cuenta como
+#     "<CREDITOR> Partial Acct # <num> Status (...)".  Lo que sigue AHÍ = NO borrado.
+# Las líneas de indagaciones dicen "INQUIRY DATES" (no "Partial Acct #"), así que
+# no se confunden con cuentas. El OCR de fotos es ruidoso: el nombre de la cuenta y
+# el ancla "Partial Acct #" sobreviven bien; el VERBO exacto a veces no. Por eso la
+# señal robusta es "¿la cuenta sigue apareciendo?"; el verbo se usa cuando se lee.
+
+_CONSUMER_MARKERS = (
+    "dispute results", "here are your results", "outcome:",
+    "potentially negative account activity", "partial acct",
+    "how to read your results",
+)
+
+# verbo del buró -> outcome canónico (orden: más específico primero)
+_CONSUMER_RESULT_MAP = (
+    ("deleted",              "deleted"),
+    ("verified and updated", "verified_modified"),
+    ("verified & updated",   "verified_modified"),
+    ("updated and verified", "verified_modified"),
+    ("remains",              "verified_unchanged"),
+    ("updated",              "verified_modified"),
+    ("verified",             "verified_unchanged"),
+    ("processed",            "other"),
+)
+
+
+def _looks_consumer_letter(text: str) -> bool:
+    tl = (text or "").lower()
+    return sum(1 for m in _CONSUMER_MARKERS if m in tl) >= 2
+
+
+def _clean_creditor_name(s: str) -> str:
+    """Limpia un nombre de acreedor sacado de OCR: quita basura, números de
+    cuenta pegados y espacios; deja MAYÚSCULAS."""
+    import re as _re
+    s = _re.sub(r"[^A-Za-z0-9 &./'\-]", " ", s or "")
+    s = _re.sub(r"\s+", " ", s).strip(" -.,/&")
+    # quitar un número de cuenta pegado al final (>=4 dígitos y máscaras)
+    s = _re.sub(r"\s+[#x0-9][x0-9\s.\-]{3,}$", "", s, flags=_re.I).strip(" -.,/&")
+    # quitar tokens iniciales de una sola letra/dígito (ruido de OCR)
+    toks = [t for t in s.split(" ") if t]
+    while toks and len(toks[0]) <= 1:
+        toks.pop(0)
+    return " ".join(toks).upper().strip()
+
+
+def _creditor_key(name: str) -> str:
+    """Clave de agrupación tolerante: primeras letras/dígitos, sin espacios."""
+    import re as _re
+    return _re.sub(r"[^A-Z0-9]", "", (name or "").upper())[:14]
+
+
+def _result_from_text(seg: str) -> str:
+    seg = (seg or "").lower()
+    for word, outcome in _CONSUMER_RESULT_MAP:
+        if word in seg:
+            return outcome
+    return ""
+
+
+_RANK = {"deleted": 3, "verified_modified": 2, "verified_unchanged": 1,
+         "belongs_to_you": 1, "other": 0}
+
+
+def _canonical_names(names: list) -> dict:
+    """El OCR de fotos añade ruido al PRINCIPIO del renglón (marcas de margen,
+    viñetas): 'PX TI CAPITAL ONE', 'IF CAPITAL ONE'. El nombre real es el SUFIJO
+    limpio. Si un nombre es sufijo (por tokens) de otro, ambos son el mismo
+    acreedor y se colapsan al más corto/limpio. Devuelve raw_name -> canónico."""
+    toklists = {n: n.split() for n in names}
+    canon = {}
+    for n in names:
+        best = n
+        for m in names:
+            if m == n:
+                continue
+            tm, tn = toklists[m], toklists[n]
+            if 0 < len(tm) < len(tn) and tn[-len(tm):] == tm:   # m es sufijo de n
+                if len(tm) < len(best.split()):
+                    best = m
+        canon[n] = best
+    return canon
+
+
+def _parse_consumer_letter(response_text: str) -> dict:
+    """Parsea una carta real 'Dispute Results' (Experian y similares)."""
+    import re as _re
+
+    outcome_summary: dict[str, list[str]] = {
+        "deleted": [], "verified_modified": [], "verified_unchanged": [],
+        "belongs_to_you": [], "other": [],
+    }
+    hits = []   # (name, outcome, evidence)
+
+    text = response_text or ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # (1) Resultados explícitos por ítem: "<CREDITOR> <acct>.... Outcome: <VERBO>"
+    for ln in lines:
+        m = _re.search(r"(.*?)\boutcome\s*[:;]\s*(.*)$", ln, _re.I)
+        if not m:
+            continue
+        pre, post = m.group(1), m.group(2)
+        outcome = _result_from_text(post) or "other"
+        pre2 = _re.split(r"\b(?:partial\s+acct|acct)\b", pre, flags=_re.I)[0]
+        name = _clean_creditor_name(pre2)
+        if len(_creditor_key(name)) >= 3:
+            hits.append((name, outcome, ln))
+
+    # (2) Cuentas en "Potentially Negative Account Activity": ancla "Partial Acct #".
+    #     Lo que sigue reportado = NO borrado -> verified_unchanged (si no hay algo mejor).
+    for ln in lines:
+        if not _re.search(r"partial\s+acct|acct\s*#", ln, _re.I):
+            continue
+        if _re.search(r"inquiry\s+dates", ln, _re.I):     # es indagación, no cuenta
+            continue
+        pre = _re.split(r"\b(?:partial\s+acct|acct)\b", ln, flags=_re.I)[0]
+        name = _clean_creditor_name(pre)
+        if len(_creditor_key(name)) >= 3:
+            hits.append((name, "verified_unchanged", ln))
+
+    # (3) Colapsar nombres con ruido de OCR (sufijo) y fusionar por acreedor.
+    raw_names = list({h[0] for h in hits})
+    canon = _canonical_names(raw_names)
+    merged: dict[str, dict] = {}       # canon_key -> {name, outcome, evidence}
+    for name, outcome, ev in hits:
+        cname = canon.get(name, name)
+        key = _creditor_key(cname)
+        cur = merged.get(key)
+        if cur is None or _RANK.get(outcome, 0) > _RANK.get(cur["outcome"], 0):
+            merged[key] = {"name": cname, "outcome": outcome, "evidence": ev}
+        # preferir el nombre más corto/limpio como display
+        if cur and len(cname) < len(cur["name"]):
+            merged[key]["name"] = cname
+
+    out_accounts: dict[str, dict] = {}
+    for key, d in merged.items():
+        out_accounts[d["name"]] = {"outcome": d["outcome"], "modified_fields": [],
+                                   "response_text": (d["evidence"] or "")[:400]}
+        outcome_summary.setdefault(d["outcome"], []).append(d["name"])
+
+    return {"accounts": out_accounts, "outcome_summary": outcome_summary,
+            "source_format": "consumer_letter"}
 
 
 def _build_account_context_from_response(
