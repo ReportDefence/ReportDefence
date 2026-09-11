@@ -7171,10 +7171,34 @@ def _parse_consumer_letter(response_text: str) -> dict:
         "deleted": [], "verified_modified": [], "verified_unchanged": [],
         "belongs_to_you": [], "other": [],
     }
-    hits = []   # (name, outcome, evidence)
+    # cada hit lleva SU PROPIO número/estado (varias cuentas comparten nombre,
+    # p. ej. 3 de CREDIT COLLECTION SERVIC, así que no puede ir por nombre).
+    hits = []          # (name, outcome, evidence, {account_number, bureau_status})
 
     text = response_text or ""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    def _acct_from(s: str) -> str:
+        m = _re.search(r"acct\s*#?\s*([0-9xX][0-9xX. ]{2,})", s, _re.I)
+        if not m:
+            return ""
+        return _re.sub(r"[^0-9xX]", "", m.group(1))[:24]
+
+    def _acct_loose(s: str) -> str:
+        # las líneas de "Outcome:" traen el número SIN la palabra 'acct'
+        # ("CAPITAL ONE 517805837076.... Outcome: ..."). Primero intenta con
+        # 'acct #'; si no, toma una corrida larga (>=5) de dígitos/x.
+        a = _acct_from(s)
+        if a:
+            return a
+        m = _re.search(r"([0-9xX]{5,}[0-9xX. ]*)", s)
+        return _re.sub(r"[^0-9xX]", "", m.group(1))[:24] if m else ""
+
+    def _status_from(s: str) -> str:
+        # "... Status (Jun 2025) Collection account. $210 past due" -> texto tras el paréntesis
+        m = _re.search(r"status\s*\(?[^)]*\)?\s*[:.\-]?\s*(.*)$", s, _re.I)
+        st = _re.sub(r"\s+", " ", (m.group(1) if m else "")).strip(" .:-")
+        return st[:80]
 
     # (1) Resultados explícitos por ítem: "<CREDITOR> <acct>.... Outcome: <VERBO>"
     for ln in lines:
@@ -7186,7 +7210,8 @@ def _parse_consumer_letter(response_text: str) -> dict:
         pre2 = _re.split(r"\b(?:partial\s+acct|acct)\b", pre, flags=_re.I)[0]
         name = _clean_creditor_name(pre2)
         if len(_creditor_key(name)) >= 3:
-            hits.append((name, outcome, ln))
+            hits.append((name, outcome, ln,
+                         {"account_number": _acct_loose(pre), "bureau_status": ""}))
 
     # (2) Cuentas en "Potentially Negative Account Activity": ancla "Partial Acct #".
     #     Lo que sigue reportado = NO borrado -> verified_unchanged (si no hay algo mejor).
@@ -7198,26 +7223,53 @@ def _parse_consumer_letter(response_text: str) -> dict:
         pre = _re.split(r"\b(?:partial\s+acct|acct)\b", ln, flags=_re.I)[0]
         name = _clean_creditor_name(pre)
         if len(_creditor_key(name)) >= 3:
-            hits.append((name, "verified_unchanged", ln))
+            hits.append((name, "verified_unchanged", ln,
+                         {"account_number": _acct_from(ln),
+                          "bureau_status": _status_from(ln)}))
 
-    # (3) Colapsar nombres con ruido de OCR (sufijo) y fusionar por acreedor.
+    # (3) Colapsar nombres con ruido de OCR (sufijo) y fusionar. La clave es
+    #     acreedor + últimos-4 del número (cuando se leyó): así dos cuentas del
+    #     MISMO acreedor con números distintos (p. ej. 3 de CREDIT COLLECTION
+    #     SERVIC) quedan SEPARADAS y no se pierde ninguna. Si no se leyó número,
+    #     se agrupa solo por acreedor.
     raw_names = list({h[0] for h in hits})
     canon = _canonical_names(raw_names)
-    merged: dict[str, dict] = {}       # canon_key -> {name, outcome, evidence}
-    for name, outcome, ev in hits:
+    merged: dict[str, dict] = {}       # key -> {name, outcome, evidence, detail}
+    for name, outcome, ev, det in hits:
         cname = canon.get(name, name)
-        key = _creditor_key(cname)
+        det = det or {}
+        acct = det.get("account_number", "") or ""
+        last4 = _re.sub(r"\D", "", acct)[-4:] if acct else ""
+        key = _creditor_key(cname) + ((":" + last4) if last4 else "")
         cur = merged.get(key)
         if cur is None or _RANK.get(outcome, 0) > _RANK.get(cur["outcome"], 0):
-            merged[key] = {"name": cname, "outcome": outcome, "evidence": ev}
-        # preferir el nombre más corto/limpio como display
+            merged[key] = {"name": cname, "outcome": outcome, "evidence": ev,
+                           "detail": dict(cur["detail"]) if cur else {}}
         if cur and len(cname) < len(cur["name"]):
             merged[key]["name"] = cname
+        tgt = merged[key].setdefault("detail", {})
+        for k in ("account_number", "bureau_status"):
+            if det.get(k) and not tgt.get(k):
+                tgt[k] = det[k]
 
+    # La clave del dict debe ser ÚNICA (varias cuentas del mismo acreedor), pero
+    # cada valor guarda el nombre LIMPIO en "name" para mostrar. El display key
+    # es "NOMBRE ####" (últimos dígitos) para distinguirlas sin ensuciar el nombre.
     out_accounts: dict[str, dict] = {}
     for key, d in merged.items():
-        out_accounts[d["name"]] = {"outcome": d["outcome"], "modified_fields": [],
-                                   "response_text": (d["evidence"] or "")[:400]}
+        det = d.get("detail", {})
+        acct = det.get("account_number", "") or ""
+        disp = d["name"] + ((" " + acct[-4:]) if len(acct) >= 4 else "")
+        base, i = disp, 2
+        while disp in out_accounts:
+            disp = f"{base} ({i})"; i += 1
+        out_accounts[disp] = {
+            "name": d["name"],
+            "outcome": d["outcome"], "modified_fields": [],
+            "account_number": acct,
+            "bureau_status": det.get("bureau_status", ""),
+            "response_text": (d["evidence"] or "")[:400],
+        }
         outcome_summary.setdefault(d["outcome"], []).append(d["name"])
 
     return {"accounts": out_accounts, "outcome_summary": outcome_summary,
