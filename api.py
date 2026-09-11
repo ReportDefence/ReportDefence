@@ -3216,26 +3216,64 @@ async def bureau_response_pdf(
 
 _OCR_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp")
 
+# Las respuestas de los burós llegan como CARTAS FÍSICAS que el cliente fotografía
+# con el celular (ángulo, sombra, dobleces). El OCR crudo sale muy sucio; este
+# preprocesamiento (gris + escalado + autocontraste + enfoque) más --psm 6 (bloque
+# de texto uniforme) mejora la lectura de forma notable. Probado sobre fotos reales:
+# páginas que salían vacías o ilegibles quedan legibles.
+def _prep_ocr_image(im):
+    from PIL import Image, ImageOps, ImageFilter
+    im = ImageOps.exif_transpose(im)          # foto de celular derecha
+    g = ImageOps.grayscale(im)
+    w, h = g.size
+    if min(w, h):
+        scale = max(1.0, 1500.0 / min(w, h))  # subir resolución de fotos chicas
+        if scale > 1.01:
+            g = g.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    g = ImageOps.autocontrast(g, cutoff=2)
+    g = g.filter(ImageFilter.SHARPEN)
+    return g
+
+def _tess(im) -> str:
+    import pytesseract
+    try:
+        return pytesseract.image_to_string(im, config="--psm 6")
+    except Exception:
+        # psm 6 podría fallar en algún entorno; caer al modo por defecto
+        return pytesseract.image_to_string(im)
+
 def _ocr_image_bytes(raw: bytes) -> str:
     import io as _io
-    import pytesseract
-    from PIL import Image, ImageOps
+    from PIL import Image
     im = Image.open(_io.BytesIO(raw))
-    im = ImageOps.exif_transpose(im)          # foto de celular derecha
-    if im.mode not in ("RGB", "L"):
-        im = im.convert("RGB")
-    return pytesseract.image_to_string(im)
+    try:
+        prepped = _prep_ocr_image(im)
+        txt = _tess(prepped)
+    except Exception:
+        txt = ""
+    # Respaldo: si el preprocesamiento no dio texto, intentar el modo simple
+    if not (txt or "").strip():
+        import pytesseract
+        from PIL import ImageOps
+        im2 = ImageOps.exif_transpose(im)
+        if im2.mode not in ("RGB", "L"):
+            im2 = im2.convert("RGB")
+        txt = pytesseract.image_to_string(im2)
+    return txt
 
 def _ocr_pdf_bytes(raw: bytes) -> str:
     """Rasteriza el PDF con pypdfium2 (pura Python, sin poppler) y le pasa OCR."""
     import pypdfium2 as pdfium
-    import pytesseract
     parts = []
     doc = pdfium.PdfDocument(raw)
     try:
         for i in range(len(doc)):
             pil = doc[i].render(scale=2.5).to_pil()   # ~180 dpi
-            parts.append(pytesseract.image_to_string(pil))
+            try:
+                parts.append(_tess(_prep_ocr_image(pil)))
+            except Exception:
+                import pytesseract
+                parts.append(pytesseract.image_to_string(pil))
     finally:
         try:
             doc.close()
@@ -3294,6 +3332,61 @@ async def extract_bureau_response_text(
                                  "low-quality scan, try a clearer photo or paste the text "
                                  "manually.")
     return {"text": text, "source": source, "chars": len(text)}
+
+
+@app.post("/extract-bureau-response-files")
+async def extract_bureau_response_files(
+    files: List[UploadFile] = File(...),
+    user=Depends(get_current_user),
+):
+    """Igual que /extract-bureau-response-text pero acepta VARIOS archivos (las
+    respuestas del buró suelen ser de muchas páginas y el cliente sube una foto por
+    página). Lee cada archivo EN ORDEN (imagen o PDF, con OCR si hace falta) y
+    devuelve el texto concatenado con un marcador por página, para que el operador
+    lo revise antes de generar las cartas de Round 2/3.
+
+    El ORDEN es el que manda el frontend: hay que enviarlos ordenados por nombre de
+    archivo (página 1, 2, 3…) para que el texto quede en secuencia. Un PDF de varias
+    páginas también sirve (una sola subida, se leen todas sus páginas)."""
+    _requiere_plan_pago(user)   # parte del flujo de Round 2 (plan pago)
+    if not files:
+        raise HTTPException(400, "No files uploaded.")
+    if len(files) > 40:
+        raise HTTPException(400, "Too many files. Upload up to 40 pages at a time.")
+    parts, sources = [], set()
+    total = 0
+    for idx, f in enumerate(files, 1):
+        content = await f.read()
+        total += len(content)
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(400, f"File #{idx} ({f.filename or 'file'}) exceeds 20 MB.")
+        if total > 80 * 1024 * 1024:
+            raise HTTPException(400, "Combined upload exceeds 80 MB. Upload fewer pages at a time.")
+        fname = f.filename or ""
+        low = fname.lower()
+        is_ok = (low.endswith(".pdf") or low.endswith(_OCR_IMAGE_EXTS)
+                 or content[:5] == b"%PDF-")
+        if not is_ok:
+            raise HTTPException(400, f"Unsupported file '{fname or ('#'+str(idx))}'. "
+                                     "Upload PDFs or images (JPG, PNG).")
+        try:
+            text, source = _extract_text_from_upload(content, fname)
+        except Exception as e:
+            msg = str(e)
+            if "tesseract" in msg.lower():
+                raise HTTPException(500, "OCR engine (tesseract) is not installed on the "
+                                         "server. Add the system package 'tesseract-ocr'.")
+            raise HTTPException(400, f"Could not read '{fname or ('#'+str(idx))}': {e}")
+        sources.add(source)
+        text = (text or "").strip()
+        if text:
+            parts.append(f"----- PAGE {idx} -----\n{text}")
+    combined = "\n\n".join(parts).strip()
+    if not combined:
+        raise HTTPException(400, "No text could be extracted from the files. Try clearer "
+                                 "photos or paste the text manually.")
+    return {"text": combined, "source": ",".join(sorted(sources)) or "ocr_image",
+            "chars": len(combined), "pages": len(parts), "files": len(files)}
 
 # ═══════════════════════════════════════════════════════════════
 #  TASK 2 — POSTALOCITY INTEGRATION (USPS Certified Mail)
