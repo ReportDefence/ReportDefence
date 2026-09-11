@@ -3300,6 +3300,67 @@ def _extract_text_from_upload(raw: bytes, filename: str):
         return _ocr_pdf_bytes(raw), "ocr_pdf"     # escaneo -> OCR
     return _ocr_image_bytes(raw), "ocr_image"      # imagen -> OCR
 
+
+# Resumen legible de lo que se extrajo de la respuesta del buró: qué cuentas se
+# detectaron y con qué resultado. Se calcula con el MISMO parser que luego usan
+# las cartas (original_parser), así que el operador ve exactamente lo que el motor
+# entendió, ANTES de generar. Es solo informativo; nunca rompe la extracción.
+_BR_OUTCOME_LABEL = {
+    "deleted":            "Deleted",
+    "verified_unchanged": "Verified (still reporting)",
+    "verified_modified":  "Updated (still reporting)",
+    "belongs_to_you":     "Verified (ownership only)",
+    "frivolous":          "Rejected as frivolous",
+    "unable_to_process":  "Unable to process",
+    "other":              "Needs manual review",
+}
+_BR_OUTCOME_ORDER = {
+    "deleted": 0, "verified_modified": 1, "verified_unchanged": 2,
+    "belongs_to_you": 3, "frivolous": 4, "unable_to_process": 5, "other": 6,
+}
+
+def _bureau_response_summary(text: str) -> dict:
+    """Devuelve {total_accounts, accounts:[{name,outcome,label}], counts,
+    letter_level_outcome, format}. Nunca lanza: ante cualquier error, {}"""
+    if not (text or "").strip():
+        return {}
+    _op = None
+    try:
+        import original_parser as _op            # nombre en producción
+    except Exception:
+        try:
+            import report_parser as _op
+        except Exception:
+            _op = None
+    if _op is None:
+        return {}
+    parsed = None
+    try:
+        parsed = _op.classify_response_text_extended(text)
+    except Exception:
+        try:
+            parsed = _op.parse_bureau_response(text)
+        except Exception:
+            parsed = None
+    if not isinstance(parsed, dict):
+        return {}
+    accts = parsed.get("accounts", {}) or {}
+    items, counts = [], {}
+    for name, d in accts.items():
+        d = d or {}
+        oc = d.get("outcome_extended") or d.get("outcome") or "other"
+        counts[oc] = counts.get(oc, 0) + 1
+        items.append({"name": name, "outcome": oc,
+                      "label": _BR_OUTCOME_LABEL.get(oc, oc)})
+    items.sort(key=lambda x: _BR_OUTCOME_ORDER.get(x["outcome"], 9))
+    return {
+        "total_accounts": len(items),
+        "accounts": items,
+        "counts": counts,
+        "letter_level_outcome": parsed.get("letter_level_outcome", "") or "",
+        "format": parsed.get("source_format", "") or "",
+    }
+
 @app.post("/extract-bureau-response-text")
 async def extract_bureau_response_text(
     file: UploadFile = File(...),
@@ -3331,7 +3392,8 @@ async def extract_bureau_response_text(
         raise HTTPException(400, "No text could be extracted from the file. If it is a "
                                  "low-quality scan, try a clearer photo or paste the text "
                                  "manually.")
-    return {"text": text, "source": source, "chars": len(text)}
+    return {"text": text, "source": source, "chars": len(text),
+            "summary": _bureau_response_summary(text)}
 
 
 @app.post("/extract-bureau-response-files")
@@ -3386,7 +3448,8 @@ async def extract_bureau_response_files(
         raise HTTPException(400, "No text could be extracted from the files. Try clearer "
                                  "photos or paste the text manually.")
     return {"text": combined, "source": ",".join(sorted(sources)) or "ocr_image",
-            "chars": len(combined), "pages": len(parts), "files": len(files)}
+            "chars": len(combined), "pages": len(parts), "files": len(files),
+            "summary": _bureau_response_summary(combined)}
 
 # ═══════════════════════════════════════════════════════════════
 #  TASK 2 — POSTALOCITY INTEGRATION (USPS Certified Mail)
