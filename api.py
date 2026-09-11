@@ -3318,10 +3318,38 @@ _BR_OUTCOME_ORDER = {
     "deleted": 0, "verified_modified": 1, "verified_unchanged": 2,
     "belongs_to_you": 3, "frivolous": 4, "unable_to_process": 5, "other": 6,
 }
+# Significado en lenguaje simple (para que un usuario común lo entienda).
+_BR_OUTCOME_MEANING = {
+    "deleted":            "Removed by the bureau. No further action needed on this one.",
+    "verified_unchanged": "Still on the report. The bureau kept it after your dispute — you can escalate it.",
+    "verified_modified":  "Still on the report, but the bureau changed something — an admission you can escalate.",
+    "belongs_to_you":     "The bureau only confirmed it is yours, not that it is accurate — you can still escalate.",
+    "frivolous":          "The bureau rejected the dispute as frivolous — you can challenge that determination.",
+    "unable_to_process":  "The bureau could not process it (usually ID). Resubmit with identification.",
+    "other":              "Could not be read clearly — review the account manually.",
+}
+
+def _br_clean_status(raw: str) -> str:
+    """El estado que reporta el buró viene con ruido de OCR. Se mapea a una
+    etiqueta limpia por palabra clave; si no se reconoce, no se muestra."""
+    s = (raw or "").lower()
+    paid = "paid" in s or "pagad" in s
+    closed = "clos" in s or "cerrad" in s
+    if "collection" in s or "coleccion" in s or "colección" in s or "$" in s:
+        return "Paid collection" if paid else "Collection"
+    if paid and closed:
+        return "Paid / Closed"
+    if "charge" in s or "chargeoff" in s:
+        return "Charge-off"
+    if "open" in s or "abiert" in s:
+        return "Open"
+    if closed:
+        return "Closed"
+    return ""
 
 def _bureau_response_summary(text: str) -> dict:
-    """Devuelve {total_accounts, accounts:[{name,outcome,label}], counts,
-    letter_level_outcome, format}. Nunca lanza: ante cualquier error, {}"""
+    """Devuelve {total_accounts, accounts:[{name,account_number,status,outcome,
+    label,meaning}], counts, letter_level_outcome, format}. Nunca lanza."""
     if not (text or "").strip():
         return {}
     _op = None
@@ -3350,8 +3378,16 @@ def _bureau_response_summary(text: str) -> dict:
         d = d or {}
         oc = d.get("outcome_extended") or d.get("outcome") or "other"
         counts[oc] = counts.get(oc, 0) + 1
-        items.append({"name": name, "outcome": oc,
-                      "label": _BR_OUTCOME_LABEL.get(oc, oc)})
+        acct = (d.get("account_number") or "").strip()
+        items.append({
+            "name": d.get("name") or name,   # nombre limpio (la clave puede traer sufijo)
+            "account_number": acct,
+            "account_number_display": ("…" + acct[-4:]) if len(acct) >= 4 else acct,
+            "status": _br_clean_status(d.get("bureau_status", "")),
+            "outcome": oc,
+            "label": _BR_OUTCOME_LABEL.get(oc, oc),
+            "meaning": _BR_OUTCOME_MEANING.get(oc, ""),
+        })
     items.sort(key=lambda x: _BR_OUTCOME_ORDER.get(x["outcome"], 9))
     return {
         "total_accounts": len(items),
