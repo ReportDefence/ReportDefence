@@ -4634,9 +4634,17 @@ def _linea_lista(semilla: int, orden_carta: int = 0) -> str:
 
 
 def _cierre_carta(semilla: int, orden_carta: int = 0) -> str:
-    a = _CIERRE_A[((semilla >> 44) + orden_carta) % len(_CIERRE_A)]
-    b = _CIERRE_B[((semilla >> 48) + orden_carta * 3) % len(_CIERRE_B)]
-    c = _CIERRE_C[((semilla >> 52) + orden_carta * 7) % len(_CIERRE_C)]
+    # PARCHE 23/09/2026 (noche): los tres pools tienen 10 frases y la
+    # posicion de la carta ahora llega hasta 20, asi que dos cartas cuyas
+    # posiciones difieren en 10 (o en 20) caian en la MISMA frase en las
+    # tres ranuras y compartian el cierre entero: ~40 palabras iguales.
+    # El termino (orden // 10) rompe justamente esos casos, y para las
+    # diferencias de 1 a 9 la primera ranura ya bastaba.
+    _o = int(orden_carta)
+    _d = _o // 10
+    a = _CIERRE_A[((semilla >> 44) + _o) % len(_CIERRE_A)]
+    b = _CIERRE_B[((semilla >> 48) + _o * 3 + _d) % len(_CIERRE_B)]
+    c = _CIERRE_C[((semilla >> 52) + _o * 7 + _d * 3) % len(_CIERRE_C)]
     return f"{a} {b} {c}"
 
 
@@ -5529,6 +5537,80 @@ _SALUDOS = [
 _NARR_Q = 17
 
 
+# ======================================================================
+# POSICION FIJA DE LA CARTA  (parche 23/09/2026, tarde)
+# ----------------------------------------------------------------------
+# La web genera UNA carta por llamada: manda {buro: {categoria: [...]}}.
+# Antes la posicion de la carta salia de su lugar DENTRO de lo recibido,
+# asi que con un solo par siempre era 0 y las dos cartas al mismo buro
+# salian con el mismo saludo, la misma apertura y el mismo cierre.
+# Medido en produccion con Jennifer Cintron: 83 ventanas de 20 palabras
+# compartidas entre transunion/collections y transunion/late_payments.
+#
+# Ahora la posicion sale de una tabla FIJA de las 21 combinaciones
+# posibles (7 grupos x 3 buros), asi que una carta ocupa siempre el mismo
+# lugar venga sola o acompanada. El orden es grupo*3 + buro a proposito:
+# dos cartas al MISMO buro difieren en 3, 6, 9... nunca en un multiplo de
+# 7 ni de 25, asi que el saludo y las ocho ranuras de la apertura siempre
+# caen distintos.
+# ======================================================================
+
+_ORDEN_GRUPOS = ["collections", "charge_offs", "late_payments",
+                 "repossessions", "bankruptcies", "child_support",
+                 "other_derogatory"]
+_ORDEN_BUROS = ["transunion", "experian", "equifax"]
+
+
+def _orden_fijo_carta(bureau: str, group: str) -> int:
+    """Posicion 0..20 de una carta, independiente de la llamada."""
+    g = str(group or "").split("_2")[0]          # collections_2 -> collections
+    try:
+        gi = _ORDEN_GRUPOS.index(g)
+    except ValueError:
+        gi = len(_ORDEN_GRUPOS) - 1
+    try:
+        bi = _ORDEN_BUROS.index(str(bureau or "").lower())
+    except ValueError:
+        bi = 0
+    return gi * len(_ORDEN_BUROS) + bi
+
+
+def _narr_indice(orden_carta: int, idx_en_carta: int) -> int:
+    """
+    Indice de parrafo a partir de la posicion de la carta y de la posicion
+    de la cuenta DENTRO de la carta. No depende de cuantas cartas venian
+    en la llamada, que es lo que rompia el flujo web.
+
+    Construye directamente el par (a, b) del codigo Reed-Solomon:
+        b = (idx + orden) % 17        a = (orden + idx // 17) % 16
+        n = a * 17 + b
+    Con eso n siempre cae en [0, 272), que es el rango donde el codigo
+    garantiza que dos parrafos no coincidan en dos ranuras a la vez.
+
+    Inyectiva: dos parrafos solo comparten (a, b) si comparten posicion de
+    carta Y posicion de cuenta. La misma cuenta en dos buros tiene la
+    misma posicion de cuenta pero distinto orden, asi que b y a cambian
+    los dos: no comparten NI la primera ranura, que es la que se pega al
+    encabezado de cuenta.
+    """
+    try:
+        orden = int(orden_carta); idx = int(idx_en_carta)
+    except Exception:
+        orden, idx = 0, 0
+    if idx < 0:
+        idx = 0
+    # Los multiplicadores 3 y 7 evitan que la cuenta 17 de una carta caiga
+    # en el mismo (a, b) que la cuenta 0 de la carta siguiente: con
+    # a = orden + idx//17 eso pasaba, y los dos parrafos salian IDENTICOS
+    # en las seis ranuras. Medido en Argenis Torres, que tiene 20 cuentas
+    # en una sola carta: 71 ventanas compartidas con la carta del mismo
+    # grupo en otro buro.
+    b = (idx + orden) % _NARR_Q
+    a = (orden * 3 + (idx // _NARR_Q) * 7) % (_NARR_Q - 1)
+    return a * _NARR_Q + b
+
+
+
 def _narr_slot_indices(n: int, n_slots: int) -> list[int]:
     """Indices de ranura para el parrafo numero n. Ver cabecera."""
     try:
@@ -5729,6 +5811,94 @@ def _narr_mezcla(pref: list, suf: list, n: int = 17) -> list:
             for i in range(n)]
 
 
+# ======================================================================
+# MEZCLA CON EXTREMOS UNICOS (parche 23/09/2026, noche)
+# ----------------------------------------------------------------------
+# El codigo RS garantiza que dos parrafos no coincidan en DOS ranuras.
+# Pero una ventana de 20 palabras que cruza una frontera solo necesita la
+# COLA de una ranura y la CABEZA de la siguiente. Si dos entradas
+# distintas de un pool comparten cola o cabeza, coincidir en UNA sola
+# ranura ya basta para repetir la ventana.
+#
+# _narr_mezcla combinaba 5 prefijos x 4 sufijos: las 17 entradas
+# resultantes repetian cabeza y cola muchas veces. Se reemplaza por una
+# mezcla de TRES piezas donde la primera y la ultima son unicas por
+# indice, y lo especifico del tipo (la cita legal, el objeto del pedido)
+# viaja en el MEDIO, donde repetirse no hace dano.
+#
+#   entrada[i] + nucleo[i % k] + cola[i]
+#
+# Asi cada pool tiene 17 primeras palabras distintas y 17 ultimas
+# distintas, y una coincidencia en una sola ranura deja de importar.
+# ======================================================================
+
+# --- 17 entradas adverbiales de cita, primera palabra distinta --------
+_LEY_ENTRADA = [
+    "Under", "Per", "Again, under", "Here, under", "Specifically, under",
+    "Legally, under", "As required by", "By the terms of", "Beyond that, under",
+    "Further, under", "Importantly, under", "Notably, under", "Also under",
+    "Then under", "Now, under", "Given", "Applying",
+]
+# --- 17 clausulas, ultima palabra distinta ----------------------------
+_LEY_CLAUSULA = [
+    "this reporting does not meet the standard.",
+    "the file has to reflect what actually happened.",
+    "the entry as shown is not defensible.",
+    "the reporting has to be corrected.",
+    "the furnisher has to answer for this field.",
+    "the information has to be verified at the source.",
+    "an unsupported entry cannot remain.",
+    "the bureau has to reinvestigate.",
+    "accuracy is not optional here.",
+    "this is exactly what has to be checked.",
+    "the tradeline cannot stay as written.",
+    "the record has to match the account.",
+    "the duty runs to the furnisher as well.",
+    "what is reported has to be provable.",
+    "the discrepancy has to be resolved.",
+    "the file cannot carry this as it reads.",
+    "the item has to be documented or deleted.",
+]
+# --- 17 verbos de pedido, primera palabra distinta --------------------
+_PEDIDO_VERBO = [
+    "I need", "Please confirm", "Verify", "Confirm", "Document", "Obtain",
+    "Produce", "Send", "Show", "Establish", "Check", "Provide", "Furnish",
+    "Supply", "Support", "Substantiate", "Ask the furnisher for",
+]
+# --- 17 colas de pedido, ultima palabra distinta ----------------------
+_PEDIDO_COLA = [
+    "against the furnisher's own records.",
+    "from the original creditor's file.",
+    "with primary documentation.",
+    "in writing.",
+    "before this dispute closes.",
+    "as part of this reinvestigation.",
+    "with the account statements.",
+    "directly with whoever is reporting it.",
+    "as it appears on the report.",
+    "so the entry can stand.",
+    "or delete the tradeline.",
+    "and correct whatever is wrong.",
+    "to the level the statute requires.",
+    "and put the outcome in my record.",
+    "without relying on the furnisher's summary.",
+    "with something I can actually check.",
+    "and tell me what was found.",
+]
+
+
+def _narr_ley(citas: list) -> list:
+    """17 frases de ley: entrada unica + cita del tipo + clausula unica."""
+    return [f"{_LEY_ENTRADA[i]} {citas[i % len(citas)]}, {_LEY_CLAUSULA[i]}"
+            for i in range(17)]
+
+
+def _narr_pedido(objetos: list) -> list:
+    """17 frases de pedido: verbo unico + objeto del tipo + cola unica."""
+    return [f"{_PEDIDO_VERBO[i]} {objetos[i % len(objetos)]} {_PEDIDO_COLA[i]}"
+            for i in range(17)]
+
+
 _NARR_CIERRE_TIPO = [
     "Whatever cannot be supported by records has to be corrected.",
     "If the furnisher cannot document it, the entry does not belong.",
@@ -5872,26 +6042,17 @@ _NARR_TIPOS = {
             "I have seen nothing tying this agency to the account it is reporting.",
             "The paperwork behind this transfer is what is missing from the file.",
         ],
-        "ley": _narr_mezcla(
-            ["Under 15 U.S.C. section 1681s-2(b),",
-             "Under the furnisher duty in 15 U.S.C. section 1681s-2(b),",
-             "Under 15 U.S.C. section 1681e(b),",
-             "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-             "Under 15 U.S.C. section 1681i(a)(1),"],
-            ["they have to investigate against actual records.",
-             "the reporting has to be supported by documents.",
-             "an unsupported entry cannot stand.",
-             "this has to be verified at the source."]),
-        "pedido": _narr_mezcla(
-            ["I am asking them to produce",
-             "They need to provide",
-             "Please require from the furnisher",
-             "I want copies of",
-             "The agency has to send"],
-            ["the original signed agreement with the original creditor.",
-             "the complete chain of assignment for this account.",
-             "the date of first delinquency from the creditor's own records.",
-             "documentation of their authority to report this debt."]),
+        "ley": _narr_ley([
+            "15 U.S.C. section 1681s-2(b)",
+            "15 U.S.C. section 1681e(b)",
+            "15 U.S.C. section 1681i(a)(1)",
+        ]),
+        "pedido": _narr_pedido([
+            "the original signed agreement with the original creditor",
+            "the complete chain of assignment for this account",
+            "the date of first delinquency from the creditor's records",
+            "their authority to report this debt",
+        ]),
     },
 
 }
@@ -5952,26 +6113,17 @@ _NARR_TIPOS["cross_bureau"] = {
         "The account itself has one history, and the reporting should show it.",
         "A field that changes by bureau has not been checked against the records.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681s-2(a)(1),",
-         "Under the furnisher rule of 15 U.S.C. section 1681s-2(a)(1),",
-         "Under 15 U.S.C. section 1681i(a)(1),"],
-        ["the file has to reflect one accurate value.",
-         "this discrepancy has to be resolved, not left in place.",
-         "the reporting cannot stand as it is.",
-         "you have to reinvestigate this field."]),
-    "pedido": _narr_mezcla(
-        ["I am asking you to verify",
-         "Please confirm with the furnisher",
-         "I want documentation of",
-         "Please obtain and check",
-         "I need verification of"],
-        ["the correct {campo} against the furnisher's own records.",
-         "which value is right and where the other one came from.",
-         "the {campo} with primary account documentation.",
-         "this field so the same value appears at every bureau."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681s-2(a)(1)",
+        "15 U.S.C. section 1681i(a)(1)",
+    ]),
+    "pedido": _narr_pedido([
+        "the correct {campo}",
+        "which value is right",
+        "the {campo} for this account",
+        "this field so every bureau matches",
+    ]),
 }
 
 
@@ -6015,26 +6167,17 @@ _NARR_TIPOS["dofd"] = {
         "The account cannot be verified as timely without the original date.",
         "This is the field that determines the entry's legal life, and it is missing.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681c(c),",
-         "Under the running-of-the-period rule in 15 U.S.C. section 1681c(c),",
-         "Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681s-2(b),"],
-        ["that date has to be established, not assumed.",
-         "the entry cannot be reported without it.",
-         "this has to be verified against the creditor's records.",
-         "the reporting as it stands is not complete."]),
-    "pedido": _narr_mezcla(
-        ["I am asking you to obtain",
-         "Please require the furnisher to produce",
-         "I need the furnisher to document",
-         "Please verify with the original creditor",
-         "I want on the record"],
-        ["the original date of first delinquency for this account.",
-         "the date the account first went delinquent and never cured.",
-         "the creditor's own record of when the delinquency began.",
-         "the date that starts the seven-year reporting period here."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681c(c)",
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681s-2(b)",
+    ]),
+    "pedido": _narr_pedido([
+        "the original date of first delinquency",
+        "the date this account first went delinquent",
+        "the creditor's own record of that date",
+        "the date that starts the seven-year period",
+    ]),
 }
 
 # ---------- HISTORIAL DE PAGOS TARDIOS --------------------------------
@@ -6077,26 +6220,17 @@ _NARR_TIPOS["late_pay"] = {
         "The furnisher has the ledger and has not shown it supports this.",
         "A late mark without the underlying dates has not been verified at all.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681s-2(a)(1),",
-         "Under the furnisher rule of 15 U.S.C. section 1681s-2(a)(1),",
-         "Under 15 U.S.C. section 1681c(a)(4),"],
-        ["every reported field has to be accurate.",
-         "this mark has to be supported or removed.",
-         "the reporting cannot rest on the furnisher's say-so.",
-         "the dates behind this entry matter."]),
-    "pedido": _narr_mezcla(
-        ["I am asking for",
-         "Please require from the furnisher",
-         "I need the creditor to produce",
-         "Please obtain",
-         "I want copies of"],
-        ["the original payment records for the month marked late.",
-         "the exact due date and the date the payment was received.",
-         "the full payment history from origination for this account.",
-         "confirmation of the correct date of first delinquency."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681s-2(a)(1)",
+        "15 U.S.C. section 1681c(a)(4)",
+    ]),
+    "pedido": _narr_pedido([
+        "the payment records for the month marked late",
+        "the due date and the date payment arrived",
+        "the full payment history from origination",
+        "the correct date of first delinquency",
+    ]),
 }
 
 # ---------- CERRADA CON SALDO -----------------------------------------
@@ -6139,26 +6273,17 @@ _NARR_TIPOS["closed_bal"] = {
         "The account cannot be both finished and still owing.",
         "One of these two fields has not been updated since closing.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681i(a)(1),",
-         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
-         "Under 15 U.S.C. section 1681s-2(a)(1),"],
-        ["these two fields have to agree.",
-         "the contradiction has to be resolved.",
-         "the entry cannot be left as it reads.",
-         "this has to be checked against the account records."]),
-    "pedido": _narr_mezcla(
-        ["I am asking you to verify",
-         "Please confirm with the furnisher",
-         "I need documentation showing",
-         "Please obtain and check",
-         "I want written confirmation of"],
-        ["the closing date and the balance as of that date.",
-         "what the remaining balance represents and why it stands.",
-         "the correct status and the correct balance for this account.",
-         "how the account was resolved when it was closed."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681i(a)(1)",
+        "15 U.S.C. section 1681s-2(a)(1)",
+    ]),
+    "pedido": _narr_pedido([
+        "the closing date and the balance then",
+        "what the remaining balance represents",
+        "the correct status and the correct balance",
+        "how the account was resolved at closing",
+    ]),
 }
 
 # ---------- COLECCION PAGADA ------------------------------------------
@@ -6201,26 +6326,17 @@ _NARR_TIPOS["paid_coll"] = {
         "The furnisher has to report the current condition, not the old one.",
         "The account's real outcome is missing from every field but the balance.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681i(a)(1),",
-         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
-         "Under 15 U.S.C. section 1681s-2(a)(1),"],
-        ["the current status has to be accurate.",
-         "this field has to be brought up to date.",
-         "the entry cannot keep reporting the old condition.",
-         "the record has to match what actually happened."]),
-    "pedido": _narr_mezcla(
-        ["Please have the furnisher confirm",
-         "I am asking you to verify",
-         "I need documentation of",
-         "Please obtain",
-         "I want on the record"],
-        ["the date the account was satisfied.",
-         "the correct current status for this account.",
-         "the date of first delinquency for this entry.",
-         "the terms under which this account was resolved."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681i(a)(1)",
+        "15 U.S.C. section 1681s-2(a)(1)",
+    ]),
+    "pedido": _narr_pedido([
+        "the date the account was satisfied",
+        "the correct current status",
+        "the date of first delinquency",
+        "the terms under which this was resolved",
+    ]),
 }
 
 # ---------- CUENTA DUPLICADA ------------------------------------------
@@ -6263,26 +6379,17 @@ _NARR_TIPOS["dup_acct"] = {
         "Either they are distinct accounts or one of them must come off.",
         "No documentation supports treating these as two separate debts.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681i(a)(1),",
-         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
-         "Under 15 U.S.C. section 1681s-2(a)(1),"],
-        ["duplicate reporting of one debt is not accurate.",
-         "this has to be resolved against the account records.",
-         "only the correct entry may remain.",
-         "the file cannot show the same debt twice."]),
-    "pedido": _narr_mezcla(
-        ["I am asking you to determine",
-         "Please confirm with both furnishers",
-         "I need documentation of",
-         "Please obtain and compare",
-         "I want verification of"],
-        ["whether these entries represent the same underlying account.",
-         "the account numbers, open dates and balances on both entries.",
-         "which party currently holds this debt and which does not.",
-         "the chain of ownership behind each of these tradelines."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681i(a)(1)",
+        "15 U.S.C. section 1681s-2(a)(1)",
+    ]),
+    "pedido": _narr_pedido([
+        "whether these entries are the same account",
+        "the numbers, open dates and balances on both",
+        "which party actually holds this debt",
+        "the chain of ownership behind each entry",
+    ]),
 }
 
 # ---------- SALDO SOBRE LIMITE / CREDITO ALTO -------------------------
@@ -6325,26 +6432,17 @@ _NARR_TIPOS["limite"] = {
         "An unexplained overage is inaccurate information on my file.",
         "The two fields together describe an account that cannot exist.",
     ],
-    "ley": _narr_mezcla(
-        ["Under 15 U.S.C. section 1681e(b),",
-         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
-         "Under 15 U.S.C. section 1681i(a)(1),",
-         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
-         "Under 15 U.S.C. section 1681s-2(a)(1),"],
-        ["both figures have to be accurate.",
-         "this discrepancy has to be documented or corrected.",
-         "the entry cannot stand as reported.",
-         "the numbers have to be checked at the source."]),
-    "pedido": _narr_mezcla(
-        ["I am asking you to verify",
-         "Please confirm with the furnisher",
-         "I need an itemized breakdown of",
-         "Please obtain",
-         "I want documentation of"],
-        ["the correct balance and the correct limit on this account.",
-         "every charge, fee and interest amount behind this balance.",
-         "how the balance came to exceed the figure reported beside it.",
-         "the account statements that support both of these numbers."]),
+    "ley": _narr_ley([
+        "15 U.S.C. section 1681e(b)",
+        "15 U.S.C. section 1681i(a)(1)",
+        "15 U.S.C. section 1681s-2(a)(1)",
+    ]),
+    "pedido": _narr_pedido([
+        "the correct balance and the correct limit",
+        "every charge, fee and interest amount",
+        "how the balance passed the figure beside it",
+        "the statements behind both numbers",
+    ]),
 }
 
 
@@ -9029,14 +9127,8 @@ def _build_dispute_letter_engine_once(
     # ve mal, asi que se normaliza aqui.
     consumer_name = " ".join(str(consumer_name).split()) or "[CLIENT NAME]"
 
-    _narr_contador: dict[str, int] = {"*": int(narr_salt)}
-    # ranuras ya usadas por cada cuenta (misma cuenta en TU/EXP/EQF). El
-    # codigo RS garantiza que dos parrafos distintos no coincidan en DOS
-    # ranuras, pero pueden coincidir en UNA. Si esa una es la primera o la
-    # ultima, la ventana de 20 palabras cruza con el encabezado de cuenta
-    # (que si es identico entre cartas) y vuelve a repetirse. Por eso para
-    # la misma cuenta se exige que NINGUNA ranura se repita.
-    _narr_prev: dict[int, list] = {}
+    # (el contador de parrafos se retiro: el indice ahora es posicional,
+    # ver _narr_indice)
 
     result: dict[str, dict[str, dict[str, str]]] = {}
     formatted_date = _letter_date()
@@ -9068,11 +9160,13 @@ def _build_dispute_letter_engine_once(
         {(b, g) for b, gs in (letter_input_engine or {}).items()
          for g, v in (gs or {}).items() if v}
     )
-    _orden_carta = {p: i for i, p in enumerate(_pares_del_cliente)}
+    # La posicion ya NO sale de lo recibido en la llamada: sale de la tabla
+    # fija. _pares_del_cliente se conserva solo para el log/diagnostico.
+    _orden_carta = {p: _orden_fijo_carta(p[0], p[1]) for p in _pares_del_cliente}
 
     def _tpl_idx(bureau: str, group: str, round_key: str, n_templates: int) -> int:
         round_pos = 0 if round_key == "round_1" else 1
-        pos = _orden_carta.get((bureau, group), 0)
+        pos = _orden_fijo_carta(bureau, group)
         return (_semilla_cliente + pos + round_pos + variation_seed) % n_templates
 
     group_order = ["collections", "charge_offs", "late_payments",
@@ -9192,7 +9286,7 @@ def _build_dispute_letter_engine_once(
                         f"{consumer_name}|{report_date}|{variation_seed}"
                         .encode("utf-8")).hexdigest()[:12], 16)
                     opening = _apertura_modular(
-                        _sem, _orden_carta.get((bureau, group_key), 0))
+                        _sem, _orden_fijo_carta(bureau, group_key))
                 else:
                     opening = tpl.format(
                         count=count_str,
@@ -9205,7 +9299,7 @@ def _build_dispute_letter_engine_once(
 
                 # saludo rotativo: ver _SALUDOS
                 _sal = _SALUDOS[
-                    _orden_carta.get((bureau, group_key), 0) % len(_SALUDOS)]
+                    _orden_fijo_carta(bureau, group_key) % len(_SALUDOS)]
                 if _sal != "Hi," and opening.startswith("Hi,\n\n"):
                     opening = _sal + "\n\n" + opening[len("Hi,\n\n"):]
 
@@ -9299,17 +9393,26 @@ def _build_dispute_letter_engine_once(
                         33, 35, 37, 39, 41,
                         8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40,
                     ]
-                    _narr_base = _narr_contador.get("*", 0)
-                    _prev = _narr_prev.get(account_fingerprint, [])
-                    if _prev:
-                        for _ in range(200):
-                            _ix = _narr_slot_indices(_narr_base, 12)
-                            if all(all(_ix[_p] != _q[_p] for _p in range(12))
-                                   for _q in _prev):
-                                break
-                            _narr_base += 1
-                    _narr_prev.setdefault(account_fingerprint, []).append(
-                        _narr_slot_indices(_narr_base, 12))
+                    # El indice del parrafo sale de la posicion FIJA de la
+                    # carta y de la posicion de la cuenta dentro de ella. Ya
+                    # no de un contador que avanzaba segun cuantas cartas
+                    # venian en la llamada: eso hacia que la web, que manda
+                    # una sola carta, repitiera texto entre cartas.
+                    # narr_salt desplaza todos los parrafos por igual, asi
+                    # que el reintento del envoltorio sigue funcionando sin
+                    # romper la correspondencia entre los dos flujos.
+                    # El salt desplaza CADA CARTA distinto (por eso va
+                    # multiplicado por la posicion). Un desplazamiento igual
+                    # para todas no cambiaria la relacion entre dos cartas, y
+                    # el reintento del envoltorio no tendria nada que mover.
+                    # Con salt=0 -- que es lo que recibe la web, donde nunca
+                    # hay dos cartas que comparar -- el indice es puramente
+                    # posicional y los dos flujos arrancan del mismo lugar.
+                    _ord_fijo = _orden_fijo_carta(bureau, group_key)
+                    _narr_base = (
+                        _narr_indice(_ord_fijo, idx - 1)
+                        + int(narr_salt) * (_ord_fijo + 1)
+                    ) % (_NARR_Q * (_NARR_Q - 1))
                     for stride in _ATTEMPT_STRIDES:
                         reason = _account_reason(
                             item,
@@ -9319,9 +9422,6 @@ def _build_dispute_letter_engine_once(
                         )
                         if reason not in used_reasons:
                             break
-                    # el stride consumido tambien gasta indices: si no se
-                    # suma, la cuenta siguiente repetiria un indice ya usado
-                    _narr_contador["*"] = _narr_base + 1 + max(0, int(stride))
                     if reason in used_reasons:
                         _dis = last_four_digits(facct)
                         if _dis:
@@ -9351,7 +9451,7 @@ def _build_dispute_letter_engine_once(
                 _sem_l = int(_hl_tpl.md5(
                     f"{consumer_name}|{report_date}|{variation_seed}".encode("utf-8")
                 ).hexdigest()[:16], 16)
-                _ord_l = _orden_carta.get((bureau, group_key), 0)
+                _ord_l = _orden_fijo_carta(bureau, group_key)
                 body_parts.append(
                     _linea_lista(_sem_l, _ord_l) + "\n\n" + accounts_block
                 )
