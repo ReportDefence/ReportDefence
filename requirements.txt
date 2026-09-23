@@ -16,3 +16,5 @@ httpx
 pypdf
 Pillow
 pypdfium2
+cryptography
+python-dateutil
