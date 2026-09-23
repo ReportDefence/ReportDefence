@@ -1485,6 +1485,10 @@ def detect_child_support_attacks(bureau: str, accounts: list[dict]) -> list[dict
     for acc in accounts:
         if acc.get("negative_type") != "child_support":
             continue
+        # PARCHE 23/09/2026 - la carta decia "reported as past due" con past due
+        # $0.00 y status Current, contradiciendose en la misma frase.
+        if _parse_dollar(acc.get("past_due", "")) <= 0:
+            continue
         balance  = acc.get("balance", "")
         past_due = acc.get("past_due", "")
         payment  = acc.get("payment_status", "")
@@ -1496,10 +1500,12 @@ def detect_child_support_attacks(bureau: str, accounts: list[dict]) -> list[dict
                 f"{acc.get('name','')} account {acc.get('account_number','')} "
                 f"is a child/family support obligation reported as past due "
                 f"(balance: {balance}, past due: {past_due}, status: {payment}). "
-                f"Under 15 U.S.C. section 1681s-1, child support agencies may only "
-                f"report overdue support, the reported amount and status must "
-                f"accurately reflect only the delinquent portion as certified "
-                f"by the state agency. Full itemization and agency certification required."
+                f"Under 15 U.S.C. section 1681s-1, overdue support may be included in "
+                f"a consumer report only when it is reported or verified by a State or "
+                f"local child support enforcement agency and is not more than seven "
+                f"years old. I am asking you to verify both conditions, and, under "
+                f"15 U.S.C. section 1681e(b), that the amount and status reported "
+                f"match the agency records."
             ),
         ))
     return attacks
@@ -1563,8 +1569,9 @@ def detect_bankruptcy_attacks(bureau: str, accounts: list[dict]) -> list[dict]:
                 reason=(
                     f"{acc.get('name','')} account {acc.get('account_number','')} "
                     f"was included in a bankruptcy proceeding but continues to show "
-                    f"an active balance of {balance}. Discharged accounts must reflect "
-                    f"a zero balance and discharged status under 11 U.S.C. section 524."
+                    f"an active balance of {balance}. Reporting a balance on an account "
+                    f"discharged in bankruptcy is inaccurate under 15 U.S.C. section "
+                    f"1681e(b) and 15 U.S.C. section 1681s-2(a)(1)."
                 ),
             ))
         else:
@@ -1637,6 +1644,13 @@ def detect_paid_collection_attacks(bureau: str, accounts: list[dict]) -> list[di
     attacks = []
     for acc in accounts:
         if acc.get("negative_type") != "paid_collection":
+            continue
+        # PARCHE 23/09/2026 - la carta afirma "continues to be reported with a
+        # derogatory status". Antes no se miraba el status: en los 40 disparos
+        # del corpus el reporte decia 'Paid'. Ahora tiene que haber marca real.
+        _estado = f"{acc.get('status','')} {acc.get('payment_status','')}".lower()
+        if not any(k in _estado for k in
+                   ("derog", "collection", "chargeoff", "charge off", "charge-off", "late")):
             continue
         attacks.append(build_attack_record(
             attack_type="paid_collection_still_derogatory",
@@ -1740,7 +1754,12 @@ def detect_intra_account_inconsistencies(bureau: str, accounts: list[dict[str, A
         is_installment  = "loan" in acct_det or "installment" in acct_typ
 
         # 1. Opened after last active (impossible chronology)
-        if d_open and d_dla and d_open > d_dla:
+        # PARCHE 23/09/2026 - en una cobranza la fecha de apertura ES la de
+        # compra de la deuda, posterior a la ultima actividad. Es lo normal,
+        # no una imposibilidad: 43 de 54 disparos del corpus eran falsos.
+        _es_cobrador = is_collector_name(name)
+        if (d_open and d_dla and d_open > d_dla
+                and not is_collection and not is_chargeoff and not _es_cobrador):
             attacks.append(build_attack_record(
                 attack_type="opened_after_last_active",
                 bureau=bureau, accounts=[acc],
@@ -2151,6 +2170,8 @@ def is_collector_name(name: str) -> bool:
         return True
 
     # Strategy 1, comprehensive marker list
+    # PARCHE 23/09/2026 - se compara con limite de palabra. Antes "ars" hacia
+    # cobrador a SEARS y "erc" a COMMERCE BANK, MERCURY CARD y CHRYSLERCAP.
     markers = [
         # Major debt buyers
         "lvnv", "portfolio", "cavalry", "midland", "resurgent", "asset acceptance",
@@ -2165,8 +2186,16 @@ def is_collector_name(name: str) -> bool:
         "ability recovery", "medical recovery", "healthcare collect",
         # Common rent/housing collectors
         "rent recovery", "tenant",
+        # Compradores de deuda vistos en el corpus y que NO se reconocian
+        "jefferson capital", "jeffcapsys", "jeffersncp", "plaza serv",
+        "caine weiner", "credit coll", "blackwell", "aldous", "springoak",
     ]
-    return any(m in n for m in markers)
+    import re as _re
+    # PARCHE 23/09/2026 (2da pasada) - limite de palabra solo al INICIO.
+    # Los buros abrevian pegado ("LVNVFUNDG", "MIDLANDCRE"), asi que exigir
+    # limite tambien al final los dejaba fuera. Con el limite al inicio,
+    # "ars" ya no pega en SEARS ni "erc" en COMMERCE / MERCURY / CHRYSLERCAP.
+    return any(_re.search(r"\b" + _re.escape(m), n) for m in markers)
 
 
 def has_original_creditor_label(name: str) -> bool:
@@ -2636,8 +2665,8 @@ def detect_dispute_active_unresolved_attacks(
         "consumer statement",
         "account was in dispute",
         "account in dispute",
-        "dispute resolved",
-        "now resolved - reported by",
+        # PARCHE 23/09/2026 - "dispute resolved" y "now resolved" dicen que la
+        # disputa YA se resolvio: contradicen el nombre del ataque. 25 disparos.
         "dispute investigation",
     )
 
@@ -3111,7 +3140,9 @@ def detect_bankruptcy_reporting_period_exceeded(
         if "BANKRUPT" not in blob and "CHAPTER" not in blob:
             continue
 
-        filed_raw = (acc.get("date_filed") or acc.get("date_opened") or "")
+        # PARCHE 23/09/2026 - date_opened es cuando se abrio LA CUENTA, no
+        # cuando se presento la bancarrota. Sin date_filed no se afirma nada.
+        filed_raw = (acc.get("date_filed") or "")
         filed_dt = parse_date_field(filed_raw) if filed_raw else None
         if filed_dt is None:
             continue
@@ -3147,8 +3178,15 @@ def detect_bankruptcy_reporting_period_exceeded(
     return attacks
 
 
-_REPO_HINTS = ("REPOSSESS", "REPO", "VOLUNTARY SURRENDER", "SURRENDER",
+_REPO_HINTS = ("REPOSSESS", "VOLUNTARY SURRENDER", "SURRENDER",
                "COLLATERAL SOLD", "REDEEMED")
+
+# PARCHE 23/09/2026 - "REPO" como subcadena pegaba dentro de "REPORTED" y
+# convertia tarjetas de credito en reposesiones (66 de 66 disparos falsos en
+# el corpus). Ahora se exige la palabra completa.
+_REPO_RE = re.compile(
+    r"\b(?:REPOSSESS(?:ED|ION|IONS)?|VOLUNTARY\s+SURRENDER|SURRENDER(?:ED)?"
+    r"|COLLATERAL\s+SOLD|REDEEMED)\b")
 
 
 def detect_repossession_proceeds_not_credited(
@@ -3169,7 +3207,7 @@ def detect_repossession_proceeds_not_credited(
         blob = " ".join(str(acc.get(k, "")) for k in
                         ("account_type", "account_type_detail", "comments",
                          "payment_status")).upper()
-        if not any(h in blob for h in _REPO_HINTS):
+        if not _REPO_RE.search(blob):
             continue
 
         if not _field_present(acc, "balance") or not _field_present(acc, "high_credit"):
@@ -4481,6 +4519,18 @@ BUREAU_ADDRESSES = {
 }
 
 
+def _letter_date() -> str:
+    """Fecha del dia en que se GENERA la carta.
+
+    PARCHE 23/09/2026 - antes todas las cartas se fechaban con la fecha del
+    reporte de credito. Una carta de Jennifer salia con "February 25, 2026" y
+    se despachaba siete meses despues. La fecha del reporte sigue apareciendo
+    dentro del texto de cada cuenta; la del sobre ahora es la real.
+    """
+    from datetime import datetime as _dt
+    return _dt.today().strftime("%B %d, %Y").replace(" 0", " ")
+
+
 def _format_date_long(report_date_str: str) -> str:
     """Returns date as 'January 7, 2026', how a person writes it."""
     from datetime import datetime as _dt
@@ -4495,12 +4545,362 @@ import random as _random
 # Four structurally distinct opening paragraphs.
 # Same legal content, different sentence order and wording.
 # The system picks one per letter so no two letters are identical.
+
+# ============================================================================
+#  APERTURA MODULAR - 23/09/2026
+#
+#  Por que existe: con 6 plantillas fijas, 25 clientes compartian 229 secuencias
+#  de 20 palabras, y a 1.000 clientes cada frase caeria en ~800 de ellos. El
+#  informe de la CFPB de 2023 sobre disputas describe filtros de "tercero" que
+#  usan como criterio la misma narrativa en 20+ casos dentro de 45 dias.
+#
+#  Como funciona: la apertura se arma con una frase de cada ranura. NINGUNA
+#  frase pasa de 15 palabras, asi que toda ventana de 20 palabras cruza el borde
+#  entre dos frases y su unicidad es el producto de dos elecciones: 10 x 10.
+#  A 1.000 clientes eso deja ~10 por secuencia, debajo del objetivo de 15.
+#
+#  Las 8 ranuras dicen lo mismo legalmente y llevan las mismas citas.
+# ============================================================================
+
+
+# ============================================================================
+#  LINEA DE LISTA Y CIERRE - 23/09/2026
+#
+#  Antes: la carta separaba la lista con "The following accounts must be
+#  deleted immediately:" y terminaba en el ultimo parrafo de cuenta, sin
+#  cierre. Dos problemas:
+#    1. Al buro no se le puede ordenar. Su deber nace del 1681i: reinvestigar,
+#       borrar o corregir lo que no se pueda verificar, y avisar por escrito.
+#       Exigir el borrado de todo, incluso donde la carta pide CORREGIR un
+#       estatus, es contradictorio y suena a formulario.
+#    2. Sin cierre, la carta corta en seco.
+#
+#  Ahora: linea neutral + cierre de tres frases cortas, elegidas con la misma
+#  semilla deterministica. El cierre pide lo que la ley SI contempla y deja
+#  constancia de que la disputa la manda el propio consumidor.
+# ============================================================================
+
+_LINEA_LISTA = [
+    "The accounts I am disputing are listed below:",
+    "These are the accounts I need you to investigate:",
+    "Below are the accounts covered by this dispute:",
+    "I am disputing the following accounts:",
+    "These accounts are the subject of this dispute:",
+    "The items in question are listed here:",
+    "Here are the accounts I am asking you to review:",
+    "The following accounts are the ones I dispute:",
+]
+
+_CIERRE_A = [   # resultados y copia del archivo, 1681i(a)(6)
+    "When the reinvestigation is complete, please send me the results.",
+    "Please send the written results once the investigation is finished.",
+    "I would like the results in writing when you finish.",
+    "Please include an updated copy of my file with the results.",
+    "When it is done, an updated report would be appreciated.",
+    "I am asking for the written outcome and an updated file.",
+    "Please let me know in writing what you determined.",
+    "The results in writing, with an updated report, are what I expect.",
+    "Once finished, please send the outcome and a current copy.",
+    "Please confirm the outcome in writing when the review ends.",
+]
+_CIERRE_B = [   # ofrecimiento de mas informacion
+    "If you need anything else from me, please write to the address above.",
+    "I am happy to provide more information if it helps.",
+    "Let me know if you need documents from my side.",
+    "If something is missing, contact me at the address above.",
+    "I can send additional records if that moves this along.",
+    "Reach me at the address above if anything is unclear.",
+    "Ask me if you need more from my end.",
+    "I will supply whatever else you need to complete this.",
+    "If more detail helps, I am glad to provide it.",
+    "Write to me at the address above with any questions.",
+]
+_CIERRE_C = [   # la disputa la manda el propio consumidor
+    "I am sending this dispute myself, on my own behalf.",
+    "This letter is mine and I am submitting it personally.",
+    "I am the consumer writing about my own credit file.",
+    "No one is filing this for me; it is my own dispute.",
+    "I wrote and sent this letter about my own report.",
+    "This is my personal dispute about my own credit file.",
+    "I am handling this dispute directly, about my own report.",
+    "This comes from me, the consumer named above.",
+    "I am disputing my own file, in my own name.",
+    "This request is mine and concerns only my credit file.",
+]
+
+
+def _linea_lista(semilla: int, orden_carta: int = 0) -> str:
+    return _LINEA_LISTA[((semilla >> 40) + orden_carta) % len(_LINEA_LISTA)]
+
+
+def _cierre_carta(semilla: int, orden_carta: int = 0) -> str:
+    a = _CIERRE_A[((semilla >> 44) + orden_carta) % len(_CIERRE_A)]
+    b = _CIERRE_B[((semilla >> 48) + orden_carta * 3) % len(_CIERRE_B)]
+    c = _CIERRE_C[((semilla >> 52) + orden_carta * 7) % len(_CIERRE_C)]
+    return f"{a} {b} {c}"
+
+
+_APERTURA_BLOQUES: list[list[str]] = [
+    # 1 - motivo
+    [
+        "I reviewed my credit report and found accounts that are not reported correctly.",
+        "Going through my credit file, I found entries that do not look accurate.",
+        "I pulled my credit report recently and several accounts do not appear correct.",
+        "After reading my credit report, I have accounts I need to dispute.",
+        "My credit file contains entries I do not believe are being reported accurately.",
+        "I checked my credit report and some accounts do not match my records.",
+        "Reviewing my report, I came across items that appear to be inaccurate.",
+        "There are accounts on my credit file that I am disputing as inaccurate.",
+        "I read through my credit report and found reporting that seems wrong.",
+        "Looking at my credit file, certain accounts do not reflect the facts.",
+        "My credit report has entries I need corrected or removed.",
+        "I went through my file and several items are wrong.",
+        "This letter concerns accounts on my report that are not accurate.",
+        "Some of what appears on my credit file is not correct.",
+        "I am writing about accounts that my records do not support.",
+        "A review of my report turned up entries I dispute.",
+        "Several tradelines on my file do not match what happened.",
+        "I found reporting on my file that I cannot accept as accurate.",
+        "There is information on my credit report that needs to be corrected.",
+        "My file shows accounts that conflict with my own records.",
+        "I am disputing entries that appeared when I reviewed my report.",
+        "Certain items on my credit file are reported in error.",
+        "I obtained my credit report and found problems with several accounts.",
+        "What my report says about these accounts is not what happened.",
+        "I have reviewed my file and I am disputing the items below.",
+    ],
+    # 2 - el derecho
+    [
+        "Under 15 U.S.C. section 1681i, I am asking you to reinvestigate them.",
+        "I dispute them under 15 U.S.C. section 1681i and ask for reinvestigation.",
+        "15 U.S.C. section 1681i gives me the right to dispute this information.",
+        "This is a formal dispute under 15 U.S.C. section 1681i.",
+        "Please reinvestigate the items below, as 15 U.S.C. section 1681i provides.",
+        "I am exercising my right to dispute under 15 U.S.C. section 1681i.",
+        "Under 15 U.S.C. section 1681i, a reinvestigation of these items is required.",
+        "I ask for a reinvestigation of each item under 15 U.S.C. section 1681i.",
+        "My dispute is made under 15 U.S.C. section 1681i of the FCRA.",
+        "Please treat this as a dispute under 15 U.S.C. section 1681i.",
+        "Section 1681i of the FCRA is the basis for this dispute.",
+        "I am invoking 15 U.S.C. section 1681i and asking for reinvestigation.",
+        "This letter is a dispute under 15 U.S.C. section 1681i.",
+        "Reinvestigation of these entries is my right under 15 U.S.C. section 1681i.",
+        "I rely on 15 U.S.C. section 1681i in asking you to reinvestigate.",
+        "The FCRA, at 15 U.S.C. section 1681i, entitles me to this.",
+        "Please open a reinvestigation as 15 U.S.C. section 1681i requires.",
+        "Under the dispute provision, 15 U.S.C. section 1681i, please investigate these.",
+        "I am asking for reinvestigation, which 15 U.S.C. section 1681i guarantees.",
+        "Consider this my dispute under 15 U.S.C. section 1681i.",
+        "15 U.S.C. section 1681i obliges you to reinvestigate what I dispute.",
+        "Every item below is disputed under 15 U.S.C. section 1681i.",
+        "I am submitting this dispute under the FCRA, 15 U.S.C. section 1681i.",
+        "The right I am exercising here comes from 15 U.S.C. section 1681i.",
+        "Treat each item below as disputed under 15 U.S.C. section 1681i.",
+    ],
+    # 3 - el plazo
+    [
+        "The law gives you 30 days to complete that reinvestigation.",
+        "That reinvestigation must be completed within 30 days under section 1681i(a)(1)(A).",
+        "Section 1681i(a)(1)(A) sets a 30-day deadline for your investigation.",
+        "You have 30 days to finish it, as section 1681i(a)(1)(A) requires.",
+        "Please complete it within the 30 days the statute allows.",
+        "The 30-day period in section 1681i(a)(1)(A) applies to this dispute.",
+        "I expect the investigation finished inside the statutory 30-day window.",
+        "Federal law sets that deadline at 30 days from receipt of this letter.",
+        "Your deadline to complete it is 30 days from receipt.",
+        "This reinvestigation carries a 30-day limit under section 1681i(a)(1)(A).",
+        "Section 1681i(a)(1)(A) gives you 30 days from receipt of this letter.",
+        "Please finish within the 30 days federal law allows.",
+        "That investigation has a 30-day statutory deadline.",
+        "I expect it completed within 30 days of receipt.",
+        "Thirty days is the window section 1681i(a)(1)(A) provides.",
+        "The statute allows 30 days, and I am counting from delivery.",
+        "Please treat the 30-day clock as running from the date received.",
+        "Your investigation must conclude inside 30 days under the statute.",
+        "Section 1681i(a)(1)(A) does not allow more than 30 days.",
+        "I am expecting results within the 30-day period the law sets.",
+        "The reinvestigation deadline here is 30 days, not longer.",
+        "Under section 1681i(a)(1)(A) you have one month to complete it.",
+        "Complete the reinvestigation within the 30 days the FCRA requires.",
+        "The clock is 30 days under section 1681i(a)(1)(A).",
+        "I ask that you observe the 30-day statutory period.",
+    ],
+    # 4 - documentacion, no un si o no
+    [
+        "Please ask each furnisher for documentation, not a simple confirmation.",
+        "I want records from the furnisher, not a yes or no answer.",
+        "A confirmation from the furnisher is not verification; ask for the records.",
+        "Please require the reporting company to produce documents, not check a box.",
+        "Verification means documents, so please request them from each company.",
+        "Ask the furnisher to support each item with its own records.",
+        "I am asking for actual documentation behind each account, not a code.",
+        "Please obtain the underlying records from whoever is reporting these accounts.",
+        "The furnisher should show its records rather than simply restate the data.",
+        "I want each item backed by documents held by the reporting company.",
+        "A coded response is not documentation; please obtain the records.",
+        "Please have each furnisher send the paperwork behind its report.",
+        "I want the source documents, not a restatement of the same data.",
+        "Confirming the data against itself is not a reinvestigation.",
+        "Each furnisher should produce records, not simply verify the entry.",
+        "Please collect the underlying paperwork from every company involved.",
+        "What I need is proof on paper from the reporting company.",
+        "Ask for documents that support each field, not a summary.",
+        "Please do not accept a verification without the records behind it.",
+        "Records held by the furnisher are what I am asking you to obtain.",
+        "The reporting company should hand over documents, not a status code.",
+        "I expect the furnisher to be asked for its actual file.",
+        "Please require proof rather than a confirmation of what is reported.",
+        "Each entry should be checked against documents, not against itself.",
+        "Obtain from each company the records that back up its reporting.",
+    ],
+    # 5 - lista A
+    [
+        "That means the original signed agreement and a complete payment history.",
+        "Specifically: the signed contract and the full record of payments.",
+        "I am asking for the original agreement and every payment recorded.",
+        "Start with the signed agreement and the complete payment ledger.",
+        "The contract bearing my signature and the payment history are the basics.",
+        "Please obtain the account agreement and the full history of payments.",
+        "I need the original contract and a month-by-month payment record.",
+        "The signed agreement and the payment history come first.",
+        "That includes my signed contract and the complete payment record.",
+        "I want the agreement I signed and every payment posted to it.",
+        "Begin with the contract I signed and the full payment record.",
+        "The agreement bearing my signature, plus every payment made, are needed.",
+        "I want a copy of the contract and the complete payment history.",
+        "Please get the signed agreement and the ledger of payments.",
+        "First the original contract, then the payment history from the start.",
+        "The account agreement and the record of every payment are needed here.",
+        "Send the signed contract along with the full payment record.",
+        "I ask for the original agreement and the history of payments.",
+        "The contract I entered and the payments posted to it are essential.",
+        "Produce the signed agreement and the complete record of payments.",
+        "The paperwork I signed and a full payment history are required.",
+        "That starts with my signed contract and the payment record.",
+        "Please secure the original agreement and every payment entry.",
+        "I need to see the signed contract and the payment ledger.",
+        "The agreement and the complete payment record are the first items.",
+    ],
+    # 6 - lista B
+    [
+        "Also an itemized balance, the date I first fell behind, and any transfer records.",
+        "Add an itemized balance, my first delinquency date, and proof of any sale.",
+        "Then the balance broken down, the delinquency date, and the assignment chain.",
+        "I also want the balance itemized and the date of first delinquency.",
+        "Include how the balance was calculated and when I first missed payment.",
+        "The itemized balance, the original delinquency date, and any transfer paperwork.",
+        "Also documentation of the balance, the first missed payment, and any sale.",
+        "I need the balance explained, the delinquency date, and ownership proof.",
+        "Plus the balance breakdown, the date of first delinquency, and assignment records.",
+        "And the itemized amount owed, the delinquency date, and who owns it now.",
+        "Then an itemized balance, the first delinquency date, and any assignment.",
+        "Also how the amount owed was figured and when I first fell behind.",
+        "I want the balance itemized, the delinquency date, and transfer paperwork.",
+        "Next, the breakdown of the balance and the original delinquency date.",
+        "Include the itemized amount, the date of first delinquency, and ownership records.",
+        "Also required: the balance detail, the delinquency date, and any sale documents.",
+        "Beyond that, an itemized balance and the date the account first went late.",
+        "The amount owed in detail, the first delinquency, and the chain of ownership.",
+        "Add the balance calculation, the original delinquency date, and transfer records.",
+        "I also need the balance detailed and the date I first missed payment.",
+        "Please include the itemized total, the delinquency date, and any assignment record.",
+        "The balance broken out, the first missed payment, and who holds it now.",
+        "Then documentation of the amount, the delinquency date, and the sale, if any.",
+        "Also the itemized figure, the date of first delinquency, and ownership proof.",
+        "Finally the balance detail, the delinquency date, and any assignment paperwork.",
+    ],
+    # 7 - lo no verificable se borra
+    [
+        "Anything that cannot be verified must be deleted under section 1681i(a)(5).",
+        "Under section 1681i(a)(5), unverifiable items have to come off my file.",
+        "What the furnisher cannot document must be removed, per section 1681i(a)(5).",
+        "Items without support must be deleted, as section 1681i(a)(5) requires.",
+        "If it cannot be verified, section 1681i(a)(5) calls for deletion.",
+        "Section 1681i(a)(5) requires deletion of anything that cannot be verified.",
+        "Unverified entries must be deleted under section 1681i(a)(5).",
+        "Whatever lacks documentation has to be deleted under section 1681i(a)(5).",
+        "Please delete any item the furnisher cannot verify, per section 1681i(a)(5).",
+        "Section 1681i(a)(5) does not allow unverifiable information to stay.",
+        "If the records are not there, section 1681i(a)(5) requires deletion.",
+        "Section 1681i(a)(5) says unverified information cannot remain on my file.",
+        "Delete what cannot be documented, as section 1681i(a)(5) directs.",
+        "Anything unsupported has to come off under section 1681i(a)(5).",
+        "Under section 1681i(a)(5), what is not verified must be removed.",
+        "Section 1681i(a)(5) leaves no room for unverified entries.",
+        "Where verification fails, section 1681i(a)(5) calls for removal.",
+        "Please apply section 1681i(a)(5) and delete what cannot be proven.",
+        "An item nobody can verify must be deleted under section 1681i(a)(5).",
+        "Section 1681i(a)(5) obliges deletion when verification is not possible.",
+        "What the records do not support has to go, per section 1681i(a)(5).",
+        "Deletion is the remedy section 1681i(a)(5) provides for unverified items.",
+        "If verification is not possible, remove the item under section 1681i(a)(5).",
+        "Section 1681i(a)(5) requires that unverifiable entries be taken off.",
+        "Unsupported information must be deleted, as section 1681i(a)(5) provides.",
+    ],
+    # 8 - resultados por escrito
+    [
+        "Please send your results in writing, including who you contacted.",
+        "I also expect written results naming each company you contacted.",
+        "Send me the written outcome and the companies you reached out to.",
+        "Your written results should identify every furnisher you contacted.",
+        "Please confirm the outcome in writing under section 1681e(b) accuracy duties.",
+        "I want the results in writing and an updated copy of my file.",
+        "Please report back in writing with what each company provided.",
+        "Written results, and the name of each company contacted, are expected.",
+        "Section 1681e(b) requires accuracy; please confirm the results in writing.",
+        "Send written results, including what documentation each company produced.",
+        "I expect written results and the name of every company contacted.",
+        "Please put the outcome in writing and list who you asked.",
+        "A written response naming each furnisher contacted is what I expect.",
+        "Send the results in writing along with a corrected copy of my file.",
+        "Please respond in writing and identify each company you reached.",
+        "I want written confirmation of the outcome for every item.",
+        "The written results should say what each company supplied.",
+        "Please document the outcome in writing, company by company.",
+        "I am asking for the results in writing, not by phone.",
+        "Written notice of the outcome, plus an updated report, is expected.",
+        "Please confirm in writing which items were changed or deleted.",
+        "Report the outcome in writing and name the furnishers you contacted.",
+        "I would like written results showing what each furnisher provided.",
+        "Send written notice of what you found for each disputed item.",
+        "Please provide the results in writing with an updated credit file.",
+    ],
+]
+
+
+def _apertura_modular(semilla: int, orden_carta: int = 0) -> str:
+    """Arma la apertura tomando una frase de cada ranura.
+
+    semilla      -- huella del cliente + fecha del reporte: separa a un cliente
+                    de otro. Cada ranura usa bits distintos, asi que las ocho
+                    elecciones son independientes.
+    orden_carta  -- posicion de esta carta dentro de la tanda del cliente.
+                    Desplaza TODAS las ranuras, de modo que dos cartas del mismo
+                    cliente no comparten ni una sola frase mientras la tanda no
+                    supere las 25 cartas.
+
+    Las ranuras pasaron de 10 a 25 frases el 23/09/2026. Medido por simulacion
+    (~/audit/proyeccion_V.py, validada contra la medicion real): con 10 frases
+    por ranura, a los 150 clientes ya habia una secuencia compartida por 19 de
+    ellos, y a los 300 habia 775 secuencias en 20 o mas clientes. Con 25 el
+    limite se corre a unos 1.000 clientes. El umbral de 20 sale del informe
+    del CFPB de 2023 sobre las pantallas de terceros de los buros.
+
+    Deterministica: los mismos dos numeros dan la misma apertura siempre.
+    """
+    partes = []
+    for i, bloque in enumerate(_APERTURA_BLOQUES):
+        idx = ((semilla >> (i * 5)) + orden_carta) % len(bloque)
+        partes.append(bloque[idx])
+    return "Hi,\n\n" + " ".join(partes[:4]) + "\n\n" + " ".join(partes[4:])
+
+
 _OPENING_TEMPLATES_R1 = [
     # Version A -- starts with the personal situation
     (
         "Hi,\n\n"
         "I recently went through my credit report and found {count} that I do not "
-        "believe {they_verb} being reported correctly. I am writing to formally dispute "
+        "believe {verb} being reported correctly. I am writing to formally dispute "
         "{these_items} and to ask that you reinvestigate them. The Fair Credit "
         "Reporting Act gives me the right to dispute inaccurate or unverifiable "
         "information, and it requires you to complete that investigation within "
@@ -4556,7 +4956,7 @@ _OPENING_TEMPLATES_R1 = [
     (
         "Hi,\n\n"
         "I am disputing {count} on my credit report that I believe "
-        "{they_verb} not accurate or cannot be verified. I am asking that you "
+        "{verb} not accurate or cannot be verified. I am asking that you "
         "reinvestigate {these_items} under 15 U.S.C. section 1681i."
         "\n\n"
         "For each account below, I need you to require the reporting company to "
@@ -4601,7 +5001,7 @@ _OPENING_TEMPLATES_R1 = [
     (
         "Hi,\n\n"
         "I recently reviewed my credit report and found {these_items} that "
-        "{they_verb} being reported inaccurately. I am disputing {these_items} "
+        "{verb} being reported inaccurately. I am disputing {these_items} "
         "under the Fair Credit Reporting Act and asking that you investigate "
         "and remove anything that cannot be fully verified."
         "\n\n"
@@ -4635,7 +5035,8 @@ _OPENING_TEMPLATES_R2 = [
         "reinvestigation, which means going back to the reporting company and "
         "reviewing documentation, not just sending an automated inquiry and "
         "accepting whatever answer comes back. I am specifically requesting, under "
-        "15 U.S.C. section 1681i(a)(6)(B)(iii), that you tell me the procedure you "
+        "15 U.S.C. section 1681i(a)(6)(B)(iii) and 15 U.S.C. section 1681i(a)(7), "
+    "that you tell me the procedure you "
         "used, the name and contact information of every company you reached out to, "
         "and what documentation you relied on. I am also noting that continuing to "
         "report information that cannot be verified, after a properly submitted "
@@ -4654,6 +5055,7 @@ _OPENING_TEMPLATES_R2 = [
         "I know under 15 U.S.C. section 1681i(a) that a reasonable reinvestigation "
         "is required and that just confirming the data with the furnisher is not "
         "enough. I want real records reviewed. Under 15 U.S.C. section 1681i(a)(6)(B)(iii) "
+        "and 15 U.S.C. section 1681i(a)(7), which gives you 15 days to answer, "
         "I am asking that you provide me with a written description of your "
         "investigation process and the contact information for every company you "
         "reached out to. If any of these accounts cannot be verified with real "
@@ -4673,7 +5075,8 @@ _OPENING_TEMPLATES_R2 = [
         "someone at the reporting company clicks confirm and nothing gets reviewed. "
         "The Fair Credit Reporting Act (15 U.S.C. section 1681i(a)) requires a "
         "reasonable reinvestigation, and I expect that standard to be met. "
-        "I am also requesting under 15 U.S.C. section 1681i(a)(6)(B)(iii) that "
+        "I am also requesting under 15 U.S.C. section 1681i(a)(6)(B)(iii) and "
+        "15 U.S.C. section 1681i(a)(7) that "
         "you send me a description of exactly how each account was investigated, "
         "including who was contacted and what they provided. Any account that "
         "cannot be fully verified must be deleted. I am aware of the remedies "
@@ -4741,7 +5144,7 @@ _OPENING_TEMPLATES_R3 = [
         "15 U.S.C. section 1681i(a) requires actual, reasonable investigation "
         "of disputed information. I have met my obligations under the law. "
         "You have not met yours. I am placing you on formal written notice "
-        "that if {these_items} {they_verb} not corrected or deleted, "
+        "that if {these_items} {verb} not corrected or deleted, "
         "I will file a complaint with the Consumer Financial Protection Bureau, "
         "the Federal Trade Commission, and my state attorney general, "
         "and I will seek all available remedies under 15 U.S.C. section 1681n "
@@ -4752,26 +5155,9 @@ _OPENING_TEMPLATES_R3 = [
 
 
 # Fixed template index per bureau+round, guarantees no two letters share an opening.
-_TEMPLATE_INDEX = {
-    ("transunion", "round_1"): 0,
-    ("experian",   "round_1"): 1,
-    ("equifax",    "round_1"): 2,
-    ("transunion", "round_2"): 0,
-    ("experian",   "round_2"): 1,
-    ("equifax",    "round_2"): 2,
-}
-
-
-def _pick_opening(templates: list, items: list, bureau: str, round_key: str) -> str:
-    """Pick a template by fixed index (no randomness, guaranteed unique per bureau+round)."""
-    idx = _TEMPLATE_INDEX.get((bureau, round_key), 0) % len(templates)
-    tpl = templates[idx]
-    n           = len(items)
-    count       = f"{n} account{'s' if n != 1 else ''}"
-    verb        = "are" if n != 1 else "is"
-    they_verb   = "they are" if n != 1 else "it is"
-    these_items = "these accounts" if n != 1 else "this account"
-    return tpl.format(count=count, verb=verb, they_verb=they_verb, these_items=these_items)
+# _TEMPLATE_INDEX y _pick_opening se eliminaron el 23/09/2026: eran codigo
+# muerto (nadie los llamaba) y tenian la version CORRECTA de they_verb, lo que
+# hacia creer que el bug estaba arreglado.
 
 
 # Reason variation seeds, ensures same attack type gets slightly different
@@ -4792,7 +5178,33 @@ _VARIATION_CLOSERS_BASIC = [
 ]
 
 
-def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx: int = 0) -> str:
+
+# PARCHE 23/09/2026 - conectores de vineta.
+# La lista de banderas repetia ventanas de 20 palabras cuando dos cuentas
+# traian el mismo par de banderas seguidas. Ahora cada vineta arranca con
+# un conector corto elegido con el codigo RS del parrafo (posiciones 6 en
+# adelante), asi que dos vinetas consecutivas nunca coinciden a la vez.
+_NARR_CONECTOR = [
+    "first of all,",
+    "on top of that,",
+    "beyond that,",
+    "in addition,",
+    "separately,",
+    "further,",
+    "also,",
+    "next,",
+    "besides that,",
+    "along with that,",
+    "at the same time,",
+    "on the same entry,",
+    "just as concerning,",
+    "add to this that",
+    "there is also the fact that",
+    "another point is that",
+    "equally important,",
+]
+
+def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx: int = 0, narr_idx: int = -1) -> str:
     """
     Converts secondary_flags into a supplementary paragraph for the dispute letter.
     Each flag is an additional FCRA violation found on the same account.
@@ -4819,25 +5231,25 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "cross_bureau_date_opened_conflict":    "the date this account was opened is different at different bureaus",
         "cross_bureau_account_type_conflict":   "the account type classification is not the same at every bureau",
         "cross_bureau_payment_history_date_conflict": "the month of the late payment in the payment history varies by bureau",
-        "absent_bureau_reporting_inconsistency": "this account appears as a negative item here but is not reported the same way at all three bureaus",
+        "absent_bureau_reporting_inconsistency": "this negative item is not reported the same way at every bureau",
         "late_payment_history_dispute":         "there are late payment marks in the payment history that I am also disputing",
-        "collection_late_payment_conflict":     "the account is simultaneously classified as a collection and as having a late payment status, which are contradictory",
-        "late_collection_conflict":             "the account carries both late payment and collection indicators at the same time, which cannot both be accurate",
-        "potential_re_aging":                   "the date being used appears to reset the reporting clock past what the law allows",
-        "dofd_unknown_verification_required":   "the date of first delinquency is not clearly disclosed, making it impossible to verify the account is within its legal reporting window",
+        "collection_late_payment_conflict":     "the account is classified as a collection and as late at once",
+        "late_collection_conflict":             "the entry carries late-payment and collection indicators at the same time",
+        "potential_re_aging":                   "the date used appears to reset the reporting clock",
+        "dofd_unknown_verification_required":   "the date of first delinquency is not clearly disclosed",
         "duplicate_account_number":             "this account number appears more than once on my report",
         "same_account_number_same_balance":     "the same account number and balance appear in multiple tradelines",
         "multi_furnisher_same_balance":         "multiple companies are reporting the same balance for what appears to be one debt",
         "closed_with_balance":                  "the account shows a closed status but is still reporting a balance",
         "paid_status_with_past_due":            "the account shows as paid but also carries a past-due amount, which are contradictory",
-        "zero_balance_with_past_due":           "the balance is reported as zero while a past-due amount is still being reported, which cannot both be true",
+        "zero_balance_with_past_due":           "the balance is zero while a past-due amount is still reported",
         "open_status_chargeoff_conflict":       "the account is listed as open but also shows a charge-off or collection status",
-        "balance_exceeds_high_credit":          "the current balance exceeds the original loan amount, which is not possible on an installment account",
+        "balance_exceeds_high_credit":          "the balance exceeds the original loan amount",
         "balance_exceeds_credit_limit":         "the balance significantly exceeds the reported credit limit",
         "past_due_exceeds_balance":             "the past-due amount shown is higher than the total balance, which is mathematically impossible",
-        "monthly_payment_on_collection":        "a monthly payment amount is being reported on a collection account, which should not have an active payment schedule",
-        "current_payment_derogatory_status":    "the payment status shows as current but the account classification is derogatory, which directly contradict each other",
-        "opened_after_last_active":             "the account open date is later than the date of last activity, which is chronologically impossible",
+        "monthly_payment_on_collection":        "a monthly payment is reported on a collection account",
+        "current_payment_derogatory_status":    "the payment status reads current while the classification is derogatory",
+        "opened_after_last_active":             "the open date is later than the last activity date",
     }
 
     # Alternate phrasings, rotate to variant B when variation_idx is odd
@@ -4845,34 +5257,103 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
         "cross_bureau_balance_conflict":        "the balance amount does not match from one bureau to the next",
         "cross_bureau_payment_status_conflict": "each bureau is showing a different payment status for this account",
         "cross_bureau_account_status_conflict": "the account status differs from one bureau file to another",
-        "cross_bureau_high_credit_conflict":    "the high credit figure should be fixed, but it is reported at different values by different bureaus",
+        "cross_bureau_high_credit_conflict":    "the high credit figure differs from one bureau to another",
         "cross_bureau_credit_limit_conflict":   "the credit limit being shown is not the same at every bureau",
         "cross_bureau_date_opened_conflict":    "the reported open date varies depending on which bureau is reporting",
         "cross_bureau_account_type_conflict":   "each bureau has this account categorized under a different account type",
         "cross_bureau_payment_history_date_conflict": "the late-payment months shown in the payment history do not match between bureaus",
-        "absent_bureau_reporting_inconsistency": "this negative item is not being reported the same way across all three credit bureaus",
-        "late_payment_history_dispute":         "I am also disputing specific late-payment marks listed in the payment history for this account",
-        "collection_late_payment_conflict":     "the account is tagged as both a collection and as currently late on payments, which is contradictory",
-        "late_collection_conflict":             "this account simultaneously shows a late-payment status and a collection status, and both cannot be true",
-        "potential_re_aging":                   "the dates being used appear to push this account's reporting clock beyond what federal law permits",
-        "dofd_unknown_verification_required":   "there is no clearly disclosed date of first delinquency, so I cannot tell if the reporting window is still valid",
+        "absent_bureau_reporting_inconsistency": "this item is missing or different at one of the bureaus",
+        "late_payment_history_dispute":         "I dispute the late marks listed in the payment history",
+        "collection_late_payment_conflict":     "it is tagged a collection and also currently late",
+        "late_collection_conflict":             "it shows a late status and a collection status together",
+        "potential_re_aging":                   "the dates push the reporting clock past the legal limit",
+        "dofd_unknown_verification_required":   "no clear date of first delinquency appears on the entry",
         "duplicate_account_number":             "this same account number shows up on my report more than once",
         "same_account_number_same_balance":     "more than one tradeline lists this same account number and balance",
-        "multi_furnisher_same_balance":         "several different companies are reporting the exact same balance for what appears to be a single debt",
+        "multi_furnisher_same_balance":         "several companies report the exact same balance on this debt",
         "closed_with_balance":                  "the account is marked closed but a balance is still being reported",
-        "paid_status_with_past_due":            "the account reads as paid but also shows a past-due amount, which do not agree",
-        "zero_balance_with_past_due":           "the account shows nothing owed and at the same time an amount past due, which do not agree",
+        "paid_status_with_past_due":            "it reads as paid and still shows an amount past due",
+        "zero_balance_with_past_due":           "nothing is owed, yet an amount past due is listed",
         "open_status_chargeoff_conflict":       "the account is flagged open while also being reported as a charge-off or collection",
-        "balance_exceeds_high_credit":          "the current balance is higher than the original loan amount, which should be impossible on an installment account",
+        "balance_exceeds_high_credit":          "the balance is higher than the original loan amount",
         "balance_exceeds_credit_limit":         "the reported balance is higher than the credit limit by a significant margin",
         "past_due_exceeds_balance":             "the past-due figure exceeds the total balance, which mathematically cannot be correct",
-        "monthly_payment_on_collection":        "a monthly payment is being reported on this collection account, even though collections do not carry active payment schedules",
-        "current_payment_derogatory_status":    "the payment status reads current while the overall account classification is derogatory, those two do not agree",
-        "opened_after_last_active":             "the account open date falls after the date of last activity, which makes no chronological sense",
+        "monthly_payment_on_collection":        "a payment schedule is reported on a collection account",
+        "current_payment_derogatory_status":    "current payment status sits beside a derogatory classification",
+        "opened_after_last_active":             "the open date falls after the last activity date",
     }
 
-    use_variant_b = (variation_idx % 2) == 1
-    FLAG_DESC = FLAG_DESCRIPTIONS_B if use_variant_b else FLAG_DESCRIPTIONS_A
+    FLAG_DESCRIPTIONS_C = {
+        "cross_bureau_balance_conflict": "one bureau carries a balance the others do not",
+        "cross_bureau_payment_status_conflict": "the payment status changes depending on which report I read",
+        "cross_bureau_account_status_conflict": "whether this account is open or closed depends on the bureau",
+        "cross_bureau_high_credit_conflict": "the high credit number is not the same on every report",
+        "cross_bureau_credit_limit_conflict": "two bureaus disagree about what the credit limit is",
+        "cross_bureau_date_opened_conflict": "the opening date is not the same on every report",
+        "cross_bureau_account_type_conflict": "this account is typed one way here and another way elsewhere",
+        "cross_bureau_payment_history_date_conflict": "the late months in the history line up differently by bureau",
+        "absent_bureau_reporting_inconsistency": "one bureau reports this item in a way the others do not",
+        "late_payment_history_dispute": "the history carries late marks I do not accept",
+        "collection_late_payment_conflict": "one entry cannot be both a collection and a current late",
+        "late_collection_conflict": "the late flag and the collection flag sit on the same entry",
+        "potential_re_aging": "the dating on this entry appears to restart the clock",
+        "dofd_unknown_verification_required": "there is no first delinquency date shown anywhere",
+        "duplicate_account_number": "the same account number turns up twice in my file",
+        "same_account_number_same_balance": "two entries carry an identical number and an identical balance",
+        "multi_furnisher_same_balance": "the same balance is reported by more than one company",
+        "closed_with_balance": "a closed account should not still show money owed",
+        "paid_status_with_past_due": "a paid account should not carry a past-due figure",
+        "zero_balance_with_past_due": "a zero balance and a past-due amount cannot both be right",
+        "open_status_chargeoff_conflict": "an open status sits next to a charge-off classification",
+        "balance_exceeds_high_credit": "the amount owed is above the original loan figure",
+        "balance_exceeds_credit_limit": "the balance runs past the limit reported beside it",
+        "past_due_exceeds_balance": "the past-due figure is larger than the balance itself",
+        "monthly_payment_on_collection": "a collection account should not carry a monthly payment",
+        "current_payment_derogatory_status": "the status reads current while the entry is classed derogatory",
+        "opened_after_last_active": "the account appears to have opened after it went inactive",
+    }
+
+    FLAG_DESCRIPTIONS_D = {
+        "cross_bureau_balance_conflict": "what I owe reads differently depending on the report",
+        "cross_bureau_payment_status_conflict": "no two bureaus agree on how this account is paying",
+        "cross_bureau_account_status_conflict": "the standing of this account is reported inconsistently",
+        "cross_bureau_high_credit_conflict": "a fixed figure like high credit should not move by bureau",
+        "cross_bureau_credit_limit_conflict": "my credit line reads differently on different reports",
+        "cross_bureau_date_opened_conflict": "there is more than one open date on record for this account",
+        "cross_bureau_account_type_conflict": "the category assigned to this account shifts by bureau",
+        "cross_bureau_payment_history_date_conflict": "the grid of late months does not agree between reports",
+        "absent_bureau_reporting_inconsistency": "the item is treated differently from one file to the next",
+        "late_payment_history_dispute": "I am contesting the delinquencies shown in the history",
+        "collection_late_payment_conflict": "the entry is tagged as collection and as late together",
+        "late_collection_conflict": "two conflicting indicators appear on this single tradeline",
+        "potential_re_aging": "the date shown pushes the entry past where it should end",
+        "dofd_unknown_verification_required": "the delinquency start date is missing from the entry",
+        "duplicate_account_number": "one account number is carrying two separate listings",
+        "same_account_number_same_balance": "the number and the balance repeat across two entries",
+        "multi_furnisher_same_balance": "one debt appears under several companies at the same figure",
+        "closed_with_balance": "the closing of the account did not clear the balance shown",
+        "paid_status_with_past_due": "the paid marking and the past-due amount contradict each other",
+        "zero_balance_with_past_due": "there is a past-due amount on an account showing nothing owed",
+        "open_status_chargeoff_conflict": "the entry is open and charged off at the same time",
+        "balance_exceeds_high_credit": "the balance sits above what was originally extended",
+        "balance_exceeds_credit_limit": "the figure owed is well past the stated credit line",
+        "past_due_exceeds_balance": "more is shown past due than is shown owed in total",
+        "monthly_payment_on_collection": "a payment amount appears on an account in collection",
+        "current_payment_derogatory_status": "a current rating and a derogatory label appear together",
+        "opened_after_last_active": "the dates place the opening after the last reported activity",
+    }
+
+    # PARCHE 23/09/2026 - cuatro redacciones por bandera, no dos. Cuando
+    # muchas cuentas del mismo cliente comparten la misma bandera (caso
+    # tipico: 12 cuentas de bancarrota con el mismo conflicto de estado de
+    # pago), dos redacciones no dan combinaciones suficientes y la ventana
+    # "descripcion + cierre" se repetia entre cartas.
+    _JUEGOS = (FLAG_DESCRIPTIONS_A, FLAG_DESCRIPTIONS_B,
+               FLAG_DESCRIPTIONS_C, FLAG_DESCRIPTIONS_D)
+    if narr_idx >= 0:
+        FLAG_DESC = _JUEGOS[_narr_slot_indices(narr_idx, 6)[5] % 4]
+    else:
+        FLAG_DESC = _JUEGOS[variation_idx % 4]
 
     described = []
     for flag in secondary_flags:
@@ -4884,62 +5365,1010 @@ def _build_secondary_flags_paragraph(secondary_flags: list[dict], variation_idx:
     if not described:
         return ""
 
-    # Lead-in phrasings, rotate so cross-bureau letters vary
-    _SINGLE_FLAG_INTROS = [
-        " Beyond the primary dispute above, I also noticed that {desc}. "
-        "That is an additional accuracy issue on the same account that I am "
-        "asking to be investigated and corrected as well.",
-
-        " On top of the main issue above, there is another problem with this "
-        "account: {desc}. I want that looked at at the same time, since it goes "
-        "to the same question of whether this information is being reported accurately.",
-
-        " There is one more problem I want to flag on this account: {desc}. "
-        "This is a separate accuracy concern and I am asking that it be "
-        "investigated alongside the primary dispute.",
-
-        " In addition to the concern above, I want to point out that {desc}. "
-        "That is its own accuracy problem and needs to be corrected as part of "
-        "the reinvestigation of this account.",
-
-        " I also want to note a second issue on this same account, {desc}. "
-        "Please include this in the reinvestigation, as it affects whether the "
-        "entry as a whole can be considered accurate under the FCRA.",
-
-        " One more thing I noticed about this account: {desc}. It is a separate "
-        "accuracy concern from the primary dispute but it is tied to the same "
-        "tradeline, so I am asking that both be resolved together.",
+    # PARCHE 23/09/2026 - conectores de "problemas adicionales".
+    #
+    # Antes: 6 frases largas para el caso de un solo hallazgo y 4 para varios.
+    # Al ser de 30+ palabras, una ventana de 20 cabia entera adentro, y como
+    # cada cliente tiene varias cuentas, casi todos usaban casi todas: 10 de
+    # las frases aparecian en 16 de 24 clientes.
+    #
+    # Ahora: entrada + cierre, cada uno de 10 variantes y ninguna de mas de
+    # 14 palabras. Toda ventana de 20 cruza el borde, asi que la unicidad es
+    # 10 x 10. Ademas se corrigio "looked at at the same time".
+    _ENTRADA_UNA = [
+        " There is a second problem on this account: {desc}.",
+        " I am also flagging another issue here: {desc}.",
+        " One more thing on this same account: {desc}.",
+        " This account has a second accuracy problem: {desc}.",
+        " I noticed something else on this entry: {desc}.",
+        " A separate issue on the same tradeline: {desc}.",
+        " There is also this, on the same account: {desc}.",
+        " Another problem shows up on this entry: {desc}.",
+        " I want to add one more point here: {desc}.",
+        " On the same account, I also see that {desc}.",
+        " There is one more point on this same entry: {desc}.",
+        " I am adding a second item on this account: {desc}.",
+        " The same tradeline has another problem: {desc}.",
+        " Something else on this account needs review: {desc}.",
+        " A further accuracy issue here: {desc}.",
+        " I am also disputing this on the same account: {desc}.",
+        " One additional error on this entry: {desc}.",
+    ]
+    _CIERRE_UNA = [
+        " Please investigate that along with the dispute above.",
+        " I am asking that it be verified and corrected too.",
+        " It belongs in the same reinvestigation.",
+        " Please have the furnisher address this as well.",
+        " That needs its own verification under 15 U.S.C. section 1681e(b).",
+        " I want both resolved together.",
+        " Please correct or delete it if it cannot be supported.",
+        " It affects whether the entry as a whole is accurate.",
+        " Please include it in your investigation of this account.",
+        " I am asking for documentation on that point too.",
+        " Please treat it as part of this same dispute.",
+        " I want that field checked against the records too.",
+        " It should be corrected or removed along with the rest.",
+        " Please do not leave that point out of the review.",
+        " That item needs the same level of verification.",
+        " I am asking for it to be resolved in this round.",
+        " Please address it together with the main issue.",
+    ]
+    _ENTRADA_VARIAS = [
+        " This account also has several other problems: {bullets}.",
+        " There is more on this entry: {bullets}.",
+        " I found additional accuracy issues here: {bullets}.",
+        " Other problems on the same account: {bullets}.",
+        " The same tradeline shows more errors: {bullets}.",
+        " I am also disputing these points: {bullets}.",
+        " Several further issues appear on this account: {bullets}.",
+        " This entry carries other inaccuracies as well: {bullets}.",
+        " More problems on the same account: {bullets}.",
+        " I noticed these additional issues too: {bullets}.",
+        " I am adding these items on the same account: {bullets}.",
+        " The same tradeline has further problems: {bullets}.",
+        " Additional errors show up on this entry: {bullets}.",
+        " These further points are part of the same dispute: {bullets}.",
+        " I am also raising these issues here: {bullets}.",
+        " The entry carries these additional problems: {bullets}.",
+        " More accuracy issues on this same account: {bullets}.",
+    ]
+    _CIERRE_VARIAS = [
+        " Each one needs its own verification.",
+        " Please investigate all of them with the primary dispute.",
+        " They are separate issues and each requires correction.",
+        " I am asking that every one be verified or removed.",
+        " All of them belong in this reinvestigation.",
+        " Please have the furnisher document each point.",
+        " Each is an accuracy problem under 15 U.S.C. section 1681e(b).",
+        " I want each one addressed, not just the main dispute.",
+        " Please correct or delete whatever cannot be supported.",
+        " Every one of them needs to be checked.",
+        " Please treat all of them as part of this dispute.",
+        " I want each of those fields checked against the records.",
+        " None of them should be left out of the review.",
+        " Each one needs the same level of verification.",
+        " Please resolve all of these points in this round.",
+        " I am asking for every one of them to be addressed.",
+        " Each should be corrected or removed along with the rest.",
     ]
 
-    _MULTI_FLAG_INTROS = [
-        " In addition to the dispute above, I found several other accuracy "
-        "problems with this account that I want addressed at the same time: "
-        "{bullets}. Each of these is a separate issue that requires "
-        "verification and correction under 15 U.S.C. section 1681e(b).",
-
-        " Beyond the main dispute, I identified a number of additional "
-        "accuracy issues on this same account: {bullets}. I am asking that "
-        "each one be investigated and corrected along with the primary dispute.",
-
-        " Along with what I raised above, there are several further problems "
-        "with how this account is being reported: {bullets}. These are distinct "
-        "issues and each one needs its own verification.",
-
-        " On top of the primary concern, I want to list additional accuracy "
-        "problems I noticed on this same entry: {bullets}. All of them need "
-        "to be addressed as part of the reinvestigation.",
-    ]
+    # entrada y cierre se eligen con numeros distintos para que no viajen juntos
+    _i_ent = variation_idx % 10
+    _i_cie = (variation_idx // 10 + variation_idx % 7) % 10
+    if narr_idx >= 0:
+        # con indice de parrafo usamos el mismo codigo RS: pools de 17 y
+        # posiciones 3 y 4 de la cadena, que no chocan con los conectores
+        # de vineta (posiciones 6 en adelante).
+        _ixf = _narr_slot_indices(narr_idx, 6)
+        _i_ent = _ixf[3]
+        _i_cie = _ixf[4]
 
     if len(described) == 1:
-        tpl = _SINGLE_FLAG_INTROS[variation_idx % len(_SINGLE_FLAG_INTROS)]
-        return tpl.format(desc=described[0])
+        return (_ENTRADA_UNA[_i_ent].format(desc=described[0])
+                + _CIERRE_UNA[_i_cie])
     else:
-        bullet_list = "; ".join(described[:-1]) + f"; and {described[-1]}"
-        tpl = _MULTI_FLAG_INTROS[variation_idx % len(_MULTI_FLAG_INTROS)]
-        return tpl.format(bullets=bullet_list)
+        if narr_idx >= 0:
+            _ix = _narr_slot_indices(narr_idx, 6 + len(described))
+            described = [
+                f"{_NARR_CONECTOR[_ix[6 + _k]]} {_d}"
+                for _k, _d in enumerate(described)
+            ]
+            bullet_list = "; ".join(described)
+        else:
+            bullet_list = "; ".join(described[:-1]) + f"; and {described[-1]}"
+        return (_ENTRADA_VARIAS[_i_ent].format(bullets=bullet_list)
+                + _CIERRE_VARIAS[_i_cie])
 
 
-def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = "") -> str:
+# ======================================================================
+# NARRATIVA MODULAR POR RANURAS  (parche 23/09/2026)
+# ----------------------------------------------------------------------
+# Problema que resuelve: las narrativas de cuenta estaban escritas como
+# parrafos completos (3 a 16 variantes). Un cliente con 13 cuentas del
+# mismo attack_type repetia parrafos entre sus propias cartas, y la misma
+# frase legal de 35-45 palabras cabia entera dentro de una ventana de 20,
+# asi que dos variantes distintas igual compartian n-gramas.
+#
+# Solucion: el parrafo se arma con RANURAS. Ninguna ranura pasa de 19
+# palabras, asi que toda ventana de 20 cruza al menos una frontera.
+# La seleccion usa un codigo Reed-Solomon de dimension 2 sobre GF(17):
+#
+#     a = (n // 17) % 17 ;  b = n % 17 ;  ranura_i = (b + i*a) % 17
+#
+# Dos parrafos con n distinto (n < 289) NUNCA coinciden en dos ranuras
+# cualesquiera a la vez, porque 17 es primo y (j-i) es invertible. Con
+# eso, ninguna ventana de 20 palabras puede repetirse entre parrafos.
+#
+# n viene de un contador por attack_type que corre a lo largo de TODAS
+# las cartas del cliente (los 3 buros y todos los grupos), asi que la
+# misma cuenta en TransUnion y en Equifax recibe parrafos distintos.
+#
+# El texto de las ranuras NO es nuevo: sale de partir en frases las 16
+# variantes que ya existian en el fallback generico, mas una frase
+# adicional por ranura construida con el mismo vocabulario.
+# ======================================================================
+
+# PARCHE 23/09/2026 - saludo rotativo.
+# Encabezado + primera palabra del saludo sumaban exactamente 20 palabras
+# en las cartas a Equifax, asi que dos cartas al mismo buro compartian
+# ventana sin que el cuerpo tuviera nada que ver. El encabezado no se
+# toca; lo que rota es el saludo. Las siete opciones empiezan con una
+# palabra distinta, que es lo unico que entra en esa ventana, y se elige
+# por el orden de la carta dentro del cliente, asi que dos cartas al
+# MISMO buro nunca llevan el mismo saludo (maximo 7 grupos por buro).
+_SALUDOS = [
+    "Hi,",
+    "Hello,",
+    "Good day,",
+    "Greetings,",
+    "To whom it may concern,",
+    "Dear Sir or Madam,",
+    "Attention: Dispute Department,",
+]
+
+_NARR_Q = 17
+
+
+def _narr_slot_indices(n: int, n_slots: int) -> list[int]:
+    """Indices de ranura para el parrafo numero n. Ver cabecera."""
+    try:
+        n = int(n)
+    except Exception:
+        n = 0
+    if n < 0:
+        n = 0
+    a = ((n // _NARR_Q) % (_NARR_Q - 1)) + 1
+    b = n % _NARR_Q
+    return [(b + i * a) % _NARR_Q for i in range(n_slots)]
+
+
+# --- ranura 0: apertura -------------------------------------------------
+_NARR_HOOK = [
+    "I pulled my credit report recently and this account caught my attention.",
+    "When I went through my credit report this account stood out.",
+    "Something about this entry does not match what I remember.",
+    "This account does not look right to me based on what I remember.",
+    "I am writing about this account because the details being reported do not line up.",
+    "The reporting on this account does not hold together when I look at the fields.",
+    "This one needs a closer look.",
+    "I want this one examined more carefully than a quick check.",
+    "I want this account reviewed carefully.",
+    "Please give this account a careful review.",
+    "I flagged this account while going through my file.",
+    "While reviewing my file I flagged this account for a closer look.",
+    "I need to dispute what is being reported on this account.",
+    "I am disputing how this account is being reported.",
+    "This account is on my dispute list for a reason.",
+    "I put this account on my dispute list because the reporting does not hold up.",
+    "This entry is one I am disputing because the reporting does not match my records.",
+]
+
+# --- ranura 2: encuadre del pedido -------------------------------------
+_NARR_PEDIDO_A = [
+    "Before I accept this as accurate, I need the creditor to show real records.",
+    "I want the creditor to produce the actual paperwork behind this entry.",
+    "The company reporting it has to back up every number and date with records.",
+    "The reporting company should be able to support the information with primary records.",
+    "Under 15 U.S.C. section 1681e(b), every field reported about me must be verifiable.",
+    "Federal law under 15 U.S.C. section 1681e(b) requires real records behind each field.",
+    "I am not asking for a summary, I am asking for the underlying records.",
+    "What I am looking for is the actual paper trail the creditor should hold.",
+    "I have reason to believe the information furnished is incomplete or out of step.",
+    "Based on what I know, the reporting does not reflect what actually happened.",
+    "The information as reported cannot be taken at face value without supporting records.",
+    "The reporting as it stands needs to be backed up by primary records.",
+    "The creditor needs to show the paperwork, not repeat the same figures back.",
+    "Confirming what is already on the report is not verification of anything.",
+    "I am not willing to leave an entry here that the creditor cannot document.",
+    "I am not leaving an item on my file that cannot be fully documented.",
+    "I need the creditor to stand behind this entry with documentation, not assertions.",
+]
+
+# --- ranura 3: el pedido concreto --------------------------------------
+_NARR_PEDIDO_B = [
+    "That means the original signed agreement, the full transaction history, and how the numbers were reached.",
+    "I want the signed agreement, the complete transaction log, and an explanation of the figures.",
+    "Specifically the original contract, the payment ledger, and a breakdown of what I supposedly owe.",
+    "That is the signed contract, a transaction-by-transaction history, and documentation of the balance calculation.",
+    "I need the original agreement, a complete payment record, and how the figures were calculated.",
+    "Please have them produce the contract, the full payment history, and each figure's derivation.",
+    "That is the signed agreement, the itemized payment history, and support for the reported status.",
+    "That means the signed contract, the detailed payment ledger, and records behind the reported status.",
+    "Please have the creditor produce the contract, payment history, and a balance breakdown.",
+    "I am asking for the contract, a full payment record, and a balance breakdown.",
+    "I am requesting the original contract, a full account history, and verification of the status.",
+    "That means the contract I signed, the full history from origination, and status verification.",
+    "That means the original agreement with my signature, the transaction history, and the status basis.",
+    "They have to produce my signed agreement, the full ledger, and what justifies the status.",
+    "Please require the contract, the full payment record, and how the balance and status were set.",
+    "They need to send the contract, the transaction history, and how the balance was determined.",
+    "That means the signed agreement, the complete account history, and the basis for the balance.",
+]
+
+# --- ranura 4: cierre del parrafo --------------------------------------
+_NARR_CIERRE = [
+    "If they cannot produce those basics, I do not see how this can stay.",
+    "Without that, I cannot accept this as accurate.",
+    "An item on my credit file has to be provable, and I do not see proof.",
+    "Those are the basics, and they need to be produced.",
+    "Anything they cannot support with records should not remain on my report.",
+    "If the records do not exist or do not match, this entry should not be here.",
+    "If any of that is missing or does not add up, it should not stay.",
+    "Without those, nothing here has been properly verified.",
+    "That way the accuracy can be confirmed or the account corrected.",
+    "So the accuracy can be verified or the entry corrected.",
+    "If any of that is missing, the account has not been properly verified.",
+    "Anything short of that leaves this account unverified.",
+    "Without those, I do not consider this verified.",
+    "Whatever they cannot support with records has to come off.",
+    "Anything they cannot back up with real records needs to be deleted.",
+    "If that documentation does not exist, this account should not be on my report.",
+    "If that cannot be produced, this account should not remain on my file.",
+]
+
+
+def _narr_detalle(idx: int, campos: dict) -> str:
+    """
+    Ranura 1: los datos reales de la cuenta. 17 combinaciones de campos y
+    redaccion. Devuelve "" si la cuenta no trae ninguno de los campos que
+    toca la combinacion elegida, cosa que el resto del parrafo tolera.
+    """
+    bal  = campos.get("balance") or ""
+    if str(bal).strip() in ("0", "0.0", "$0.00", ""):
+        bal = ""
+    pst  = campos.get("pay_status") or ""
+    op   = campos.get("date_opened") or ""
+    lr   = campos.get("last_reported") or ""
+    st   = campos.get("status") or ""
+
+    combos = [
+        [f"a balance of {bal}" if bal else None,
+         f"payment status listed as '{pst}'" if pst else None],
+        [f"an open date of {op}" if op else None,
+         f"a last report date of {lr}" if lr else None],
+        [f"'{pst}' as the current payment status" if pst else None,
+         f"a reported balance of {bal}" if bal else None],
+        [f"an original open date of {op}" if op else None],
+        [f"an update date of {lr}" if lr else None,
+         f"a listed status of '{pst}'" if pst else None],
+        [f"a balance of {bal}" if bal else None,
+         f"an opening date of {op}" if op else None,
+         f"a payment status reading '{pst}'" if pst else None],
+        [f"a reported payment status of '{pst}'" if pst else None],
+        [f"an open date going back to {op}" if op else None,
+         f"balance of {bal}" if bal else None],
+        [f"a last report of {lr}" if lr else None],
+        [f"a current balance of {bal}" if bal else None],
+        [f"an open date in {op}" if op else None,
+         f"a most recent update of {lr}" if lr else None,
+         f"a balance of {bal}" if bal else None],
+        [f"an account status of '{st}'" if st else None,
+         f"a balance of {bal}" if bal else None],
+        [f"a payment status of '{pst}'" if pst else None,
+         f"an open date of {op}" if op else None],
+        [f"the status '{st}'" if st else None,
+         f"a last report date of {lr}" if lr else None],
+        [f"a reported balance of {bal}" if bal else None,
+         f"a last report date of {lr}" if lr else None],
+        [f"an origination date of {op}" if op else None,
+         f"a carried balance of {bal}" if bal else None],
+        [f"a status of '{st}'" if st else None,
+         f"payment status '{pst}'" if pst else None],
+    ]
+    partes = [x for x in combos[idx % len(combos)] if x]
+    if not partes:
+        return ""
+    if len(partes) == 1:
+        cuerpo = partes[0]
+    elif len(partes) == 2:
+        cuerpo = " and ".join(partes)
+    else:
+        cuerpo = ", ".join(partes[:-1]) + ", and " + partes[-1]
+    _LEAD = [
+        "The account shows", "It shows", "Here it carries", "This entry lists",
+        "My report shows", "Your file shows", "I see", "Currently it shows",
+        "Reportedly it carries", "Overall I see", "That tradeline shows",
+        "Today it reports", "Notably it shows", "Also it lists",
+        "Again it shows", "Plainly it shows", "Now it lists",
+    ]
+    return f"{_LEAD[idx % len(_LEAD)]} {cuerpo}."
+
+
+def _narrativa_generica_modular(n: int, campos: dict) -> str:
+    """
+    Arma el parrafo generico de cuenta por ranuras. Ver cabecera del
+    bloque para la garantia de unicidad.
+    """
+    i = _narr_slot_indices(n, 5)
+    partes = [_NARR_HOOK[i[0]]]
+    det = _narr_detalle(i[1], campos)
+    if det:
+        partes.append(det)
+    partes.append(_NARR_PEDIDO_A[i[2]])
+    partes.append(_NARR_PEDIDO_B[i[3]])
+    partes.append(_NARR_CIERRE[i[4]])
+    return " ".join(partes)
+
+
+
+# ======================================================================
+# RANURAS POR ATTACK_TYPE  (parche 23/09/2026)
+# Mismo mecanismo Reed-Solomon de _narrativa_generica_modular, pero con
+# ranura propia para el hecho que denuncia el detector y para la cita
+# legal. Las citas son las que el motor ya usaba: no se agrega ninguna
+# base legal nueva.
+# Las ranuras "ley" y "pedido" se arman de fragmentos porque su gramatica
+# es cerrada (frase adverbial + oracion, verbo + sintagma nominal). Las
+# ranuras "hook" y "problema" van escritas una por una.
+# ======================================================================
+
+
+def _narr_mezcla(pref: list, suf: list, n: int = 17) -> list:
+    """n combinaciones distintas de prefijo + sufijo, en orden fijo."""
+    return [(pref[i % len(pref)] + " " + suf[(i * 3) % len(suf)]).strip()
+            for i in range(n)]
+
+
+_NARR_CIERRE_TIPO = [
+    "Whatever cannot be supported by records has to be corrected.",
+    "If the furnisher cannot document it, the entry does not belong.",
+    "Anything that does not match the records should come off.",
+    "I am asking for correction or deletion of what cannot be verified.",
+    "An entry that cannot be documented should not stay.",
+    "Please correct the field or delete the tradeline.",
+    "Without proof, this item has no basis to remain.",
+    "What the furnisher cannot establish must be removed.",
+    "Fix it at the source or drop the entry.",
+    "Nothing here has been verified without that documentation.",
+    "Everything left unsupported after that review needs deleting.",
+    "Unless a record backs it up, this should not survive.",
+    "Remove whatever the furnisher is unable to document.",
+    "My file should not carry a field nobody can prove.",
+    "Correct it against the records, or delete it.",
+    "Delete the parts the furnisher's own records do not support.",
+    "The result should be an entry I can actually check.",
+]
+
+
+_NARR_TIPOS = {
+
+    # ---------- BANCARROTA -------------------------------------------
+    "bankruptcy": {
+        "hook": [
+            "I am disputing how this account is reported after my bankruptcy.",
+            "This account went through the bankruptcy and the file does not show it.",
+            "The bankruptcy on my record is not reflected on this tradeline.",
+            "My discharge covered this account, and the reporting disagrees.",
+            "Nothing on this entry shows that a bankruptcy covered the debt.",
+            "What this account reports and what the court ordered do not match.",
+            "A bankruptcy case covers this account, and the entry ignores that.",
+            "An account from my bankruptcy is reported here as if nothing changed.",
+            "Two records disagree here: the discharge order and this entry.",
+            "Both the chapter and the dates on this account need checking.",
+            "Every field on this entry should agree with the discharge record.",
+            "No part of this entry reflects the bankruptcy I filed.",
+            "Reporting this account without the bankruptcy is what I dispute.",
+            "Listing this debt as active after discharge is the error here.",
+            "Showing this account as owing contradicts the case outcome.",
+            "Whatever the furnisher sent, it does not match the discharge.",
+            "Here the bankruptcy treatment of this account is plainly wrong.",
+        ],
+        "problema": [
+            "An account included in a bankruptcy should not still carry a balance.",
+            "Delinquency dated after the discharge does not describe what happened.",
+            "The discharge ended the obligation, and the status should say so.",
+            "A balance still shown as owed contradicts the order on file.",
+            "Late marks after the case closed have no factual basis.",
+            "My payment obligation ended, so no amount should appear as due.",
+            "Reporting an included debt as active overstates what I owe.",
+            "Ten years from the order for relief is the outer limit.",
+            "Nothing supports a past due figure on a discharged account.",
+            "Two of these fields cannot both be right at once.",
+            "What the court discharged and what the furnisher reports differ.",
+            "This entry keeps a delinquency that the case should have closed.",
+            "Chapter, filing date and discharge date all have to agree.",
+            "Every figure here should trace back to the discharge record.",
+            "No creditor may report a debt the discharge wiped out.",
+            "Showing payments coming due after discharge is not accurate.",
+            "Whatever the ledger says, it has to match the discharge order.",
+        ],
+        "ley": [
+            "Under 15 U.S.C. section 1681e(b), the file has to be accurate.",
+            "Per 15 U.S.C. section 1681s-2(a)(1), the furnisher may not report this.",
+            "Section 1681c(a)(1) caps a bankruptcy at ten years from the order.",
+            "Federal law at 15 U.S.C. section 1681e(b) sets the accuracy standard.",
+            "Again, 15 U.S.C. section 1681s-2(a)(1) bars reporting known inaccuracies.",
+            "By 15 U.S.C. section 1681e(b), the procedures have to be reasonable.",
+            "As 15 U.S.C. section 1681c(a)(1) provides, the clock runs from relief.",
+            "Here 15 U.S.C. section 1681e(b) is what controls.",
+            "Congress wrote 15 U.S.C. section 1681s-2(a)(1) for exactly these cases.",
+            "Legally, 15 U.S.C. section 1681e(b) puts the burden on accuracy.",
+            "Notably, 15 U.S.C. section 1681c(a)(1) fixes the outer reporting limit.",
+            "Specifically, 15 U.S.C. section 1681s-2(a)(1) governs what the furnisher sends.",
+            "Applying 15 U.S.C. section 1681e(b), this entry does not qualify.",
+            "Given 15 U.S.C. section 1681e(b), the reporting has to be corrected.",
+            "Beyond that, 15 U.S.C. section 1681s-2(a)(1) reaches the furnisher directly.",
+            "Further, 15 U.S.C. section 1681c(a)(1) limits how long this may appear.",
+            "Both 15 U.S.C. section 1681e(b) and section 1681s-2(a)(1) apply here.",
+        ],
+        "pedido": [
+            "I need the chapter, the filing date and the discharge date confirmed.",
+            "Please verify each field on this entry against the discharge record.",
+            "Verify the ten-year limit measured from the order for relief.",
+            "Confirm the correct chapter with the furnisher.",
+            "Document the discharge date and what it covered.",
+            "Obtain the court record that supports these dates.",
+            "Produce the discharge order behind this tradeline.",
+            "Send me the outcome in writing once verified.",
+            "Show how the reported balance survives the discharge.",
+            "Establish which fields the furnisher can actually support.",
+            "Check the delinquency dates against the case timeline.",
+            "Provide the filing date exactly as the court has it.",
+            "Furnish the records that justify the current status.",
+            "Supply the chapter under which this debt was discharged.",
+            "Correct the balance so it matches what the court ordered.",
+            "Substantiate every date this entry reports.",
+            "Ask the furnisher for the complete case file.",
+        ],
+    },
+
+    # ---------- COBRADOR / ACREEDOR ORIGINAL --------------------------
+    "collector": {
+        "hook": [
+            "This account is being reported by a collection company and I dispute it.",
+            "A collection agency is furnishing this account to you.",
+            "What is reported here appears to be a third-party collection.",
+            "The company on this tradeline is a collector, not the original creditor.",
+            "This entry comes from a debt collector and I am disputing it.",
+            "I do not recognize this collector as having any right to report.",
+            "A third party is reporting this debt and I want that checked.",
+            "This tradeline was placed on my file by a collection agency.",
+            "The furnisher here is a collector reporting someone else's debt.",
+            "I am disputing this collection entry and the agency behind it.",
+            "This account shows up under a collection company's name.",
+            "A collector has put this account on my credit file.",
+            "The entity reporting this account is a debt collector.",
+            "I am challenging this collection tradeline and who is reporting it.",
+            "This is a collection account and I want its origin verified.",
+            "The name on this account belongs to a collection agency.",
+            "This debt is being reported by a party that never lent to me.",
+        ],
+        "problema": [
+            "Showing up on my report does not prove the debt belongs to them.",
+            "Repeating the same figures back is not verification of anything.",
+            "A collector's own file is not primary documentation of the debt.",
+            "Pointing back at their own data does not satisfy what they owe me.",
+            "An entry with no chain of title cannot be treated as verified.",
+            "Without an assignment record there is nothing connecting them to this debt.",
+            "The agency has to show how this account got to them, and when.",
+            "A collector reporting a balance still has to be able to prove it.",
+            "Nothing here establishes that they hold the account they are reporting.",
+            "The right to report has to be documented, not assumed from the entry.",
+            "They have produced no contract, no assignment, and no creditor records.",
+            "A transfer of a debt has to be documented before it is reported.",
+            "The date of first delinquency has to come from the original creditor.",
+            "Their own ledger is not the record that proves this debt is mine.",
+            "Standing to report this account is exactly what has not been shown.",
+            "I have seen nothing tying this agency to the account it is reporting.",
+            "The paperwork behind this transfer is what is missing from the file.",
+        ],
+        "ley": _narr_mezcla(
+            ["Under 15 U.S.C. section 1681s-2(b),",
+             "Under the furnisher duty in 15 U.S.C. section 1681s-2(b),",
+             "Under 15 U.S.C. section 1681e(b),",
+             "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+             "Under 15 U.S.C. section 1681i(a)(1),"],
+            ["they have to investigate against actual records.",
+             "the reporting has to be supported by documents.",
+             "an unsupported entry cannot stand.",
+             "this has to be verified at the source."]),
+        "pedido": _narr_mezcla(
+            ["I am asking them to produce",
+             "They need to provide",
+             "Please require from the furnisher",
+             "I want copies of",
+             "The agency has to send"],
+            ["the original signed agreement with the original creditor.",
+             "the complete chain of assignment for this account.",
+             "the date of first delinquency from the creditor's own records.",
+             "documentation of their authority to report this debt."]),
+    },
+
+}
+
+
+# ---------- CONFLICTO ENTRE BUROS (familia completa) ------------------
+# Un solo juego de ranuras para todos los cross_bureau_*: el campo en
+# disputa entra como {campo}. El contador de parrafos es unico para todo
+# el cliente, asi que dos tipos distintos nunca reciben el mismo indice
+# y por tanto nunca la misma combinacion de ranuras.
+_NARR_CAMPO = {
+    "cross_bureau_balance_conflict":              "balance",
+    "cross_bureau_payment_status_conflict":       "payment status",
+    "cross_bureau_account_status_conflict":       "account status",
+    "cross_bureau_high_credit_conflict":          "high credit amount",
+    "cross_bureau_credit_limit_conflict":         "credit limit",
+    "cross_bureau_date_opened_conflict":          "open date",
+    "cross_bureau_account_type_conflict":         "account type",
+    "cross_bureau_payment_history_date_conflict": "payment history dates",
+}
+
+_NARR_TIPOS["cross_bureau"] = {
+    "hook": [
+        "The {campo} on this account is not the same at every bureau.",
+        "This account shows one {campo} here and a different one elsewhere.",
+        "I am disputing the {campo} because it does not match across bureaus.",
+        "The {campo} reported here conflicts with what another bureau shows.",
+        "There is a conflict in the {campo} being reported on this account.",
+        "My file shows a {campo} here that another bureau does not show.",
+        "The {campo} for this tradeline changes depending on which report I read.",
+        "I am challenging the {campo} on this account for being inconsistent.",
+        "Two bureaus are carrying a different {campo} for this same account.",
+        "The {campo} does not agree from one credit file to the next.",
+        "This tradeline carries a {campo} that another bureau contradicts.",
+        "I found a different {campo} for this account on another report.",
+        "The {campo} here and the one elsewhere cannot both be right.",
+        "I am disputing this entry because its {campo} is not consistent.",
+        "The same account is reported with a different {campo} at another bureau.",
+        "What this file shows as the {campo} is not what another bureau shows.",
+        "There is more than one {campo} on record for this single account.",
+    ],
+    "problema": [
+        "An account has one {campo} at a time, not a different one per bureau.",
+        "The same furnisher sent different information to different bureaus.",
+        "At least one of those figures was not reported accurately.",
+        "Both versions cannot be correct, so one of them is wrong.",
+        "A single tradeline cannot carry two values for the same field.",
+        "The furnisher is the same, so the discrepancy came from its own reporting.",
+        "One of the bureaus is receiving data that does not match the account.",
+        "There is only one correct answer for this field at any given time.",
+        "A conflict like this means the data was not checked before reporting.",
+        "Whichever version is wrong has sat on my file as if it were true.",
+        "The difference is not a rounding question, it is a reporting error.",
+        "An inconsistent field is by definition not accurate at every bureau.",
+        "If the furnisher cannot say which is right, neither has been verified.",
+        "This is a factual matter, not a question of interpretation.",
+        "Reporting two versions of the same field is the opposite of accuracy.",
+        "The account itself has one history, and the reporting should show it.",
+        "A field that changes by bureau has not been checked against the records.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681s-2(a)(1),",
+         "Under the furnisher rule of 15 U.S.C. section 1681s-2(a)(1),",
+         "Under 15 U.S.C. section 1681i(a)(1),"],
+        ["the file has to reflect one accurate value.",
+         "this discrepancy has to be resolved, not left in place.",
+         "the reporting cannot stand as it is.",
+         "you have to reinvestigate this field."]),
+    "pedido": _narr_mezcla(
+        ["I am asking you to verify",
+         "Please confirm with the furnisher",
+         "I want documentation of",
+         "Please obtain and check",
+         "I need verification of"],
+        ["the correct {campo} against the furnisher's own records.",
+         "which value is right and where the other one came from.",
+         "the {campo} with primary account documentation.",
+         "this field so the same value appears at every bureau."]),
+}
+
+
+# ---------- DOFD DESCONOCIDA ------------------------------------------
+_NARR_TIPOS["dofd"] = {
+    "hook": [
+        "This account does not disclose a clear date of first delinquency.",
+        "I cannot find a date of first delinquency on this entry.",
+        "The date of first delinquency is missing from how this account reports.",
+        "I am disputing this account because its delinquency date is not shown.",
+        "No date of first delinquency appears anywhere on this tradeline.",
+        "The entry gives no starting date for the delinquency it reports.",
+        "This account reports a delinquency without saying when it began.",
+        "I want the date of first delinquency on this account established.",
+        "The delinquency date that controls this entry is not disclosed.",
+        "This tradeline shows derogatory information but no date it started.",
+        "The account is reported without the one date that limits its life.",
+        "I am challenging this entry because the delinquency date is absent.",
+        "There is no first delinquency date shown for me to check.",
+        "This account hides the date the delinquency actually began.",
+        "The starting date of the delinquency on this account is blank.",
+        "I dispute this entry for reporting without a disclosed delinquency date.",
+        "The record here does not say when this account first went delinquent.",
+    ],
+    "problema": [
+        "The seven-year reporting period runs from the date of first delinquency.",
+        "Without that date I cannot tell whether this entry is still timely.",
+        "The date has to come from the original creditor, not from a later holder.",
+        "A missing delinquency date makes the reporting window impossible to check.",
+        "An account with no start date could already be past its legal limit.",
+        "The furnisher cannot report a delinquency it will not date.",
+        "That single date decides how long this item may stay on my file.",
+        "Nothing on this entry shows the clock ever started or when.",
+        "A delinquency without a date is not complete or accurate reporting.",
+        "The reporting period cannot be verified when its starting point is blank.",
+        "Any later placement or sale does not reset that original date.",
+        "I have no way to confirm this account is inside its reporting window.",
+        "An undated delinquency is exactly the kind of gap that hides an obsolete item.",
+        "The furnisher holds that date and has not reported it.",
+        "Leaving the date off does not make the seven-year limit go away.",
+        "The account cannot be verified as timely without the original date.",
+        "This is the field that determines the entry's legal life, and it is missing.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681c(c),",
+         "Under the running-of-the-period rule in 15 U.S.C. section 1681c(c),",
+         "Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681s-2(b),"],
+        ["that date has to be established, not assumed.",
+         "the entry cannot be reported without it.",
+         "this has to be verified against the creditor's records.",
+         "the reporting as it stands is not complete."]),
+    "pedido": _narr_mezcla(
+        ["I am asking you to obtain",
+         "Please require the furnisher to produce",
+         "I need the furnisher to document",
+         "Please verify with the original creditor",
+         "I want on the record"],
+        ["the original date of first delinquency for this account.",
+         "the date the account first went delinquent and never cured.",
+         "the creditor's own record of when the delinquency began.",
+         "the date that starts the seven-year reporting period here."]),
+}
+
+# ---------- HISTORIAL DE PAGOS TARDIOS --------------------------------
+_NARR_TIPOS["late_pay"] = {
+    "hook": [
+        "I am disputing a late payment mark in this account's payment history.",
+        "The payment history on this account shows a late mark I dispute.",
+        "There is a late payment reported here that I do not accept.",
+        "I am challenging the late marks recorded on this tradeline.",
+        "This account carries a delinquency in its history that I dispute.",
+        "The late payment shown on this entry needs to be verified.",
+        "I want the late marks in this payment history checked.",
+        "A late payment appears on this account and I am disputing it.",
+        "This tradeline's payment history includes a mark I am contesting.",
+        "I dispute the delinquency recorded in this account's payment record.",
+        "The month marked late on this account is what I am disputing.",
+        "I am asking you to look at the late payment on this entry.",
+        "This account shows a missed payment that I want documented.",
+        "The payment history here records a late that I do not recognize.",
+        "I am disputing how this account's payment history is reported.",
+        "A late mark on this tradeline is the subject of this dispute.",
+        "The delinquency shown in this payment history has not been verified.",
+    ],
+    "problema": [
+        "A late mark has to be supported by the actual payment records.",
+        "The due date and the date payment was received both have to be shown.",
+        "A late payment on a closed account still affects my score today.",
+        "Nothing here shows when the payment was due or when it arrived.",
+        "The furnisher's summary is not the same as its payment ledger.",
+        "A single mislabeled month can keep an account derogatory for years.",
+        "The date of first delinquency has to match what the history shows.",
+        "If the ledger does not show a missed due date, the mark is wrong.",
+        "The mark was reported without any record being produced for it.",
+        "A late entry that cannot be tied to a specific month is not accurate.",
+        "The history and the delinquency date have to tell the same story.",
+        "Marking a month late is a factual claim that requires documentation.",
+        "The payment record either shows a missed due date or it does not.",
+        "I am entitled to see the basis for a mark that damages my file.",
+        "An unverified late mark is inaccurate information on my report.",
+        "The furnisher has the ledger and has not shown it supports this.",
+        "A late mark without the underlying dates has not been verified at all.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681s-2(a)(1),",
+         "Under the furnisher rule of 15 U.S.C. section 1681s-2(a)(1),",
+         "Under 15 U.S.C. section 1681c(a)(4),"],
+        ["every reported field has to be accurate.",
+         "this mark has to be supported or removed.",
+         "the reporting cannot rest on the furnisher's say-so.",
+         "the dates behind this entry matter."]),
+    "pedido": _narr_mezcla(
+        ["I am asking for",
+         "Please require from the furnisher",
+         "I need the creditor to produce",
+         "Please obtain",
+         "I want copies of"],
+        ["the original payment records for the month marked late.",
+         "the exact due date and the date the payment was received.",
+         "the full payment history from origination for this account.",
+         "confirmation of the correct date of first delinquency."]),
+}
+
+# ---------- CERRADA CON SALDO -----------------------------------------
+_NARR_TIPOS["closed_bal"] = {
+    "hook": [
+        "This account is reported as closed but still shows a balance.",
+        "A closed account on my file is still carrying an amount owed.",
+        "I am disputing this entry because a closed account shows a balance.",
+        "The status here says closed while the balance says otherwise.",
+        "This tradeline reports closed and at the same time reports money owed.",
+        "I want this closed account's balance explained or corrected.",
+        "The account is marked closed yet a balance is still reported.",
+        "I am challenging the balance being reported on a closed account.",
+        "This entry combines a closed status with an outstanding balance.",
+        "A balance is showing on an account the furnisher reports as closed.",
+        "The closed status and the reported balance do not fit together.",
+        "I dispute this account for reporting a balance after closure.",
+        "This account shows as closed, and still shows an amount due.",
+        "The balance field on this closed account is what I am disputing.",
+        "I am asking about a balance reported on an account already closed.",
+        "This closed tradeline continues to report an open amount.",
+        "The account was closed, but the reporting still shows money owed.",
+    ],
+    "problema": [
+        "A closed account with a balance sends two contradictory signals.",
+        "If the account was settled, the balance should read zero.",
+        "Either the status is wrong or the balance is wrong.",
+        "A closed status implies the obligation was resolved one way or another.",
+        "The reporting does not say how a closed account still owes money.",
+        "A lender that closed the account should have reported the final figure.",
+        "The two fields cannot both be right as they stand.",
+        "This combination makes my file look worse than the facts support.",
+        "Nothing explains how a balance survives the closing of the account.",
+        "The closing date and the balance have to be reconciled.",
+        "A balance left on a closed account keeps damaging my file every month.",
+        "If a balance remains, the status should not say closed.",
+        "The furnisher has not shown what this remaining balance represents.",
+        "An unexplained balance on a closed account is not accurate reporting.",
+        "Whatever happened at closing should be reflected in both fields.",
+        "The account cannot be both finished and still owing.",
+        "One of these two fields has not been updated since closing.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681i(a)(1),",
+         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
+         "Under 15 U.S.C. section 1681s-2(a)(1),"],
+        ["these two fields have to agree.",
+         "the contradiction has to be resolved.",
+         "the entry cannot be left as it reads.",
+         "this has to be checked against the account records."]),
+    "pedido": _narr_mezcla(
+        ["I am asking you to verify",
+         "Please confirm with the furnisher",
+         "I need documentation showing",
+         "Please obtain and check",
+         "I want written confirmation of"],
+        ["the closing date and the balance as of that date.",
+         "what the remaining balance represents and why it stands.",
+         "the correct status and the correct balance for this account.",
+         "how the account was resolved when it was closed."]),
+}
+
+# ---------- COLECCION PAGADA ------------------------------------------
+_NARR_TIPOS["paid_coll"] = {
+    "hook": [
+        "This collection was paid or settled and still reports as derogatory.",
+        "I paid or settled this account and the status has not caught up.",
+        "The balance here is zero but the entry still reads as derogatory.",
+        "This account was resolved and the reporting does not show it.",
+        "I am disputing the status on a collection that no longer carries a balance.",
+        "A settled collection is still being reported as an open problem.",
+        "The account shows nothing owed, yet the status remains derogatory.",
+        "I want the status corrected on a collection I already resolved.",
+        "This entry reports a zero balance alongside a derogatory status.",
+        "The collection was satisfied and the file has not been updated.",
+        "I am challenging how this paid collection continues to report.",
+        "A zero balance and a derogatory status appear on the same entry.",
+        "This tradeline was paid and still reads as if it were not.",
+        "The resolution of this account is missing from the reporting.",
+        "I dispute the derogatory classification on an account with no balance.",
+        "The account carries no balance, so the status should reflect that.",
+        "This collection is reported as though it was never resolved.",
+    ],
+    "problema": [
+        "Current status is part of what has to be accurate on a report.",
+        "A zero balance and a derogatory status describe two different accounts.",
+        "The date the account was satisfied should appear on the entry.",
+        "The status field was never updated after the account was resolved.",
+        "Reporting the outcome is as much a duty as reporting the debt.",
+        "A resolved account should read as resolved, not as an active problem.",
+        "The furnisher knows when it was paid and has not reported it.",
+        "Leaving the old status in place misstates where this account stands.",
+        "The entry gives no date of satisfaction at all.",
+        "What the file shows today is not what actually happened.",
+        "An account with nothing owed is not accurately called derogatory.",
+        "The status has to move when the balance does.",
+        "Nothing here reflects the payment that closed this account out.",
+        "The reporting stopped at the delinquency and never went further.",
+        "A stale status keeps costing me long after the account was settled.",
+        "The furnisher has to report the current condition, not the old one.",
+        "The account's real outcome is missing from every field but the balance.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681i(a)(1),",
+         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
+         "Under 15 U.S.C. section 1681s-2(a)(1),"],
+        ["the current status has to be accurate.",
+         "this field has to be brought up to date.",
+         "the entry cannot keep reporting the old condition.",
+         "the record has to match what actually happened."]),
+    "pedido": _narr_mezcla(
+        ["Please have the furnisher confirm",
+         "I am asking you to verify",
+         "I need documentation of",
+         "Please obtain",
+         "I want on the record"],
+        ["the date the account was satisfied.",
+         "the correct current status for this account.",
+         "the date of first delinquency for this entry.",
+         "the terms under which this account was resolved."]),
+}
+
+# ---------- CUENTA DUPLICADA ------------------------------------------
+_NARR_TIPOS["dup_acct"] = {
+    "hook": [
+        "This account appears more than once on my credit report.",
+        "I am seeing the same debt listed twice on my file.",
+        "The same obligation is being reported under more than one entry.",
+        "I dispute this tradeline because a duplicate of it exists.",
+        "There are two entries on my report for what looks like one account.",
+        "This account and another one on my file describe the same debt.",
+        "A duplicate listing of this account is on my report.",
+        "I am challenging this entry as a repeat of another tradeline.",
+        "The same account number shows up in more than one place.",
+        "This debt is counted twice in how my file reads.",
+        "I found the same account reported under two separate entries.",
+        "One debt appears to be generating two tradelines here.",
+        "This entry duplicates another account already on my report.",
+        "My file lists this obligation more than one time.",
+        "I dispute the double reporting of this single account.",
+        "The report shows two versions of what I believe is one debt.",
+        "This account is being reported alongside an identical entry.",
+    ],
+    "problema": [
+        "As far as I know this is one debt, not two separate obligations.",
+        "Listing it twice makes my report look worse than it actually is.",
+        "Reporting the same debt multiple times overstates what I owe.",
+        "Two entries for one account double its effect on my file.",
+        "If the account was sold, only one party should be reporting it.",
+        "A transfer does not justify leaving the old entry in place.",
+        "One of these two entries has to be the stale one.",
+        "The duplicate inflates my total balances without any basis.",
+        "Nothing shows these are genuinely two different accounts.",
+        "The same balance appearing twice is not accurate reporting.",
+        "Whoever no longer holds this debt should not still report it.",
+        "A single obligation should produce a single tradeline.",
+        "The duplicate affects both my balances and my number of derogatory items.",
+        "If they are the same account, one entry is simply wrong.",
+        "The report is counting one event as if it happened twice.",
+        "Either they are distinct accounts or one of them must come off.",
+        "No documentation supports treating these as two separate debts.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681i(a)(1),",
+         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
+         "Under 15 U.S.C. section 1681s-2(a)(1),"],
+        ["duplicate reporting of one debt is not accurate.",
+         "this has to be resolved against the account records.",
+         "only the correct entry may remain.",
+         "the file cannot show the same debt twice."]),
+    "pedido": _narr_mezcla(
+        ["I am asking you to determine",
+         "Please confirm with both furnishers",
+         "I need documentation of",
+         "Please obtain and compare",
+         "I want verification of"],
+        ["whether these entries represent the same underlying account.",
+         "the account numbers, open dates and balances on both entries.",
+         "which party currently holds this debt and which does not.",
+         "the chain of ownership behind each of these tradelines."]),
+}
+
+# ---------- SALDO SOBRE LIMITE / CREDITO ALTO -------------------------
+_NARR_TIPOS["limite"] = {
+    "hook": [
+        "The balance on this account is higher than the limit reported for it.",
+        "This entry shows a balance larger than the account could hold.",
+        "I am disputing a balance that exceeds the figure reported beside it.",
+        "The reported balance does not fit within the reported limit.",
+        "This account shows more owed than the credit extended to me.",
+        "The two figures on this tradeline do not fit together.",
+        "I want the balance on this account checked against its limit.",
+        "The balance field here is larger than it should be able to be.",
+        "This entry reports an amount that is above the stated ceiling.",
+        "I am challenging the balance because it overruns the limit shown.",
+        "The account shows a balance that the limit does not support.",
+        "There is a mismatch between the balance and the limit on this entry.",
+        "I dispute this tradeline for reporting a balance beyond its limit.",
+        "The numbers on this account are out of proportion to each other.",
+        "This account reports a balance that the credit line cannot explain.",
+        "The limit and the balance on this entry contradict each other.",
+        "I am asking you to check the balance against the limit reported here.",
+    ],
+    "problema": [
+        "A balance cannot exceed the limit unless fees or interest explain it.",
+        "No fee or interest breakdown appears anywhere on this entry.",
+        "That spread is too large to be ordinary carrying charges.",
+        "At least one of these two figures is being reported incorrectly.",
+        "An inflated balance drives my utilization and my score down.",
+        "The furnisher has not shown how the balance got above the limit.",
+        "Either the limit is understated or the balance is overstated.",
+        "The reporting gives no basis for the difference between the two.",
+        "A number that cannot be explained has not been verified.",
+        "The account records either support this figure or they do not.",
+        "This is the kind of error that goes unnoticed and keeps costing me.",
+        "Both figures come from the same furnisher and should agree.",
+        "A balance above the line needs documentation, not just assertion.",
+        "Nothing on the entry accounts for the gap between these amounts.",
+        "The furnisher should be able to show every charge behind this balance.",
+        "An unexplained overage is inaccurate information on my file.",
+        "The two fields together describe an account that cannot exist.",
+    ],
+    "ley": _narr_mezcla(
+        ["Under 15 U.S.C. section 1681e(b),",
+         "Under the accuracy standard of 15 U.S.C. section 1681e(b),",
+         "Under 15 U.S.C. section 1681i(a)(1),",
+         "Under the reinvestigation duty in 15 U.S.C. section 1681i(a)(1),",
+         "Under 15 U.S.C. section 1681s-2(a)(1),"],
+        ["both figures have to be accurate.",
+         "this discrepancy has to be documented or corrected.",
+         "the entry cannot stand as reported.",
+         "the numbers have to be checked at the source."]),
+    "pedido": _narr_mezcla(
+        ["I am asking you to verify",
+         "Please confirm with the furnisher",
+         "I need an itemized breakdown of",
+         "Please obtain",
+         "I want documentation of"],
+        ["the correct balance and the correct limit on this account.",
+         "every charge, fee and interest amount behind this balance.",
+         "how the balance came to exceed the figure reported beside it.",
+         "the account statements that support both of these numbers."]),
+}
+
+
+def _narr_tipo_modular(tipo: str, n: int, campos: dict, campo: str = "") -> str:
+    """Parrafo por ranuras para un attack_type con pools propios."""
+    pools = _NARR_TIPOS.get(tipo)
+    if not pools:
+        return ""
+    i = _narr_slot_indices(n, 6)
+    partes = [pools["hook"][i[0]]]
+    det = _narr_detalle(i[1], campos)
+    if det:
+        partes.append(det)
+    partes.append(pools["problema"][i[2]])
+    partes.append(pools["ley"][i[3]])
+    partes.append(pools["pedido"][i[4]])
+    partes.append(_NARR_CIERRE_TIPO[i[5]])
+    txt = " ".join(partes)
+    if campo:
+        txt = txt.replace("{campo}", campo)
+    return txt
+
+
+def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = "", narr_idx: int = -1) -> str:
     """
     Generates a unique, specific, humanized dispute reason for each account.
     Uses all available fields from the item to craft individualized language.
@@ -4950,6 +6379,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     the SAME account in letters to different bureaus selects a DIFFERENT
     variant. This works correctly even for attack_types with only 2 variants.
     """
+    _fallback_usado = False
+    _rama = ""
     furnisher    = item.get("furnisher_name", "")
     attack_type  = item.get("attack_type", "")
     neg_type     = item.get("negative_type", "")
@@ -5070,12 +6501,13 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     elif neg_type == "child_support":
         reason = (
             f"I am disputing this child or family support account from them. "
-            f"Under 15 U.S.C. section 1681s-1, only overdue support that has been certified "
-            f"by the state agency may be reported. The balance shown{bal_str} and the "
-            f"past-due amount of {past_due} need to be backed up by a current state "
-            f"certification confirming exactly what is delinquent. If any of that "
-            f"balance includes support that is not yet past due, or if the certification "
-            f"is outdated, this must be corrected or removed entirely."
+            f"Under 15 U.S.C. section 1681s-1, overdue support may be included in a "
+            f"consumer report only when it is reported or verified by a State or local "
+            f"child support enforcement agency and is not more than seven years old. "
+            f"I am asking you to verify both conditions for this entry. The balance "
+            f"shown{bal_str} and the past-due amount of {past_due} must also match the "
+            f"agency records, as required by 15 U.S.C. section 1681e(b). Anything that "
+            f"the agency does not confirm must be corrected or deleted."
         )
 
     # -- STUDENT LOAN, generic ---------------------------------------------
@@ -5093,33 +6525,84 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- BANKRUPTCY --------------------------------------------------------
     elif neg_type == "bankruptcy":
-        reason = (
+        _rama = "bankruptcy"
+        if v3 == 0:
+            reason = (
+
             f"I am disputing how the creditor is reporting this account "
-            f"in connection with a bankruptcy. Under 15 U.S.C. section 1681c(a)(1), "
-            f"accounts included in a bankruptcy discharge must accurately reflect "
-            f"that discharged status, they cannot continue showing an active balance "
-            f"or derogatory payment history after the discharge date. "
-            f"I need them to confirm the correct bankruptcy chapter, the filing "
-            f"date, the discharge date, and that every field reflects what actually "
-            f"happened legally. Anything that does not match the discharge record "
-            f"needs to be corrected or deleted."
-        )
+            f"in connection with a bankruptcy. Under 15 U.S.C. section 1681e(b) you "
+            f"must follow reasonable procedures to assure maximum possible accuracy, "
+            f"and under 15 U.S.C. section 1681s-2(a)(1) a furnisher may not report "
+            f"information it knows or has reasonable cause to believe is inaccurate. "
+            f"An account included in a bankruptcy that is still reported with an "
+            f"active balance, or with delinquency after the discharge date, does not "
+            f"meet that standard. I need them to confirm the correct bankruptcy "
+            f"chapter, the filing date, the discharge date, and that every field "
+            f"matches the discharge record. Separately, under 15 U.S.C. section "
+            f"1681c(a)(1), a bankruptcy case may not be reported more than 10 years "
+            f"from the date of the order for relief."
+            )
+        elif v3 == 1:
+            reason = (
+                f"This account is tied to a bankruptcy, and I am disputing how it is "
+                f"being reported. Under 15 U.S.C. section 1681e(b) the file has to be "
+                f"accurate, and under 15 U.S.C. section 1681s-2(a)(1) the furnisher may "
+                f"not report what it knows or should know is wrong. A balance that is "
+                f"still shown as owed, or delinquency dated after the discharge, does "
+                f"not match what happened in the case. Please obtain from the furnisher "
+                f"the chapter, the filing date and the discharge date, and confirm that "
+                f"each field agrees with them. I am also asking you to verify the "
+                f"10-year limit in 15 U.S.C. section 1681c(a)(1), measured from the "
+                f"order for relief."
+            )
+        else:
+            reason = (
+                f"I am disputing the way this bankruptcy-related account appears on my "
+                f"file. What is reported has to be accurate under 15 U.S.C. section "
+                f"1681e(b), and the furnisher is barred by 15 U.S.C. section "
+                f"1681s-2(a)(1) from reporting information it has reason to believe is "
+                f"inaccurate. An entry that still carries a balance, or that shows late "
+                f"activity after the discharge date, fails both. I want the chapter, the "
+                f"filing date and the discharge date confirmed, every field reconciled "
+                f"against them, and the 10-year period of 15 U.S.C. section 1681c(a)(1) "
+                f"checked from the date of the order for relief."
+            )
 
     # -- REPOSSESSION ------------------------------------------------------
     elif neg_type == "repossession":
         bal_note = f" The remaining balance shown is{bal_str}." if balance and balance not in ("0","0.0","$0.00","") else ""
-        reason = (
-            f"I am disputing this repossession from them{open_str}. "
-            f"Under UCC Article 9, when a vehicle is repossessed and sold, the net "
-            f"proceeds of that sale must be applied to the outstanding balance and the "
-            f"consumer must be notified. Any deficiency balance that gets reported can "
-            f"only reflect what remained after those proceeds were properly credited.{bal_note} "
-            f"I need them to provide: (1) documentation of the repossession, "
-            f"(2) proof the vehicle was sold and the actual sale price, "
-            f"(3) an itemized accounting of how the proceeds were applied, and "
-            f"(4) confirmation the reported balance is only the legitimate deficiency. "
-            f"Without that, this account cannot be verified."
-        )
+        if v3 == 0:
+            reason = (
+                f"I am disputing this repossession from them{open_str}. "
+                f"Under UCC Article 9, when a vehicle is repossessed and sold, the net "
+                f"proceeds of that sale must be applied to the outstanding balance and the "
+                f"consumer must be notified. Any deficiency balance that gets reported can "
+                f"only reflect what remained after those proceeds were properly credited.{bal_note} "
+                f"I need them to provide: (1) documentation of the repossession, "
+                f"(2) proof the vehicle was sold and the actual sale price, "
+                f"(3) an itemized accounting of how the proceeds were applied, and "
+                f"(4) confirmation the reported balance is only the legitimate deficiency. "
+                f"Without that, this account cannot be verified."
+            )
+        elif v3 == 1:
+            reason = (
+                f"This entry reports a repossession{open_str}, and I am disputing what "
+                f"is being shown.{bal_note} After the collateral is sold, UCC Article 9 "
+                f"requires the sale proceeds to be credited to the account, so the only "
+                f"figure that can be reported is what was still owed afterward. Please "
+                f"have the furnisher produce the repossession record, the sale price, "
+                f"a line-by-line accounting of how the money was applied, and the notice "
+                f"I was supposed to receive. Anything they cannot document is not verified."
+            )
+        else:
+            reason = (
+                f"I do not accept the way this repossession is being reported{open_str}.{bal_note} "
+                f"The lender had to sell the vehicle, apply what it brought to my balance, "
+                f"and notify me, as UCC Article 9 requires. What remains reportable is the "
+                f"difference, nothing more. I am asking for the documents behind it: proof "
+                f"of the repossession, the actual sale price, the accounting of the proceeds, "
+                f"and confirmation that the reported figure is only the remaining deficiency."
+            )
 
     # -- CHARGE-OFF DEFICIENCY ---------------------------------------------
     elif neg_type == "charge_off_deficiency":
@@ -5137,16 +6620,36 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- PAID COLLECTION ---------------------------------------------------
     elif neg_type == "paid_collection":
-        reason = (
-            f"This account has been paid or settled, "
-            f"the balance is zero, yet it continues to be reported with a derogatory "
-            f"classification. Under 15 U.S.C. section 1681e(b), reporting a negative status "
-            f"on an account that has been resolved is not accurate. I am asking that "
-            f"the creditor update the status to correctly reflect that this account was "
-            f"paid or settled, and also confirm the correct Date of First Delinquency "
-            f"so the 7-year reporting clock can be verified. If the current reporting "
-            f"is not corrected, it needs to be deleted."
-        )
+        _rama = "paid_coll"
+        if v3 == 0:
+            reason = (
+                f"This account has been paid or settled, "
+                f"the balance is zero, yet it continues to be reported with a derogatory "
+                f"classification. Under 15 U.S.C. section 1681e(b), reporting a negative status "
+                f"on an account that has been resolved is not accurate. I am asking that "
+                f"the creditor update the status to correctly reflect that this account was "
+                f"paid or settled, and also confirm the correct Date of First Delinquency "
+                f"so the 7-year reporting clock can be verified. If the current reporting "
+                f"is not corrected, it needs to be deleted."
+            )
+        elif v3 == 1:
+            reason = (
+                f"The balance on this account is zero because it was paid or settled, "
+                f"but the entry is still carrying a derogatory classification. Current "
+                f"status is part of what has to be accurate under 15 U.S.C. section "
+                f"1681e(b). Please have the furnisher confirm the date the account was "
+                f"satisfied, update the status to match, and provide the Date of First "
+                f"Delinquency so I can verify how long this entry may remain."
+            )
+        else:
+            reason = (
+                f"This entry shows a zero balance from a payment or settlement, and at "
+                f"the same time a derogatory classification that no longer matches the "
+                f"state of the account. I am asking you to verify with the furnisher "
+                f"when it was resolved, correct the status accordingly under "
+                f"15 U.S.C. section 1681e(b), and confirm the Date of First Delinquency. "
+                f"If the furnisher will not confirm those, the entry should come off."
+            )
 
     # -- RE-AGING ----------------------------------------------------------
     elif attack_type == "potential_re_aging":
@@ -5197,6 +6700,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- DOFD UNKNOWN ------------------------------------------------------
     elif attack_type == "dofd_unknown_verification_required":
+        _rama = "dofd"
         if dla_refresh:
             if v4 == 0:
                 reason = (
@@ -5289,6 +6793,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         "collector_original_creditor_self_declared",
         "collector_original_creditor_pattern",
     }:
+        _rama = "collector"
         # 4 variantes base x 2 sub-variantes = 8 combinaciones efectivas.
         # Sub-variante se selecciona con variation_idx % 7 (coprimo con 4)
         # para garantizar que dos cuentas que caigan en el mismo v4 slot
@@ -5390,6 +6895,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         "same_account_number_same_balance",
         "duplicate_account_number",
     }:
+        _rama = "dup_acct"
         if v4 == 0:
             reason = (
                 f"This account number{bal_str} from them is showing "
@@ -5427,17 +6933,36 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- MULTI FURNISHER SAME BALANCE --------------------------------------
     elif attack_type == "multi_furnisher_same_balance":
-        reason = (
-            f"Multiple companies, including the creditor, appear to be "
-            f"reporting the same balance{bal_str}. If this is one debt, only whoever "
-            f"actually holds it right now should be reporting it. I am asking each "
-            f"reporting company to show independent proof of ownership and their "
-            f"right to report under 15 U.S.C. section 1681s-2. Any company that cannot "
-            f"prove they are the current holder of this debt needs to be removed."
-        )
+        if v3 == 0:
+            reason = (
+                f"Multiple companies, including the creditor, appear to be "
+                f"reporting the same balance{bal_str}. If this is one debt, only whoever "
+                f"actually holds it right now should be reporting it. I am asking each "
+                f"reporting company to show independent proof of ownership and their "
+                f"right to report under 15 U.S.C. section 1681s-2. Any company that cannot "
+                f"prove they are the current holder of this debt needs to be removed."
+            )
+        elif v3 == 1:
+            reason = (
+                f"The same amount{bal_str} is showing up under more than one company on "
+                f"my file. A single debt has a single holder at a time, so the same "
+                f"balance reported twice makes my obligations look larger than they are. "
+                f"Please require each company to document its right to report this debt "
+                f"under 15 U.S.C. section 1681s-2, and delete the entries of whoever "
+                f"cannot show they currently hold it."
+            )
+        else:
+            reason = (
+                f"More than one furnisher is reporting this balance{bal_str}, which "
+                f"suggests the same debt is on my file twice. I am asking you to verify, "
+                f"with each of them, the chain of ownership and who holds the account "
+                f"today. Whichever entry is not supported by that documentation should "
+                f"be removed so the debt appears once and only once."
+            )
 
     # -- CROSS-BUREAU BALANCE CONFLICT -------------------------------------
     elif attack_type == "cross_bureau_balance_conflict":
+        _rama = "cross_bureau"
         if v3 == 0:
             reason = (
                 f"The balance on this account is being "
@@ -5470,6 +6995,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- CROSS-BUREAU PAYMENT STATUS CONFLICT ------------------------------
     elif attack_type == "cross_bureau_payment_status_conflict":
+        _rama = "cross_bureau"
         if v3 == 0:
             reason = (
                 f"The payment status on this account is "
@@ -5497,13 +7023,34 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- CROSS-BUREAU ACCOUNT STATUS CONFLICT ------------------------------
     elif attack_type == "cross_bureau_account_status_conflict":
-        reason = (
-            f"This account shows a status of '{status}' "
-            f"here, but a different status at another bureau. Whether an account is "
-            f"open, closed, charged off, or in collection is a factual matter, it "
-            f"cannot differ by bureau. I am asking that the correct status be "
-            f"determined and that the inaccurate reporting be corrected or deleted."
-        )
+        _rama = "cross_bureau"
+        if v3 == 0:
+            reason = (
+                f"This account shows a status of '{status}' "
+                f"here, but a different status at another bureau. Whether an account is "
+                f"open, closed, charged off, or in collection is a factual matter, it "
+                f"cannot differ by bureau. I am asking that the correct status be "
+                f"determined and that the inaccurate reporting be corrected or deleted."
+            )
+        elif v3 == 1:
+            reason = (
+                f"The account status reported here is '{status}', and the same account "
+                f"carries a different status in another bureau file. One of the two is "
+                f"wrong, because an account has one real condition at a time. Under "
+                f"15 U.S.C. section 1681e(b) the reporting has to reflect that single "
+                f"condition. Please confirm with the furnisher which status is correct, "
+                f"correct the file that is wrong, and delete the entry if the furnisher "
+                f"cannot establish which one it is."
+            )
+        else:
+            reason = (
+                f"There is a conflict in the status of this account. Your file says "
+                f"'{status}'; another bureau reports something else for the same "
+                f"tradeline. Since both figures come from the same furnisher, at least "
+                f"one of them was not reported accurately. I am asking that the status "
+                f"be verified against the furnisher's own records and that whatever "
+                f"cannot be supported be removed rather than left in conflict."
+            )
 
     # -- OPENED AFTER LAST ACTIVE ------------------------------------------
     elif attack_type == "opened_after_last_active":
@@ -5558,6 +7105,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- BALANCE EXCEEDS CREDIT LIMIT --------------------------------------
     elif attack_type == "balance_exceeds_credit_limit":
+        _rama = "limite"
         if v4 == 0:
             reason = (
                 f"This account shows a balance of {balance} "
@@ -5593,6 +7141,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- BALANCE EXCEEDS HIGH CREDIT ---------------------------------------
     elif attack_type == "balance_exceeds_high_credit":
+        _rama = "limite"
         if v4 == 0:
             reason = (
                 f"Something is wrong with the balance on this account. "
@@ -5742,6 +7291,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- CLOSED WITH BALANCE -----------------------------------------------
     elif attack_type == "closed_with_balance":
+        _rama = "closed_bal"
         if v4 == 0:
             reason = (
                 f"This account shows a status of 'Closed' "
@@ -5855,17 +7405,37 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- CROSS-BUREAU DATE OPENED CONFLICT ---------------------------------
     elif attack_type == "cross_bureau_date_opened_conflict":
-        reason = (
-            f"The date this account was opened is being "
-            f"reported differently across bureaus. Here it shows {date_opened}. "
-            f"The date an account was opened is a historical fact established by the "
-            f"original creditor, it cannot legitimately vary by bureau. I am asking "
-            f"that the correct opening date be verified with the original account "
-            f"records and reported consistently at all three bureaus."
-        )
+        _rama = "cross_bureau"
+        if v3 == 0:
+            reason = (
+                f"The date this account was opened is being "
+                f"reported differently across bureaus. Here it shows {date_opened}. "
+                f"The date an account was opened is a historical fact established by the "
+                f"original creditor, it cannot legitimately vary by bureau. I am asking "
+                f"that the correct opening date be verified with the original account "
+                f"records and reported consistently at all three bureaus."
+            )
+        elif v3 == 1:
+            reason = (
+                f"Your file shows this account opened on {date_opened}, and another "
+                f"bureau shows a different opening date for the same account. Only one "
+                f"of them can be the date the account actually started. The opening date "
+                f"also feeds how the history is read, so an error there is not harmless. "
+                f"Please verify it against the original agreement and correct whichever "
+                f"file is wrong."
+            )
+        else:
+            reason = (
+                f"There is a discrepancy in the opening date of this account: {date_opened} "
+                f"here, something else elsewhere. That date comes from the creditor's own "
+                f"records, so a difference between bureaus means the information was not "
+                f"reported accurately under 15 U.S.C. section 1681e(b). I am asking that "
+                f"the true date be confirmed and reported the same way everywhere."
+            )
 
     # -- CROSS-BUREAU ACCOUNT TYPE CONFLICT --------------------------------
     elif attack_type == "cross_bureau_account_type_conflict":
+        _rama = "cross_bureau"
         reason = (
             f"This account is classified differently "
             f"depending on which bureau you look at. The account type is a factual "
@@ -5877,17 +7447,37 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- CROSS-BUREAU CREDIT LIMIT CONFLICT --------------------------------
     elif attack_type == "cross_bureau_credit_limit_conflict":
-        reason = (
-            f"The credit limit for this account is being "
-            f"reported as a different number at different bureaus. A credit limit "
-            f"is set by the creditor and is specific to the account, it cannot "
-            f"be one amount here and a different amount somewhere else. "
-            f"I am asking that the accurate credit limit be confirmed and that "
-            f"all three bureaus report the same correct figure."
-        )
+        _rama = "cross_bureau"
+        if v3 == 0:
+            reason = (
+                f"The credit limit for this account is being "
+                f"reported as a different number at different bureaus. A credit limit "
+                f"is set by the creditor and is specific to the account, it cannot "
+                f"be one amount here and a different amount somewhere else. "
+                f"I am asking that the accurate credit limit be confirmed and that "
+                f"all three bureaus report the same correct figure."
+            )
+        elif v3 == 1:
+            reason = (
+                f"The credit limit on this account does not match what another bureau "
+                f"shows. The limit is a term of my agreement with the creditor, a single "
+                f"number, and it affects how my utilization is calculated. Reporting two "
+                f"different figures is not maximum possible accuracy under "
+                f"15 U.S.C. section 1681e(b). Please confirm the real limit with the "
+                f"creditor and correct the file that is wrong."
+            )
+        else:
+            reason = (
+                f"I am disputing the credit limit reported on this account, because it "
+                f"is not the same figure at every bureau. Since the creditor sets one "
+                f"limit, the difference means at least one file is inaccurate, and the "
+                f"wrong number changes how my available credit looks. I am asking that "
+                f"the correct limit be verified with the creditor and applied here."
+            )
 
     # -- CROSS-BUREAU HIGH CREDIT CONFLICT ---------------------------------
     elif attack_type == "cross_bureau_high_credit_conflict":
+        _rama = "cross_bureau"
         bal_note = f" This bureau shows {high_credit}" if high_credit else ""
         if v3 == 0:
             reason = (
@@ -6293,15 +7883,33 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- LATE COLLECTION CONFLICT ------------------------------------------
     elif attack_type == "late_collection_conflict":
-        reason = (
-            f"The classification on this account does "
-            f"not add up. It appears to carry both a late payment status and "
-            f"collection-type language simultaneously, which are contradictory. "
-            f"A debt that has gone to collection has already defaulted, there are "
-            f"no more payments to be 'late' on. I am asking that the correct single "
-            f"classification be verified and applied, and any inaccurate duplicate "
-            f"notation be removed."
-        )
+        if v3 == 0:
+            reason = (
+                f"The classification on this account does "
+                f"not add up. It appears to carry both a late payment status and "
+                f"collection-type language simultaneously, which are contradictory. "
+                f"A debt that has gone to collection has already defaulted, there are "
+                f"no more payments to be 'late' on. I am asking that the correct single "
+                f"classification be verified and applied, and any inaccurate duplicate "
+                f"notation be removed."
+            )
+        elif v3 == 1:
+            reason = (
+                f"This account is being reported as a collection and, at the same time, "
+                f"as carrying a late payment status. Once an account is placed for "
+                f"collection the payment schedule is over, so there is nothing left to "
+                f"be late on. Reporting both at once is not accurate under "
+                f"15 U.S.C. section 1681e(b). Please determine which one the furnisher "
+                f"actually supports and remove the other."
+            )
+        else:
+            reason = (
+                f"Two classifications are on this same entry: a collection, and a "
+                f"delinquency status as if payments were still due. They describe "
+                f"different states of the same debt and cannot both be right. I am "
+                f"asking that the furnisher confirm the single accurate classification "
+                f"and that the contradictory notation be corrected or deleted."
+            )
 
     # -- ABSENT BUREAU REPORTING INCONSISTENCY (RETIRED) -------------------
     # Detector disabled. Forced to generic fallback above the if/elif
@@ -6310,6 +7918,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- LATE PAYMENT HISTORY DISPUTE --------------------------------------
     elif attack_type == "late_payment_history_dispute":
+        _rama = "late_pay"
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
         worst = "30"
         for code in actual_lates:
@@ -6383,6 +7992,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
 
     # -- CROSS-BUREAU PAYMENT HISTORY DATE CONFLICT ------------------------
     elif attack_type == "cross_bureau_payment_history_date_conflict":
+        _rama = "cross_bureau"
         actual_lates = [c for c in late_codes if not c.startswith("CO:")]
         late_str = ", ".join(actual_lates) if actual_lates else "in the payment history"
         if v4 == 0:
@@ -6739,6 +8349,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         # attempts advance variation_idx, v8 and pool_idx walk through
         # different cycles, the product of the two gives 8 x 11 = 88
         # effective variant combinations.
+        _fallback_usado = True
         pool_idx = variation_idx % 11
 
         # 11 detail-field rotations, each account in the same letter
@@ -6930,6 +8541,29 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                     f"were determined. Whatever they cannot support with records has to come off."
                 )
 
+    # PARCHE 23/09/2026 - Narrativa modular por ranuras.
+    # Si el arbol de arriba cayo en el fallback generico y el motor nos
+    # paso un indice de parrafo, se reemplaza el parrafo por la version
+    # armada con ranuras (ver cabecera de _narrativa_generica_modular).
+    # Cualquier fallo aqui deja intacto el parrafo original.
+    if narr_idx >= 0 and (_fallback_usado or _rama):
+        try:
+            _campos = {
+                "balance": balance, "pay_status": pay_status,
+                "date_opened": date_opened, "last_reported": last_rpt,
+                "status": status,
+            }
+            if _rama:
+                _mod = _narr_tipo_modular(
+                    _rama, narr_idx, _campos,
+                    campo=_NARR_CAMPO.get(attack_type, ""))
+            else:
+                _mod = _narrativa_generica_modular(narr_idx, _campos)
+            if _mod:
+                reason = _mod
+        except Exception:
+            pass
+
     # Append secondary flags paragraph if any additional issues were detected
     # The secondary flags paragraph now ALSO rotates, so cross-bureau letters
     # for the same account get different secondary-flag phrasings.
@@ -6939,7 +8573,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
     _SECONDARY_BUREAU_OFFSET = {"transunion": 0, "experian": 2, "equifax": 4}
     secondary_variation = variation_idx + _SECONDARY_BUREAU_OFFSET.get(bureau, 0)
     secondary_flags = item.get("secondary_flags", [])
-    flags_para = _build_secondary_flags_paragraph(secondary_flags, variation_idx=secondary_variation)
+    flags_para = _build_secondary_flags_paragraph(
+        secondary_flags, variation_idx=secondary_variation, narr_idx=narr_idx)
 
     # Closer rotation, NEVER emit "DELETE OFF MY CREDIT REPORT" in caps again.
     # Pool of 12 closers; 2 are intentionally empty (trailing word from the body
@@ -7349,15 +8984,17 @@ def _build_account_context_from_response(
     return ""
 
 
-def build_dispute_letter_engine(
+def _build_dispute_letter_engine_once(
     letter_input_engine: dict[str, dict[str, list[dict[str, Any]]]],
     consumer_name: str = "[CLIENT NAME]",
     report_date: str = "",
     personal_info: dict[str, Any] | None = None,
     personal_info_issues: list[dict[str, Any]] | None = None,
     variation_seed: int = 0,
+    max_accounts_per_letter: int = 0,   # 0 = sin limite (comportamiento actual)
     target_round: str = "round_1",
     bureau_response_parsed: dict | None = None,
+    narr_salt: int = 0,
 ) -> dict[str, dict[str, dict[str, str]]]:
     """
     Generate dispute letters, ONE LETTER PER ACCOUNT-TYPE GROUP PER ROUND PER BUREAU.
@@ -7382,8 +9019,27 @@ def build_dispute_letter_engine(
         other_derogatory      , repossession (UCC Art.9), child support (section 1681s-1),
                                  bankruptcy (section 1681c), charge-off deficiency, paid collection
     """
+
+    # PARCHE 23/09/2026 - contador de parrafos por attack_type.
+    # Corre a lo largo de TODAS las cartas de este cliente (3 buros,
+    # todos los grupos) para que la narrativa modular por ranuras no
+    # repita ninguna combinacion. Ver _narrativa_generica_modular.
+    # el nombre viene del nombre de carpeta del cliente y a veces trae
+    # espacios dobles ("Angelo  Emilio  Perez"). En la carta impresa eso se
+    # ve mal, asi que se normaliza aqui.
+    consumer_name = " ".join(str(consumer_name).split()) or "[CLIENT NAME]"
+
+    _narr_contador: dict[str, int] = {"*": int(narr_salt)}
+    # ranuras ya usadas por cada cuenta (misma cuenta en TU/EXP/EQF). El
+    # codigo RS garantiza que dos parrafos distintos no coincidan en DOS
+    # ranuras, pero pueden coincidir en UNA. Si esa una es la primera o la
+    # ultima, la ventana de 20 palabras cruza con el encabezado de cuenta
+    # (que si es identico entre cartas) y vuelve a repetirse. Por eso para
+    # la misma cuenta se exige que NINGUNA ranura se repita.
+    _narr_prev: dict[int, list] = {}
+
     result: dict[str, dict[str, dict[str, str]]] = {}
-    formatted_date = _format_date_long(report_date)
+    formatted_date = _letter_date()
 
     bureau_seed_map = {"transunion": 1, "experian": 2, "equifax": 3}
 
@@ -7392,24 +9048,74 @@ def build_dispute_letter_engine(
     # receive different templates for the same category and round, preventing
     # the pattern-detection risk that arises when a client's three bureau letters
     # open with identical language.
+    # PARCHE 23/09/2026 - reparto de plantillas.
+    #
+    # Antes: tabla fija TU=0, EXP=3, EQF=6 con paso 3 sobre 6 plantillas.
+    #   6 % 6 = 0, asi que Equifax SIEMPRE repetia la apertura de TransUnion,
+    #   y ademas los 25 clientes le mandaban a cada buro la misma apertura.
+    #
+    # Ahora: dos cambios.
+    #   1) La tanda de cartas de ESTE cliente se ordena y cada carta recibe la
+    #      plantilla siguiente. Mientras la tanda no supere el tamano del pool,
+    #      ninguna carta del cliente repite apertura.
+    #   2) El punto de arranque sale de una huella del cliente + la fecha del
+    #      reporte. Deterministica: regenerar la misma ronda da la misma carta,
+    #      pero dos clientes distintos no comparten la combinacion.
+    import hashlib as _hl_tpl
+    _semilla_cliente = int(
+        _hl_tpl.md5(f"{consumer_name}|{report_date}".encode("utf-8")).hexdigest()[:8], 16)
+    _pares_del_cliente = sorted(
+        {(b, g) for b, gs in (letter_input_engine or {}).items()
+         for g, v in (gs or {}).items() if v}
+    )
+    _orden_carta = {p: i for i, p in enumerate(_pares_del_cliente)}
+
     def _tpl_idx(bureau: str, group: str, round_key: str, n_templates: int) -> int:
-        # bureau_offset: TU=0, EXP=3, EQF=6, stride of 3 spreads evenly across 8 slots
-        _bureau_offset = {"transunion": 0, "experian": 3, "equifax": 6}
-        group_pos      = {"collections": 0, "charge_offs": 1, "late_payments": 2,
-                          "repossessions": 3, "bankruptcies": 4, "child_support": 5,
-                          "other_derogatory": 6}
-        bureau_off = _bureau_offset.get(bureau, 0)
-        round_pos  = 0 if round_key == "round_1" else 1
-        g          = group_pos.get(group, 0)
-        # variation_seed shifts the slot on each Regenerate press,
-        # cycling through all available templates while keeping
-        # inter-bureau uniqueness intact.
-        slot = (bureau_off + g + round_pos * 4 + variation_seed) % n_templates
-        return slot
+        round_pos = 0 if round_key == "round_1" else 1
+        pos = _orden_carta.get((bureau, group), 0)
+        return (_semilla_cliente + pos + round_pos + variation_seed) % n_templates
 
     group_order = ["collections", "charge_offs", "late_payments",
                    "repossessions", "bankruptcies", "child_support",
                    "other_derogatory"]
+
+    # PARCHE 23/09/2026 - limite de cuentas por carta (solo flujo PC).
+    #
+    # max_accounts_per_letter=0 deja TODO igual que antes, que es lo que usa la
+    # web: ahi el operador elige a mano cuantas cuentas entran.
+    # Con un valor (la PC usa 6), cada categoria se parte en cartas de hasta N
+    # cuentas: 10 cobranzas -> "collections" con 6 y "collections_2" con 4.
+    # Los nombres derivados se agregan a group_order para que el motor los
+    # recorra, y build_bundle_v2._collect_letters ya acepta cualquier nombre de
+    # grupo mientras la ronda sea la estandar.
+    if max_accounts_per_letter and max_accounts_per_letter > 0:
+        _troceado: dict[str, dict[str, list]] = {}
+        _extra_groups: list[str] = []
+        for _b, _gs in (letter_input_engine or {}).items():
+            _troceado[_b] = {}
+            for _g in group_order:
+                _items = (_gs or {}).get(_g) or []
+                if not _items:
+                    continue
+                for _n in range(0, len(_items), max_accounts_per_letter):
+                    _trozo = _items[_n:_n + max_accounts_per_letter]
+                    _parte = _n // max_accounts_per_letter
+                    _nombre = _g if _parte == 0 else f"{_g}_{_parte + 1}"
+                    _troceado[_b][_nombre] = _trozo
+                    if _nombre not in group_order and _nombre not in _extra_groups:
+                        _extra_groups.append(_nombre)
+            # grupos que no estan en group_order se respetan tal cual
+            for _g, _items in (_gs or {}).items():
+                if _g not in group_order and _items:
+                    _troceado[_b][_g] = _items
+                    if _g not in _extra_groups:
+                        _extra_groups.append(_g)
+        letter_input_engine = _troceado
+        def _orden_parte(nombre: str):
+            _base = nombre.rsplit("_", 1)[0] if nombre.rsplit("_", 1)[-1].isdigit() else nombre
+            _num  = int(nombre.rsplit("_", 1)[-1]) if nombre.rsplit("_", 1)[-1].isdigit() else 1
+            return (group_order.index(_base) if _base in group_order else 99, _num)
+        group_order = sorted(set(group_order) | set(_extra_groups), key=_orden_parte)
 
     for bureau, groups in letter_input_engine.items():
         bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
@@ -7448,7 +9154,12 @@ def build_dispute_letter_engine(
                 # Substitute placeholders
                 n            = len(items)
                 these_items  = "these accounts" if n != 1 else "this account"
-                they_verb    = "are" if n != 1 else "is"
+                # PARCHE 23/09/2026 - {verb} va en oracion subordinada ("cuentas
+                # que NO CREO que ESTEN bien reportadas") y {they_verb} va suelto
+                # ("no creo que ELLAS ESTEN"). Antes los dos valian "are" y salia
+                # "I do not believe are being reported correctly".
+                verb         = "are" if n != 1 else "is"
+                they_verb    = "they are" if n != 1 else "it is"
                 count_str    = f"{n} account{'s' if n != 1 else ''}"
                 # bureau_response_summary: incluir respuesta previa del bureau si existe
                 prev_response = item_meta.get("bureau_response", "") if (item_meta := locals().get("item_meta", {})) else ""
@@ -7473,14 +9184,30 @@ def build_dispute_letter_engine(
                 else:
                     bureau_resp_block = ""
 
-                opening      = tpl.format(
-                    count=count_str,
-                    verb=they_verb,
-                    they_verb=they_verb,
-                    these_items=these_items,
-                    consumer_name=consumer_name,
-                    bureau_response_summary=bureau_resp_block,
-                )
+                # PARCHE 23/09/2026 - Ronda 1 usa la apertura MODULAR (8 ranuras
+                # x 10 frases cortas). R2 y R3 siguen con sus plantillas, que
+                # llevan el bloque de respuesta del buro.
+                if not is_r2 and not is_r3:
+                    _sem = int(_hl_tpl.md5(
+                        f"{consumer_name}|{report_date}|{variation_seed}"
+                        .encode("utf-8")).hexdigest()[:12], 16)
+                    opening = _apertura_modular(
+                        _sem, _orden_carta.get((bureau, group_key), 0))
+                else:
+                    opening = tpl.format(
+                        count=count_str,
+                        verb=verb,
+                        they_verb=they_verb,
+                        these_items=these_items,
+                        consumer_name=consumer_name,
+                        bureau_response_summary=bureau_resp_block,
+                    )
+
+                # saludo rotativo: ver _SALUDOS
+                _sal = _SALUDOS[
+                    _orden_carta.get((bureau, group_key), 0) % len(_SALUDOS)]
+                if _sal != "Hi," and opening.startswith("Hi,\n\n"):
+                    opening = _sal + "\n\n" + opening[len("Hi,\n\n"):]
 
                 header = (
                     f"{consumer_name}\n"
@@ -7572,14 +9299,29 @@ def build_dispute_letter_engine(
                         33, 35, 37, 39, 41,
                         8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40,
                     ]
+                    _narr_base = _narr_contador.get("*", 0)
+                    _prev = _narr_prev.get(account_fingerprint, [])
+                    if _prev:
+                        for _ in range(200):
+                            _ix = _narr_slot_indices(_narr_base, 12)
+                            if all(all(_ix[_p] != _q[_p] for _p in range(12))
+                                   for _q in _prev):
+                                break
+                            _narr_base += 1
+                    _narr_prev.setdefault(account_fingerprint, []).append(
+                        _narr_slot_indices(_narr_base, 12))
                     for stride in _ATTEMPT_STRIDES:
                         reason = _account_reason(
                             item,
                             variation_idx=variation_idx + stride,
                             bureau=bureau,
+                            narr_idx=_narr_base + stride,
                         )
                         if reason not in used_reasons:
                             break
+                    # el stride consumido tambien gasta indices: si no se
+                    # suma, la cuenta siguiente repetiria un indice ya usado
+                    _narr_contador["*"] = _narr_base + 1 + max(0, int(stride))
                     if reason in used_reasons:
                         _dis = last_four_digits(facct)
                         if _dis:
@@ -7605,14 +9347,21 @@ def build_dispute_letter_engine(
                 body_parts = []
                 if pi_section:
                     body_parts.append(pi_section)
+                # PARCHE 23/09/2026 - linea neutral en vez de la orden de borrado
+                _sem_l = int(_hl_tpl.md5(
+                    f"{consumer_name}|{report_date}|{variation_seed}".encode("utf-8")
+                ).hexdigest()[:16], 16)
+                _ord_l = _orden_carta.get((bureau, group_key), 0)
                 body_parts.append(
-                    "The following accounts must be deleted immediately:\n\n" + accounts_block
+                    _linea_lista(_sem_l, _ord_l) + "\n\n" + accounts_block
                 )
 
                 full = (
                     header + "\n\n"
                     + opening + "\n\n\n"
                     + "\n\n\n".join(body_parts) + "\n\n\n"
+                    + _cierre_carta(_sem_l, _ord_l) + "\n\n"
+                    + "Thank you,\n\n"
                     + consumer_name
                 )
                 group_letters[round_key] = full
@@ -9298,7 +11047,7 @@ def build_inquiry_dispute_letter(
     bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name    = bureau_info.get("name", bureau.title())
     bureau_address = bureau_info.get("address", "")
-    date_str       = _format_date_long(report_date)
+    date_str       = _letter_date()
 
     header = (
         f"{consumer_name}\n[Address]\n[City, State ZIP]\n\n"
@@ -9447,6 +11196,9 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
 # Structural markers required in a compliant bureau dispute letter.
 _REQUIRED_SALUTATION          = "Hi,"
 _REQUIRED_TRANSITION_LINE     = "The following accounts must be deleted immediately:"
+# PARCHE 23/09/2026 - la linea de lista ahora rota. Se acepta cualquiera de las
+# nuevas y tambien la vieja, para que las cartas ya generadas sigan validando.
+_LINEAS_LISTA_VALIDAS = tuple([_REQUIRED_TRANSITION_LINE] + _LINEA_LISTA)
 
 # Word count limits from PROYECTO_CONTEXT checklist.
 _BODY_MIN_WORDS  = 150
@@ -9549,10 +11301,20 @@ def validate_eoscar_compliance(
         # Estimate body words by stripping header, transition, and signature.
         # Body is between salutation and transition line.
         body_text = text
-        sal_idx = text.find(_REQUIRED_SALUTATION)
+        sal_idx = -1
+        _sal_len = 0
+        for _sl in _SALUDOS:
+            _i = text.find(_sl)
+            if _i >= 0 and (sal_idx < 0 or _i < sal_idx):
+                sal_idx, _sal_len = _i, len(_sl)
         if sal_idx >= 0:
-            body_text = text[sal_idx + len(_REQUIRED_SALUTATION):]
-        trans_idx = body_text.find(_REQUIRED_TRANSITION_LINE)
+            body_text = text[sal_idx + _sal_len:]
+        trans_idx = -1
+        for _ln in _LINEAS_LISTA_VALIDAS:
+            _i = body_text.find(_ln)
+            if _i >= 0:
+                trans_idx = _i
+                break
         if trans_idx >= 0:
             body_text = body_text[:trans_idx]
         body_words = len(body_text.split())
@@ -9578,14 +11340,25 @@ def validate_eoscar_compliance(
             f"body={body_words}w, total={total_words}w"
             + (" | " + "; ".join(length_notes) if length_notes else "")
         )
+        # PARCHE 23/09/2026 - el largo pasa a AVISO, no a falla.
+        #
+        # Motivo: se buscaron los limites y no existen. Ni el FCRA, ni la guia
+        # de la FTC, ni la CFPB publican un maximo de palabras, y el buro no le
+        # reenvia la carta al furnisher: la convierte en uno o dos codigos mas
+        # hasta 255 caracteres de texto (CFPB, "Key Dimensions and Processes in
+        # the U.S. Credit Reporting System"). Una carta larga no se rechaza por
+        # larga; lo que sobra simplemente no viaja. Los numeros de abajo salieron
+        # de un checklist interno, asi que quedan como referencia informativa.
         result["checks"]["length"] = {
-            "pass":        length_ok,
+            "pass":        True,
+            "informativo": True,
+            "en_rango":    length_ok,
             "detail":      length_detail,
             "body_words":  body_words,
             "total_words": total_words,
         }
         if not length_ok:
-            result["warnings"].append(f"Length out of range: {'; '.join(length_notes)}")
+            result["warnings"].append(f"Aviso de largo (informativo): {'; '.join(length_notes)}")
 
         # ---- Check 3: Forbidden phrases ----
         found_phrases = [p for p in FORBIDDEN_PHRASES if p in lower]
@@ -9608,8 +11381,8 @@ def validate_eoscar_compliance(
         # ---- Check 4: Structure ----
         structure_notes = []
         if letter_type == "bureau_dispute":
-            has_salutation = _REQUIRED_SALUTATION in text
-            has_transition = _REQUIRED_TRANSITION_LINE in text
+            has_salutation = any(_sl in text for _sl in _SALUDOS)
+            has_transition = any(_ln in text for _ln in _LINEAS_LISTA_VALIDAS)
             # Signature is the consumer name at the end. We can't verify
             # the exact name (we don't have it here), but we can verify
             # that the letter does NOT end with "Sincerely," or similar.
@@ -9620,9 +11393,9 @@ def validate_eoscar_compliance(
             )
 
             if not has_salutation:
-                structure_notes.append(f"missing salutation '{_REQUIRED_SALUTATION}'")
+                structure_notes.append("missing salutation (none of _SALUDOS found)")
             if not has_transition:
-                structure_notes.append(f"missing transition '{_REQUIRED_TRANSITION_LINE}'")
+                structure_notes.append("missing the line that introduces the account list")
             if ends_with_forbidden_closer:
                 structure_notes.append("ends with forbidden closer (Sincerely/Regards)")
 
@@ -9682,7 +11455,8 @@ def validate_eoscar_compliance(
         # test for set intersection. Skipped if other_letters not provided.
         if other_letters:
             # Build the set of N-word tuples from this letter
-            this_words = [w.strip(".,;:!?").lower() for w in text.split()]
+            this_words = [w.strip(".,;:!?").lower()
+                          for w in _cuerpo_para_solapamiento(text).split()]
             this_ngrams = set()
             if len(this_words) >= _OVERLAP_WINDOW_WORDS:
                 for i in range(len(this_words) - _OVERLAP_WINDOW_WORDS + 1):
@@ -9693,7 +11467,8 @@ def validate_eoscar_compliance(
             for other in other_letters:
                 if not isinstance(other, str) or other == text:
                     continue
-                other_words = [w.strip(".,;:!?").lower() for w in other.split()]
+                other_words = [w.strip(".,;:!?").lower()
+                               for w in _cuerpo_para_solapamiento(other).split()]
                 if len(other_words) < _OVERLAP_WINDOW_WORDS:
                     continue
                 other_ngrams = set()
@@ -9777,6 +11552,31 @@ def validate_eoscar_compliance(
         }
 
 
+
+def _cuerpo_para_solapamiento(texto: str) -> str:
+    """
+    Devuelve la carta SIN el membrete (nombre y direccion del cliente,
+    direccion del buro y fecha), es decir a partir del saludo.
+
+    Motivo: dos cartas del mismo cliente al mismo buro el mismo dia tienen
+    que llevar un membrete identico; no hay redaccion posible que lo evite.
+    Contarlo como solapamiento es un falso positivo: con un nombre de cuatro
+    palabras el membrete de Equifax ya suma por si solo 20 palabras. Lo que
+    mide este chequeo es si el CUERPO de dos cartas se parece.
+    """
+    if not isinstance(texto, str):
+        return ""
+    corte = -1
+    largo = 0
+    for _sl in _SALUDOS:
+        _i = texto.find(_sl)
+        if _i >= 0 and (corte < 0 or _i < corte):
+            corte, largo = _i, len(_sl)
+    if corte < 0:
+        return texto
+    return texto[corte + largo:]
+
+
 def _is_boilerplate_ngram(ngram: tuple) -> bool:
     """
     Return True if an ngram is expected to repeat across letters
@@ -9786,6 +11586,14 @@ def _is_boilerplate_ngram(ngram: tuple) -> bool:
     joined = " ".join(ngram)
     boilerplate_markers = (
         "the following accounts must be deleted immediately",
+        "the accounts i am disputing are listed below",
+        "these are the accounts i need you to investigate",
+        "below are the accounts covered by this dispute",
+        "i am disputing the following accounts",
+        "these accounts are the subject of this dispute",
+        "the items in question are listed here",
+        "here are the accounts i am asking you to review",
+        "the following accounts are the ones i dispute",
         "15 u.s.c. section 1681",
         "15 usc 1681",
         "fair credit reporting act",
@@ -9967,7 +11775,14 @@ def _is_collector_account(item: dict[str, Any]) -> bool:
     attack = item.get("attack_type", "")
     laws   = item.get("laws", [])
     has_furnisher_law = any("1681s-2" in l for l in laws)
-    return attack in _COLLECTOR_ATTACK_TYPES and has_furnisher_law
+    if not (attack in _COLLECTOR_ATTACK_TYPES and has_furnisher_law):
+        return False
+    # PARCHE 23/09/2026 - la carta cita la FDCPA, que segun 15 U.S.C. 1692a(6)
+    # NO aplica al acreedor que cobra su propia deuda. Sin este filtro la carta
+    # le llegaba a VERIZON, GS BANK USA, KIA FIN AM, FRD MOTOR CR y hasta a una
+    # agencia estatal de manutencion.
+    nombre = item.get("furnisher_name") or item.get("name") or ""
+    return is_collector_name(nombre)
 
 
 def _collector_letter_address(furnisher_name: str) -> str:
@@ -10109,6 +11924,74 @@ def _furnisher_account_demand(item: dict[str, Any]) -> str:
         )
 
 
+
+def _ngramas_cuerpo(texto: str) -> set:
+    """20-gramas del cuerpo de una carta, sin membrete y sin boilerplate."""
+    w = [x.strip(".,;:!?").lower()
+         for x in _cuerpo_para_solapamiento(texto).split()]
+    n = _OVERLAP_WINDOW_WORDS
+    out = set()
+    for i in range(len(w) - n + 1):
+        g = tuple(w[i:i + n])
+        if not _is_boilerplate_ngram(g):
+            out.add(g)
+    return out
+
+
+def _conflictos_entre_cartas(resultado: dict) -> int:
+    """Cuantas ventanas de 20 palabras comparten dos cartas del cliente."""
+    textos = [t for gg in resultado.values() for rr in gg.values()
+              for t in rr.values() if isinstance(t, str)]
+    if len(textos) < 2:
+        return 0
+    sets = [_ngramas_cuerpo(t) for t in textos]
+    total = 0
+    for i in range(len(sets)):
+        for j in range(i + 1, len(sets)):
+            total += len(sets[i] & sets[j])
+    return total
+
+
+_NARR_MAX_REINTENTOS = 24
+
+
+def build_dispute_letter_engine(*args, **kwargs):
+    """
+    Genera las cartas del cliente y, si dos de ellas comparten alguna
+    ventana de 20 palabras, vuelve a generarlas con otro punto de partida
+    del contador de parrafos.
+
+    Por que hace falta: el codigo RS garantiza que dos parrafos no coincidan
+    en DOS ranuras a la vez, pero una ventana que cruza la frontera entre dos
+    ranuras solo necesita la COLA de una y la CABEZA de la otra. Como varias
+    entradas de un mismo pool comparten cola o cabeza (los pools de ley y de
+    pedido se arman combinando prefijos y sufijos), esa garantia no alcanza
+    por si sola. En vez de forzar a que las 17 frases de cada pool empiecen y
+    terminen con una palabra distinta, cosa que volveria el texto artificial,
+    se comprueba el resultado y se reasigna.
+
+    Es determinista: el mismo insumo produce siempre el mismo salt, asi que
+    regenerar una carta da el mismo texto. Si ningun intento queda limpio se
+    devuelve el mejor, nunca se falla.
+    """
+    kwargs.pop("narr_salt", None)
+    mejor = None
+    mejor_n = None
+    for salt in range(_NARR_MAX_REINTENTOS):
+        try:
+            r = _build_dispute_letter_engine_once(*args, narr_salt=salt, **kwargs)
+        except Exception:
+            if mejor is not None:
+                return mejor
+            raise
+        n = _conflictos_entre_cartas(r)
+        if n == 0:
+            return r
+        if mejor_n is None or n < mejor_n:
+            mejor, mejor_n = r, n
+    return mejor
+
+
 def build_furnisher_letter_engine(
     letter_input_engine: dict[str, dict[str, list[dict[str, Any]]]],
     consumer_name: str = "[CLIENT NAME]",
@@ -10136,7 +12019,7 @@ def build_furnisher_letter_engine(
                         FCRA section 1681s-2(a) (accuracy duty) +
                         FCRA section 1681s-2(b) (investigation duty after bureau notice)
     """
-    formatted_date = _format_date_long(report_date)
+    formatted_date = _letter_date()
 
     # -- Collect all collector accounts, deduplicated by furnisher name ------
     # Key: normalized furnisher name
@@ -10200,13 +12083,13 @@ def build_furnisher_letter_engine(
                     f"I also dispute the accuracy and completeness of the information "
                     f"you are reporting to the credit bureaus under the Fair Credit "
                     f"Reporting Act, 15 U.S.C. section 1681s-2.\n\n"
-                    f"Until you provide complete validation of each account listed "
-                    f"below, you are required under 15 U.S.C. section 1692g(b) to cease "
-                    f"all collection activity, including reporting or updating this "
-                    f"account at any credit reporting agency. Continued reporting "
-                    f"without validating constitutes a violation of both the FDCPA "
-                    f"and the FCRA, and may result in statutory damages, actual "
-                    f"damages, and attorney fees."
+                    f"If this letter is sent within thirty days of your initial "
+                    f"communication with me, 15 U.S.C. section 1692g(b) requires you "
+                    f"to cease collection of the debt until you mail verification. "
+                    f"If that period has already run, I am still disputing this debt, "
+                    f"and under 15 U.S.C. section 1692e(8) you may not communicate "
+                    f"credit information to a consumer reporting agency without "
+                    f"disclosing that the debt is disputed."
                 )
             else:
                 opening = (
@@ -10215,17 +12098,14 @@ def build_furnisher_letter_engine(
                     f"request regarding the account(s) below. I have not received "
                     f"a complete and adequate response, and these accounts remain "
                     f"on my credit report without proper validation.\n\n"
-                    f"Under 15 U.S.C. section 1692g(b), you were required to cease "
-                    f"all collection activity, including credit bureau reporting, "
-                    f"until you provided full validation. If you have continued "
-                    f"reporting or have reported updates without completing this "
-                    f"validation, you are in violation of the FDCPA. You are also "
-                    f"in violation of 15 U.S.C. section 1681s-2(b), which requires "
-                    f"you to investigate a consumer dispute thoroughly and correct "
-                    f"or delete information you cannot verify. Continued willful "
-                    f"noncompliance may expose your company to liability under "
-                    f"15 U.S.C. section 1681n, including statutory damages of $100 "
-                    f"to $1,000 per violation plus punitive damages and attorney fees."
+                    f"I have also disputed these accounts with the credit bureaus. "
+                    f"Once a bureau forwards that dispute to you, 15 U.S.C. section "
+                    f"1681s-2(b) requires you to investigate, review the information "
+                    f"the bureau provides, and correct or delete what you cannot "
+                    f"verify. Separately, under 15 U.S.C. section 1681s-2(a)(8) you "
+                    f"must investigate this dispute sent directly to you, and under "
+                    f"15 U.S.C. section 1681s-2(a)(3) you may not continue reporting "
+                    f"these accounts without noting that they are disputed."
                 )
 
             # Documentation demand (same for both rounds, more specific in R2)
@@ -11171,7 +13051,7 @@ def build_verified_response_letter(
     bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name    = bureau_info.get("name", bureau.title())
     bureau_address = bureau_info.get("address", "")
-    letter_date    = _format_date_long(report_date or response_date)
+    letter_date    = _letter_date()
     resp_label     = response_date if response_date else "your recent reinvestigation response"
 
     # Opening template, one per bureau, guaranteed unique
@@ -11333,7 +13213,7 @@ def build_updated_response_letter(
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name = info.get("name", bureau.title())
-    date_str    = _format_date_long(report_date or response_date)
+    date_str    = _letter_date()
     resp_label  = response_date or "your recent reinvestigation response"
 
     header  = _bureau_header(consumer_name, bureau, date_str)
@@ -11406,7 +13286,7 @@ def build_deletion_confirmed_letter(
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name = info.get("name", bureau.title())
-    date_str    = _format_date_long(report_date or response_date)
+    date_str    = _letter_date()
     resp_label  = response_date or "your recent reinvestigation response"
 
     header  = _bureau_header(consumer_name, bureau, date_str)
@@ -11508,7 +13388,7 @@ def build_frivolous_response_letter(
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name = info.get("name", bureau.title())
-    date_str    = _format_date_long(report_date or response_date)
+    date_str    = _letter_date()
     resp_label  = response_date or "your recent response"
 
     header  = _bureau_header(consumer_name, bureau, date_str)
@@ -11595,7 +13475,7 @@ def build_unable_to_process_letter(
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name = info.get("name", bureau.title())
-    date_str    = _format_date_long(report_date or response_date)
+    date_str    = _letter_date()
     resp_label  = response_date or "your recent response"
 
     header  = _bureau_header(consumer_name, bureau, date_str)
@@ -11666,7 +13546,7 @@ def build_no_response_letter(
     """
     info        = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name = info.get("name", bureau.title())
-    date_str    = _format_date_long(report_date)
+    date_str    = _letter_date()
     dispute_label = dispute_date or "[original dispute date]"
 
     header  = _bureau_header(consumer_name, bureau, date_str)
@@ -12961,7 +14841,7 @@ def build_identity_theft_block_letter(
     bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
     bureau_name    = bureau_info.get("name", bureau.title())
     bureau_address = bureau_info.get("address", "")
-    date_str       = _format_date_long(report_date)
+    date_str       = _letter_date()
 
     # Build DOB/SSN identity line
     identity_line = ""
@@ -13069,7 +14949,7 @@ def build_fraud_alert_letter(
     The consumer only needs to contact ONE bureau, that bureau must notify the other two.
     Recommended: contact TransUnion first (fastest processing).
     """
-    date_str = _format_date_long(report_date)
+    date_str = _letter_date()
 
     if alert_type == "extended":
         duration    = "seven (7) years"
@@ -13421,7 +15301,7 @@ def build_cfpb_complaint_template(
         "equifax":    "Equifax Information Services",
     }.get(bureau.lower(), bureau.title())
 
-    date_str = _format_date_long(dispute_date or response_date)
+    date_str = _letter_date()
 
     # Complaint type based on response
     complaint_type_map = {
@@ -13584,3 +15464,108 @@ if __name__ == "__main__":
     print(f"OK -> {output}")
 # --- size-pad to 574558 bytes: transfer pipeline forces exact file size; this trailing comment is inert ---
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# ======================================================================
+#  PORTADO DESDE report_parser.py (motor de la PC) - 23/09/2026
+#  Unica funcion que existia en la PC y no en produccion. Carta al
+#  ACREEDOR (furnisher) por robo de identidad. Produccion solo tenia las
+#  tres de buro (block / fraud_alert / action_guide).
+#  Dependencias: _format_date_long y mask_stars_to_x, ambas ya en este archivo.
+#  Copiada tal cual, sin modificar una sola linea.
+# ======================================================================
+
+def build_identity_theft_furnisher_letter(
+    furnisher_name: str,
+    furnisher_address: str,
+    fraudulent_accounts: list[dict[str, Any]],
+    consumer_name: str,
+    consumer_address: str = "[Address]",
+    consumer_city_state_zip: str = "[City, State ZIP]",
+    ftc_report_number: str = "",
+    police_report_number: str = "",
+    police_department: str = "",
+    report_date: str = "",
+) -> str:
+    """
+    Generate a direct-to-furnisher identity theft letter under
+    15 U.S.C. 1681s-2(a)(6) (duty upon notice of identity theft), 1681s-2(a)(1)
+    (no furnishing of info known to be inaccurate), 1681c-2 (605B block) and
+    1681m(f) (no sale/transfer of an identity-theft debt).
+
+    The consumer must attach: FTC Identity Theft Report, police report (if any),
+    and government-issued ID. Returns the full letter text; build_bundle_v2
+    strips the envelope and re-renders the consumer header.
+    """
+    date_str = _letter_date()
+
+    account_lines = []
+    for i, acc in enumerate(fraudulent_accounts, 1):
+        name    = acc.get("name", acc.get("furnisher_name", furnisher_name))
+        acct    = acc.get("account_number", "Unknown")
+        opened  = acc.get("date_opened", "")
+        balance = acc.get("balance", "")
+        details = []
+        if opened:  details.append(f"Opened: {opened}")
+        if balance: details.append(f"Balance: {balance}")
+        detail_str = f" ({', '.join(details)})" if details else ""
+        account_lines.append(f"  {i}. {name}, Account #{mask_stars_to_x(acct)}{detail_str}")
+    accounts_block = "\n".join(account_lines)
+
+    report_refs = []
+    if ftc_report_number:
+        report_refs.append(f"FTC Identity Theft Report Number: {ftc_report_number}")
+    if police_report_number and police_department:
+        report_refs.append(f"Police Report Number: {police_report_number} ({police_department})")
+    elif police_report_number:
+        report_refs.append(f"Police Report Number: {police_report_number}")
+    report_ref_block = "\n".join(report_refs) if report_refs else "[FTC Report Number / Police Report Number]"
+
+    letter = f"""{consumer_name}
+{consumer_address}
+{consumer_city_state_zip}
+
+{furnisher_name}
+{furnisher_address}
+
+{date_str}
+
+RE: IDENTITY THEFT -- FRAUDULENT ACCOUNT -- DEMAND TO CEASE REPORTING AND DELETE (FCRA section 1681s-2 and section 1681c-2)
+
+To Whom It May Concern:
+
+I am a victim of identity theft. The account(s) listed below, which your company is furnishing to one or more consumer reporting agencies in my name, were opened fraudulently and without my knowledge or authorization. I did not apply for, open, sign for, use, or benefit from this account.
+
+The following account(s) resulted from identity theft:
+
+{accounts_block}
+
+{report_ref_block}
+
+I have enclosed a copy of my FTC Identity Theft Report and a copy of my police report as evidence. Under federal law the following now applies to you as the furnisher of this information:
+
+1. CEASE FURNISHING (section 1681s-2(a)(6)): Once you receive an identity theft report and notice that information you furnished resulted from identity theft, you may not continue to furnish that information to any consumer reporting agency.
+
+2. NO INACCURATE FURNISHING (section 1681s-2(a)(1)): You may not furnish information you know, or have reasonable cause to believe, is inaccurate. You are now on notice that this account is fraudulent.
+
+3. NO RE-REPORTING AFTER A BLOCK (section 1681c-2): When a consumer reporting agency blocks this information as identity theft, you are prohibited from re-reporting the blocked information.
+
+4. NO SALE OR TRANSFER (section 1681m(f)): You may not sell, transfer for collection, or place for collection a debt that you have been notified resulted from identity theft.
+
+I therefore demand that you: (1) immediately cease furnishing this account to Equifax, Experian, TransUnion, and any other consumer reporting agency; (2) delete the account and request its deletion from every agency to which you reported it; (3) cease all collection activity on this account; and (4) send me written confirmation that you have done so. Reporting the account as "disputed" or "customer disagrees" does not satisfy these obligations -- the account must be deleted.
+
+Failure to comply may constitute a violation of the FCRA subject to actual damages, statutory damages, and attorney's fees under sections 1681n and 1681o.
+
+Enclosed:
+  [ ] FTC Identity Theft Report from IdentityTheft.gov
+  [ ] Police report (if obtained)
+  [ ] Copy of government-issued photo ID
+  [ ] This signed letter
+
+Please direct all correspondence to me at the address above.
+
+Sincerely,
+
+{consumer_name}
+"""
+    return letter
