@@ -11205,6 +11205,12 @@ _BODY_MIN_WORDS  = 150
 _BODY_MAX_WORDS  = 350
 _TOTAL_MIN_WORDS = 200
 _TOTAL_MAX_WORDS = 600
+# PARCHE 23/09/2026 - umbral del AVISO que ve el operador. Los cuatro
+# numeros de arriba quedan como referencia interna (siguen en
+# checks.length), pero solo se avisa cuando hay algo que HACER: una carta
+# muy larga se puede partir con max_accounts_per_letter. Una carta corta
+# no tiene arreglo ni lo necesita, asi que no se avisa.
+_AVISO_LARGO_PALABRAS = 1200
 
 # Overlap threshold: N+ consecutive shared words between letters = fail.
 _OVERLAP_WINDOW_WORDS = 20
@@ -11357,8 +11363,20 @@ def validate_eoscar_compliance(
             "body_words":  body_words,
             "total_words": total_words,
         }
-        if not length_ok:
-            result["warnings"].append(f"Aviso de largo (informativo): {'; '.join(length_notes)}")
+        # Solo se avisa de lo accionable: una carta larga se puede partir.
+        # Antes se avisaba de "body too short" y salia en TODAS las cartas de
+        # una sola cuenta, que estan perfectas: ruido puro para el operador.
+        if total_words > _AVISO_LARGO_PALABRAS:
+            try:
+                import re as _re_mod
+                _n_cuentas = len(_re_mod.findall(r"(?m)^\s*\d+\.\s", text))
+            except Exception:
+                _n_cuentas = 0
+            _cuentas_txt = f", {_n_cuentas} accounts" if _n_cuentas else ""
+            result["warnings"].append(
+                f"Long letter ({total_words} words{_cuentas_txt}). "
+                f"It can be split with max_accounts_per_letter."
+            )
 
         # ---- Check 3: Forbidden phrases ----
         found_phrases = [p for p in FORBIDDEN_PHRASES if p in lower]
