@@ -1583,9 +1583,10 @@ def detect_bankruptcy_attacks(bureau: str, accounts: list[dict]) -> list[dict]:
                 reason=(
                     f"{acc.get('name','')} account {acc.get('account_number','')} "
                     f"is associated with a bankruptcy and must accurately reflect the "
-                    f"discharged status. Under 15 U.S.C. section 1681c(a)(1), Chapter 7 "
-                    f"bankruptcies may be reported for 10 years and Chapter 13 for 7 years "
-                    f"from filing. The reporting period and status must be verified."
+                    f"discharged status. Under 15 U.S.C. section 1681e(b) the entry has "
+                    f"to be accurate, and 15 U.S.C. section 1681c(a)(1) caps reporting of "
+                    f"the case at 10 years from the date of entry of the order for relief. "
+                    f"The reporting period and status must be verified."
                 ),
             ))
     return attacks
@@ -3234,7 +3235,8 @@ def detect_repossession_proceeds_not_credited(
                 f"${high_cr:,.2f}, which is {pct:.0f} percent of the "
                 f"original. After a repossession the collateral is sold and "
                 f"the proceeds must be credited to the account under "
-                f"Uniform Commercial Code section 9-615(a). A balance at or "
+                f"Uniform Commercial Code section 9-615(a) as adopted in my "
+                f"state. A balance at or "
                 f"above the original amount indicates the proceeds were "
                 f"never applied, or that no commercially reasonable sale "
                 f"took place. The reported figure is overstated."
@@ -5130,7 +5132,9 @@ _OPENING_TEMPLATES_R3 = [
         "Under 15 U.S.C. section 1681i(a)(6)(B)(iii), I am demanding a written "
         "description of the method of verification used for each account "
         "including the name and contact information of everyone contacted "
-        "and the documentation reviewed. A form letter stating the information "
+        "and the documentation reviewed. Under 15 U.S.C. section 1681i(a)(7) "
+        "you have 15 days from this request to provide that description. "
+        "A form letter stating the information "
         "was verified does not satisfy this requirement. Under 15 U.S.C. "
         "section 1681i(a)(5)(A), any account that cannot be verified must be "
         "deleted promptly. I have documented all prior correspondence. "
@@ -8159,8 +8163,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
             reason = (
                 f"This debt from them was discharged in my "
                 f"bankruptcy proceeding. Under 11 U.S.C. section 524, the discharge "
-                f"is a permanent injunction against any attempt to collect or report "
-                f"the debt as still owed. The current reporting{bal_str} shows the "
+                f"is a permanent injunction against any attempt to collect the debt. "
+                f"Separately, under 15 U.S.C. section 1681e(b), what is reported has to "
+                f"be accurate. The current reporting{bal_str} shows the "
                 f"account as if I still owe it, which directly contradicts the "
                 f"discharge order. Federal law requires this to be updated to reflect "
                 f"the discharge and the account zeroed out. I am asking that the "
@@ -8184,7 +8189,7 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"This bankruptcy entry has been on my credit "
                 f"report longer than the period permitted under 15 U.S.C. section "
                 f"1681c(a)(1), which limits bankruptcy reporting to 10 years from "
-                f"the date of filing or order for relief. The age of this filing "
+                f"the date of entry of the order for relief. The age of this case "
                 f"places it outside that window. The Fair Credit Reporting Act "
                 f"prohibits a consumer reporting agency from continuing to report "
                 f"this information past the statutory cutoff. I am asking that the "
@@ -8195,7 +8200,8 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"This bankruptcy filing is older than the "
                 f"reporting period allowed under 15 U.S.C. section 1681c(a)(1). "
                 f"That section sets a 10-year ceiling on bankruptcy reporting "
-                f"running from the filing date. The age of this entry on my "
+                f"running from the entry of the order for relief. The age of this "
+                f"entry on my "
                 f"report has crossed that line and the bureau is required to "
                 f"stop reporting it. I am asking for its removal."
             )
@@ -8361,10 +8367,11 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
         reason = (
             f"This repossession from them appears to be reporting "
             f"a balance{bal_str} that does not reflect the proceeds of the sale of "
-            f"the collateral. Under Uniform Commercial Code section 9-615(a) and "
-            f"15 U.S.C. section 1681s-2(a)(1), the lender must credit the proceeds "
-            f"of the sale to the loan and the resulting balance is what may be "
-            f"reported. If the vehicle was sold and the proceeds were not "
+            f"the collateral. Under Uniform Commercial Code section 9-615(a) as "
+            f"adopted in my state, the lender must credit the proceeds of the sale "
+            f"to the loan, and under 15 U.S.C. section 1681s-2(a)(1) it may not "
+            f"report a balance it has reason to believe is inaccurate. "
+            f"If the vehicle was sold and the proceeds were not "
             f"applied, the reported amount is overstated. I am asking for the "
             f"sale records, the amount realized, and the corrected balance, or "
             f"deletion if the figures cannot be reconciled."
@@ -12277,17 +12284,25 @@ def build_furnisher_letter_engine(
             # Legal notice
             legal_notice = (
                 f"LEGAL NOTICE\n\n"
-                f"Any attempt to continue collection activity, report, update, or "
-                f"\"verify\" this account to any credit bureau without first "
-                f"providing complete validation constitutes a violation of:\n\n"
-                f"* 15 U.S.C. section 1692g(b), Continuing collection without validating.\n"
-                f"* 15 U.S.C. section 1681s-2(b), Reporting without proper investigation.\n"
-                f"* 15 U.S.C. section 1692e, False representation of authority or ownership.\n"
-                f"* UCC Articles 3 and 9, Collection without legal right.\n\n"
+                f"I am disputing this debt in writing. These are the provisions "
+                f"that govern what happens next:\n\n"
+                f"* 15 U.S.C. section 1692e(8). From the moment you receive this "
+                f"letter, you may not report credit information about this debt to "
+                f"any consumer reporting agency without disclosing that it is "
+                f"disputed.\n"
+                f"* 15 U.S.C. section 1692g(b). If this letter reaches you within "
+                f"thirty days of your initial communication with me, you must cease "
+                f"collection of this debt until you mail me verification.\n"
+                f"* 15 U.S.C. section 1681s-2(a)(8). You must conduct a reasonable "
+                f"investigation of this dispute, which I am sending directly to "
+                f"you.\n"
+                f"* 15 U.S.C. section 1681s-2(b). Once a consumer reporting agency "
+                f"forwards my dispute to you, you must investigate, review what the "
+                f"agency sends you, and correct or delete what you cannot verify.\n\n"
                 f"I am retaining copies of all correspondence. You have 30 days "
                 f"from receipt of this letter to provide complete validation. "
-                f"Failure to do so will be treated as an inability to validate "
-                f"and an abandonment of any right to collect or report this debt."
+                f"If you do not, I will treat that as an inability to validate and "
+                f"I will dispute any further reporting of this account on that basis."
             )
 
             # Signature
@@ -13065,7 +13080,9 @@ _VERIFIED_RESPONSE_OPENINGS = [
         "do not believe a genuine reinvestigation took place. I am now "
         "exercising my right under 15 U.S.C. section 1681i(a)(6)(B)(iii) to "
         "request a full description of the procedure you used to verify each "
-        "item, including who you contacted and what documentation you reviewed."
+        "item, including who you contacted and what documentation you reviewed. "
+        "Under 15 U.S.C. section 1681i(a)(7) that description is due within "
+        "15 days of this request."
     ),
     (
         "Hi,\n\n"
@@ -13075,7 +13092,8 @@ _VERIFIED_RESPONSE_OPENINGS = [
         "15 U.S.C. section 1681i(a)(6)(B)(iii), I have the right to know exactly "
         "how you conducted this investigation, including the specific procedure used, "
         "every company you contacted, and the documentation you relied on to "
-        "conclude the information is accurate. I am requesting all of that now."
+        "conclude the information is accurate. I am requesting all of that now, "
+        "and under 15 U.S.C. section 1681i(a)(7) you have 15 days to send it."
     ),
     (
         "Hi,\n\n"
@@ -13085,7 +13103,8 @@ _VERIFIED_RESPONSE_OPENINGS = [
         "the reporting company that their own data is correct; it requires "
         "a reasonable reinvestigation with actual documentation. Under "
         "15 U.S.C. section 1681i(a)(6)(B)(iii), I am requesting a written "
-        "description of your reinvestigation procedure for each account listed."
+        "description of your reinvestigation procedure for each account listed, "
+        "which 15 U.S.C. section 1681i(a)(7) requires you to provide within 15 days."
     ),
 ]
 
