@@ -5216,7 +5216,10 @@ _OPENING_TEMPLATES_R3 = [
     (
         "Hi,\n\n"
         "This is my third and final dispute letter regarding "
-        "{count} that remain on my credit report. After two prior disputes "
+        # PARCHE 26/09/2026 - decia "{count} that remain": con una sola cuenta
+        # salia "1 account that remain". Se evita el verbo en vez de agregar
+        # otra ranura, asi sirve para singular y plural sin tocar el format().
+        "{count} still on my credit report. After two prior disputes "
         "that were not resolved to my satisfaction, I am putting you on notice "
         "that I intend to pursue my legal rights if these issues are not "
         "corrected immediately."
@@ -9223,15 +9226,53 @@ def _build_account_context_from_response(
     if not bureau_response_parsed:
         return ""
 
-    furnisher = (item.get("furnisher_name") or "").upper()
-    accounts  = bureau_response_parsed.get("accounts", {})
+    # PARCHE 26/09/2026 - antes solo cruzaba por substring del nombre del
+    # furnisher. Fallaba en el caso mas comun: el reporte trae
+    # "PORTFOLIO RC (Original Creditor: 08 CREDIT ONE BANK N A)" y la respuesta
+    # del buro dice "PORTFOLIO RECOVERY ASSOCIATES". Ninguno contiene al otro,
+    # no cruzaba, y la carta de R2/R3 salia sin atacar lo que el buro respondio.
+    import re as _re_m
 
-    # Fuzzy match: find the response entry for this account
+    def _digitos(v):
+        return _re_m.sub(r"[^0-9]", "", str(v or ""))
+
+    def _norm_nombre(v):
+        # Fuera el "(Original Creditor: ...)" que el reporte pega al nombre y
+        # que la respuesta del buro nunca trae, y fuera todo lo que no sea
+        # letra o digito.
+        v = _re_m.sub(r"\(.*?\)", " ", str(v or ""))
+        return _re_m.sub(r"[^A-Z0-9]", "", v.upper())
+
+    accounts  = bureau_response_parsed.get("accounts", {})
+    f_norm    = _norm_nombre(item.get("furnisher_name"))
+    f_num     = _digitos(item.get("account_number"))
+
     matched = None
-    for key in accounts:
-        if furnisher in key or key in furnisher:
-            matched = accounts[key]
-            break
+
+    # 1) Por NUMERO DE CUENTA. Es la llave fuerte: si ambos lados traen al menos
+    #    4 digitos y uno termina en el otro (los buros enmascaran distinto), es
+    #    la misma cuenta aunque el furnisher aparezca con otro nombre.
+    if len(f_num) >= 4:
+        for _k, _d in accounts.items():
+            r_num = _digitos(_d.get("account_number"))
+            if len(r_num) >= 4 and (f_num.endswith(r_num) or r_num.endswith(f_num)):
+                matched = _d
+                break
+
+    # 2) Por NOMBRE normalizado. Igual que antes pero sin el parentetico.
+    #    A proposito NO se afloja mas (p.ej. cruzar por la primera palabra):
+    #    pegarle a una cuenta lo que el buro dijo de OTRA es peor que no
+    #    cruzar. Cuando el nombre cambia y no hay numero, la carta sale sin
+    #    el parrafo y el operador lo agrega con extra_openings.
+    if matched is None:
+        for _k, _d in accounts.items():
+            k_norm = _norm_nombre(_d.get("name") or _k)
+            if not k_norm:
+                continue
+            if f_norm == k_norm or f_norm in k_norm or k_norm in f_norm:
+                matched = _d
+                break
+
     if not matched:
         return ""
 
@@ -9494,15 +9535,23 @@ def _build_dispute_letter_engine_once(
                 verb         = "are" if n != 1 else "is"
                 they_verb    = "they are" if n != 1 else "it is"
                 count_str    = f"{n} account{'s' if n != 1 else ''}"
-                # bureau_response_summary: incluir respuesta previa del bureau si existe
-                prev_response = item_meta.get("bureau_response", "") if (item_meta := locals().get("item_meta", {})) else ""
-                if (is_r2 or is_r3 or is_r4) and prev_response:
-                    bureau_resp_block = (
-                        f"In my previous dispute, the response I received stated: "
-                        f'"{prev_response}", I do not believe that constitutes a '
-                        f"reasonable reinvestigation under federal law.\n\n"
-                    )
-                elif is_r4:
+                # PARCHE 26/09/2026 - aqui habia codigo muerto:
+                #   prev_response = item_meta.get("bureau_response", "") \
+                #       if (item_meta := locals().get("item_meta", {})) else ""
+                # `item_meta` no se asigna en ninguna parte del archivo, asi que
+                # locals() devolvia {} siempre, prev_response era "" siempre y la
+                # rama no corrio nunca.
+                #
+                # NO se reemplaza sintetizando aqui un resumen de lo que dijo el
+                # buro. Esta apertura es por buro+grupo y las respuestas son por
+                # CUENTA: cualquier frase unica del tipo "la respuesta que recibi
+                # decia X" seria una afirmacion inventada sobre lo que dijo el
+                # buro. Lo que el buro dijo de cada cuenta entra por
+                # _build_account_context_from_response(), mas abajo, citando solo
+                # la cuenta que cruzo. Y si el operador quiere fijar este parrafo
+                # para un buro concreto, round_summary[buro] lo sobreescribe unas
+                # lineas mas abajo.
+                if is_r4:
                     bureau_resp_block = (
                         "The accounts listed below have been disputed before and "
                         "they are still on my file. What follows rests on "
