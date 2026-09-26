@@ -5849,15 +5849,15 @@ _LEY_CLAUSULA = [
     "the file has to reflect what actually happened.",
     "the entry as shown is not defensible.",
     "the reporting has to be corrected.",
-    "the furnisher has to answer for this field.",
+    "this field cannot stand unverified.",
     "the information has to be verified at the source.",
     "an unsupported entry cannot remain.",
-    "the bureau has to reinvestigate.",
+    "the procedures behind this entry have to be reasonable.",
     "accuracy is not optional here.",
     "this is exactly what has to be checked.",
     "the tradeline cannot stay as written.",
     "the record has to match the account.",
-    "the duty runs to the furnisher as well.",
+    "the obligation here is not discretionary.",
     "what is reported has to be provable.",
     "the discrepancy has to be resolved.",
     "the file cannot carry this as it reads.",
@@ -6046,8 +6046,12 @@ _NARR_TIPOS = {
             "I have seen nothing tying this agency to the account it is reporting.",
             "The paperwork behind this transfer is what is missing from the file.",
         ],
+        # PARCHE 24/09/2026 - 1681s-2(b) es deber del FURNISHER y nace cuando
+        # el buro le reenvia la disputa (1681i(a)(2)). En una carta dirigida AL
+        # BURO no aplica. Se cambia por 1681i(a)(5)(A), que si obliga al buro a
+        # borrar o modificar lo que no se pueda verificar.
         "ley": _narr_ley([
-            "15 U.S.C. section 1681s-2(b)",
+            "15 U.S.C. section 1681i(a)(5)(A)",
             "15 U.S.C. section 1681e(b)",
             "15 U.S.C. section 1681i(a)(1)",
         ]),
@@ -6171,10 +6175,12 @@ _NARR_TIPOS["dofd"] = {
         "The account cannot be verified as timely without the original date.",
         "This is the field that determines the entry's legal life, and it is missing.",
     ],
+    # PARCHE 24/09/2026 - ver nota en el pool 'collector'. 1681s-2(b) sale y
+    # entra 1681c(a)(4), el limite de 7 anos, que si obliga al buro.
     "ley": _narr_ley([
         "15 U.S.C. section 1681c(c)",
         "15 U.S.C. section 1681e(b)",
-        "15 U.S.C. section 1681s-2(b)",
+        "15 U.S.C. section 1681c(a)(4)",
     ]),
     "pedido": _narr_pedido([
         "the original date of first delinquency",
@@ -8386,8 +8392,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"legitimately be reported by two separate companies at the same "
                 f"time, only the current legal holder of the debt may report. "
                 f"This pattern usually means a transferred or sold account where "
-                f"the prior holder did not stop reporting, which violates 15 U.S.C. "
-                f"section 1681s-2(b). I am asking that one of the two duplicate "
+                f"the prior holder did not stop reporting. A file that carries the "
+                f"same debt twice does not meet the accuracy standard of 15 U.S.C. "
+                f"section 1681e(b). I am asking that one of the two duplicate "
                 f"tradelines be removed and the remaining entry verified."
             )
         else:
@@ -8396,9 +8403,9 @@ def _account_reason(item: dict[str, Any], variation_idx: int = 0, bureau: str = 
                 f"two different tradelines from two different companies on my "
                 f"report. One account, one furnisher at a time. Whichever company "
                 f"is no longer the legal holder of this debt must stop reporting "
-                f"it. Under 15 U.S.C. section 1681s-2(b), I am asking for "
-                f"verification of which furnisher is the current holder, and "
-                f"removal of the duplicate."
+                f"it. Under 15 U.S.C. section 1681i(a)(1), I am asking you to "
+                f"reinvestigate which furnisher is the current holder, and to "
+                f"remove the duplicate."
             )
 
     # -- SAME ACCOUNT NUMBER, SAME BALANCE ---------------------------------
