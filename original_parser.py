@@ -4737,9 +4737,22 @@ def _cierre_carta(semilla: int, orden_carta: int = 0) -> str:
     # diferencias de 1 a 9 la primera ranura ya bastaba.
     _o = int(orden_carta)
     _d = _o // 10
-    a = _CIERRE_A[((semilla >> 44) + _o) % len(_CIERRE_A)]
-    b = _CIERRE_B[((semilla >> 48) + _o * 3 + _d) % len(_CIERRE_B)]
-    c = _CIERRE_C[((semilla >> 52) + _o * 7 + _d * 3) % len(_CIERRE_C)]
+    # PARCHE 26/09/2026 - BUG DE ANCHO DE SEMILLA.
+    # La semilla que llega viene de md5(...).hexdigest()[:12]: 12 hex = 48 bits.
+    # Por eso (semilla >> 48) y (semilla >> 52) valian CERO siempre, y _CIERRE_B
+    # y _CIERRE_C no dependian del cliente sino solo de la posicion de la carta:
+    # el mismo cierre salia palabra por palabra en clientes distintos. Medido
+    # sobre 6 clientes, la secuencia "Write to me at the address above with any
+    # questions. I am handling this dispute directly..." aparecia en 6 de ellos.
+    # (semilla >> 44) si funcionaba, pero solo daba 4 bits (0..15) y al hacer
+    # mod 10 sesgaba las seis primeras frases de _CIERRE_A.
+    # Se rehashea la semilla en vez de desplazarla mas alla de su ancho, asi las
+    # tres ranuras tienen 16 bits limpios cada una.
+    _s2 = int(hashlib.md5(
+        f"cierre|{semilla}".encode("utf-8")).hexdigest()[:12], 16)
+    a = _CIERRE_A[((_s2 & 0xFFFF) + _o) % len(_CIERRE_A)]
+    b = _CIERRE_B[(((_s2 >> 16) & 0xFFFF) + _o * 3 + _d) % len(_CIERRE_B)]
+    c = _CIERRE_C[(((_s2 >> 32) & 0xFFFF) + _o * 7 + _d * 3) % len(_CIERRE_C)]
     return f"{a} {b} {c}"
 
 
@@ -4996,6 +5009,486 @@ def _apertura_modular(semilla: int, orden_carta: int = 0) -> str:
         idx = ((semilla >> (i * 5)) + orden_carta) % len(bloque)
         partes.append(bloque[idx])
     return "Hi,\n\n" + " ".join(partes[:4]) + "\n\n" + " ".join(partes[4:])
+
+
+
+# PARCHE 26/09/2026 - APERTURA MODULAR PARA RONDA 2 Y RONDA 3
+# ---------------------------------------------------------------------------
+# Hasta hoy R2 tenia 3 plantillas fijas y R3 otras 3. Con 3 textos posibles por
+# ronda, dos clientes cualesquiera compartian parrafos enteros: medido sobre las
+# cartas reales, entre 318 y 493 ventanas de 20 palabras identicas por cliente.
+# R1 ya usaba el banco modular (_APERTURA_BLOQUES) y medía 0.
+#
+# Estos dos bancos replican esa estructura: 8 ranuras x 25 frases. Las frases de
+# cada ranura cumplen la MISMA funcion, asi que cualquier combinacion se lee
+# bien. Los bancos de R2 y R3 no comparten ni una frase, para que la R2 y la R3
+# de un mismo cliente tampoco se solapen entre si.
+#
+# Ranuras R2: 0 disputa previa | 1 la respuesta no explico nada | 2 estandar de
+# 1681i(a) | 3 confirmar con el furnisher no es reinvestigar || 4 metodo de
+# verificacion 1681i(a)(6)(B)(iii) | 5 plazo de 15 dias 1681i(a)(7) | 6 borrado
+# 1681i(a)(5)(A) | 7 registro y remedios.
+# Ranuras R3: 0 dos disputas previas | 1 ninguna respuesta reflejo una
+# reinvestigacion | 2 yo cumpli mi parte | 3 el estandar no se cumplio || 4 MOV
+# | 5 plazo de 15 dias | 6 borrado | 7 aviso de queja CFPB y remedios.
+#
+# El texto lo compone el motor a partir de este banco fijo. No hay generacion de
+# texto en tiempo de ejecucion.
+
+_APERTURA_BLOQUES_R2: list[list[str]] = [
+[
+"I disputed {count} with your agency earlier and the outcome did not resolve the problem.",
+"This is a follow-up to a dispute I already submitted about {count} on my credit file.",
+"I am writing again about {count} that I disputed with you previously.",
+"I sent you a written dispute covering {count}, and the matter is still unresolved.",
+"I already disputed {count} once, and I am returning to the same issue because nothing was corrected.",
+"My first dispute about {count} went out in writing, and the result I got back did not settle it.",
+"I filed a dispute with your agency regarding {count}, and I am following up now.",
+"I raised {count} with you in a prior dispute and I am raising the matter again.",
+"This letter concerns {count} already covered by a dispute I sent you.",
+"I previously asked you to reinvestigate {count}, and I am asking a second time.",
+"A dispute about {count} has already been through your process once.",
+"I am returning to a dispute I opened with you about {count}.",
+"The dispute I submitted about {count} closed without the problem being fixed.",
+"I sent you a written dispute about {count} and my file still shows the same information.",
+"My prior dispute with your agency covered {count}, and I am continuing it here.",
+"I disputed {count} before, and the reason I am writing again is that nothing changed.",
+"This is my second dispute concerning {count} on my consumer file.",
+"I have already been through one round of dispute with you over {count}.",
+"I am writing a second time about {count} still on my credit report.",
+"You have already received one dispute from me covering {count}.",
+"I opened a dispute with your agency about {count} and the outcome was not acceptable.",
+"The information I disputed about {count} is still being reported the same way.",
+"I am following up in writing on my earlier dispute concerning {count}.",
+"This is a continuation of the dispute I filed with you about {count}.",
+"I disputed {count} through your process and the result did not address my concerns.",
+],
+[
+"What came back was a short confirmation, not an explanation of what was actually reviewed.",
+"The reply I received told me the information was verified but never said how.",
+"I received a result notice that did not explain what was examined or by whom.",
+"The answer I got back gave me a conclusion without any support behind it.",
+"Nothing in the response showed me that records were actually pulled and read.",
+"The notice repeated the same information instead of explaining how it was confirmed.",
+"I was told the accounts were verified, and that was the end of the explanation.",
+"The outcome arrived as a form response with no description of the work behind it.",
+"What I received did not identify a single document that was reviewed.",
+"The reply did not tell me who was contacted or what they were asked.",
+"I was given a verification result with no detail supporting it.",
+"The response stated a conclusion and stopped there.",
+"Nothing I received explained the basis for keeping this information on my file.",
+"The letter back to me confirmed the data but described no investigation.",
+"I did not receive any description of the steps taken before the accounts were confirmed.",
+"The result notice was generic and could have applied to any dispute.",
+"I was left with a verified stamp and no explanation of it.",
+"What I got back does not show that anyone looked past the furnisher's own answer.",
+"The response gave no indication that documentation was requested or received.",
+"I have no way to tell from the reply what was actually checked.",
+"The notice did not name the companies contacted or describe what they provided.",
+"I received confirmation of the information without confirmation of any review.",
+"The explanation I was owed was not in the response.",
+"What arrived was a decision, not an account of how the decision was reached.",
+"The reply closed the dispute without telling me what supported that outcome.",
+],
+[
+"Under 15 U.S.C. section 1681i(a), you are required to conduct a reasonable reinvestigation of disputed information.",
+"The Fair Credit Reporting Act requires a reasonable reinvestigation of every properly submitted dispute, at 15 U.S.C. section 1681i(a).",
+"15 U.S.C. section 1681i(a) sets the standard here, and that standard is a reasonable reinvestigation.",
+"The law does not ask for a response; it asks for a reasonable reinvestigation under 15 U.S.C. section 1681i(a).",
+"My dispute triggers your duty under 15 U.S.C. section 1681i(a) to reinvestigate the disputed items.",
+"Section 1681i(a) of the FCRA requires that you actually reinvestigate what I disputed.",
+"A properly filed dispute obligates you to reinvestigate under 15 U.S.C. section 1681i(a).",
+"Your obligation under 15 U.S.C. section 1681i(a) is to reinvestigate, and to do so reasonably.",
+"The statute governing this is 15 U.S.C. section 1681i(a), which requires a free reasonable reinvestigation.",
+"15 U.S.C. section 1681i(a) requires you to reinvestigate disputed information and record its current status.",
+"Under the FCRA, at 15 U.S.C. section 1681i(a), the reinvestigation has to be reasonable, not nominal.",
+"The duty I am invoking is the reinvestigation duty in 15 U.S.C. section 1681i(a).",
+"15 U.S.C. section 1681e(b) also requires you to follow reasonable procedures to assure maximum possible accuracy.",
+"Alongside section 1681i(a), 15 U.S.C. section 1681e(b) requires reasonable procedures to assure maximum possible accuracy.",
+"Both 15 U.S.C. section 1681i(a) and 15 U.S.C. section 1681e(b) apply to how this information is handled.",
+"The reinvestigation required by 15 U.S.C. section 1681i(a) is meant to be a real review of the disputed information.",
+"Federal law, at 15 U.S.C. section 1681i(a), places the reinvestigation duty on you, not on me.",
+"I am relying on 15 U.S.C. section 1681i(a), which entitles me to a reasonable reinvestigation of these items.",
+"The reinvestigation requirement in 15 U.S.C. section 1681i(a) is what I am asking you to meet.",
+"Under 15 U.S.C. section 1681i(a)(1)(A), the reinvestigation must be completed within 30 days of receiving my dispute.",
+"15 U.S.C. section 1681i(a)(1)(A) gives you 30 days to complete the reinvestigation.",
+"The 30-day period in 15 U.S.C. section 1681i(a)(1)(A) applies to this dispute as well.",
+"This dispute is submitted under 15 U.S.C. section 1681i(a) and the reinvestigation duty it creates.",
+"What the law requires of you here is set out in 15 U.S.C. section 1681i(a).",
+"The accuracy standard in 15 U.S.C. section 1681e(b) and the reinvestigation duty in 15 U.S.C. section 1681i(a) both apply.",
+],
+[
+"Sending an electronic inquiry to the furnisher and accepting whatever comes back is not a reasonable reinvestigation.",
+"A furnisher confirming its own data is not independent verification of that data.",
+"Asking the company that reported the account whether the account is correct does not resolve my dispute.",
+"Repeating the furnisher's answer back to me does not satisfy the reinvestigation requirement.",
+"The furnisher's confirmation is the thing I am disputing, so it cannot also be the proof.",
+"An automated code exchange with the furnisher is not a review of the underlying records.",
+"If the only step taken was to ask the furnisher, then nothing was reinvestigated.",
+"Verification means checking against records, not collecting a yes from the party that reported the item.",
+"A reinvestigation that consists of one automated inquiry is not reasonable under the statute.",
+"The company reporting the account has an interest in the answer, so its say-so is not enough.",
+"I am asking for review of documentation, not another round of confirmation from the furnisher.",
+"Confirmation and verification are not the same thing, and only one of them satisfies the law.",
+"A reinvestigation limited to the furnisher's own response leaves the disputed facts unexamined.",
+"Nothing is verified when the source of the disputed information is the only source consulted.",
+"The reasonableness of a reinvestigation depends on what was reviewed, not on how quickly it closed.",
+"Relaying the furnisher's position to me is not the reinvestigation the statute describes.",
+"I dispute the accuracy of what the furnisher reported, so its restatement adds nothing.",
+"A one-line confirmation from the furnisher does not show that the account was examined.",
+"If no documents were reviewed, the reinvestigation was not reasonable regardless of the outcome.",
+"Accepting the furnisher's answer without testing it against records falls short of the standard.",
+"The statute contemplates a review of the disputed information, not a poll of the party that supplied it.",
+"A verification that rests entirely on the furnisher's assertion is not a verification at all.",
+"What I am challenging is precisely the information the furnisher supplied, so that supplier cannot settle it.",
+"An inquiry answered by the same company that created the record does not close the question.",
+"The reinvestigation has to reach the records behind the account, not stop at the furnisher's reply.",
+],
+[
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), I am requesting a written description of the procedure used to determine the accuracy and completeness of each disputed item.",
+"I am invoking 15 U.S.C. section 1681i(a)(6)(B)(iii) and asking for a description of the procedure you used on each account.",
+"Please provide the description of procedure that 15 U.S.C. section 1681i(a)(6)(B)(iii) entitles me to request.",
+"15 U.S.C. section 1681i(a)(6)(B)(iii) gives me the right to a description of the method used, and I am exercising it.",
+"I request, under 15 U.S.C. section 1681i(a)(6)(B)(iii), the business name and address of each furnisher you contacted about these accounts.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), please identify each furnisher contacted, with address and, if reasonably available, telephone number.",
+"I am asking for the method of verification for each item, as provided by 15 U.S.C. section 1681i(a)(6)(B)(iii).",
+"Please send me, under 15 U.S.C. section 1681i(a)(6)(B)(iii), a description of how the accuracy and completeness of each item was determined.",
+"The description of procedure available under 15 U.S.C. section 1681i(a)(6)(B)(iii) is what I am requesting now.",
+"I would like the procedure description authorized by 15 U.S.C. section 1681i(a)(6)(B)(iii) for every account listed below.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), tell me in writing what was done to check each of these accounts.",
+"This is a formal request under 15 U.S.C. section 1681i(a)(6)(B)(iii) for the method of verification.",
+"I am requesting the statutory description of procedure, 15 U.S.C. section 1681i(a)(6)(B)(iii), for each disputed account.",
+"Please document, under 15 U.S.C. section 1681i(a)(6)(B)(iii), the steps taken on each item and who was contacted.",
+"15 U.S.C. section 1681i(a)(6)(B)(iii) entitles me to know which furnishers were contacted, so please name them.",
+"I ask that you provide the procedure description contemplated by 15 U.S.C. section 1681i(a)(6)(B)(iii).",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), I want the name and address of every furnisher contacted in connection with these items.",
+"Please furnish the method of verification for each account, as 15 U.S.C. section 1681i(a)(6)(B)(iii) allows me to request.",
+"I am exercising my right under 15 U.S.C. section 1681i(a)(6)(B)(iii) to a written account of your procedure.",
+"The law at 15 U.S.C. section 1681i(a)(6)(B)(iii) lets me ask how each item was checked, and I am asking.",
+"Send me, under 15 U.S.C. section 1681i(a)(6)(B)(iii), a description of the procedure used for each account below.",
+"Per 15 U.S.C. section 1681i(a)(6)(B)(iii), I request identification of each furnisher contacted and a description of the method used.",
+"I request the written procedure description that 15 U.S.C. section 1681i(a)(6)(B)(iii) requires upon request.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), please explain in writing how each disputed item was determined to be accurate and complete.",
+"My request under 15 U.S.C. section 1681i(a)(6)(B)(iii) covers every account identified in this letter.",
+],
+[
+"15 U.S.C. section 1681i(a)(7) requires that description to reach me within 15 days of this request.",
+"Under 15 U.S.C. section 1681i(a)(7), you have 15 days from receipt of this request to provide it.",
+"The 15-day deadline in 15 U.S.C. section 1681i(a)(7) applies to that description.",
+"Please note the 15-day period set by 15 U.S.C. section 1681i(a)(7) for delivering the procedure description.",
+"15 U.S.C. section 1681i(a)(7) does not allow more than 15 days for that response.",
+"I expect the description within the 15 days allowed by 15 U.S.C. section 1681i(a)(7).",
+"That description is due within 15 days under 15 U.S.C. section 1681i(a)(7).",
+"Under 15 U.S.C. section 1681i(a)(7), a response in 15 days is the statutory requirement, not a courtesy.",
+"The timetable for that description is 15 days, per 15 U.S.C. section 1681i(a)(7).",
+"15 U.S.C. section 1681i(a)(7) fixes 15 days after my request as the deadline.",
+"Please deliver it within the 15-day window in 15 U.S.C. section 1681i(a)(7).",
+"My request starts the 15-day clock under 15 U.S.C. section 1681i(a)(7).",
+"Under 15 U.S.C. section 1681i(a)(7), the description must be provided no later than 15 days after this request.",
+"The statute allows 15 days for that answer, at 15 U.S.C. section 1681i(a)(7).",
+"I am noting the 15-day requirement in 15 U.S.C. section 1681i(a)(7) so there is no confusion about timing.",
+"That response is governed by the 15-day rule at 15 U.S.C. section 1681i(a)(7).",
+"15 U.S.C. section 1681i(a)(7) requires delivery of the procedure description within 15 days.",
+"The 15 days run from your receipt of this letter, under 15 U.S.C. section 1681i(a)(7).",
+"Please treat this as the request that triggers 15 U.S.C. section 1681i(a)(7) and its 15-day deadline.",
+"A general statement that the information was verified does not satisfy 15 U.S.C. section 1681i(a)(7).",
+"Under 15 U.S.C. section 1681i(a)(7), I should have that description in hand within 15 days.",
+"The description is owed within 15 days, and 15 U.S.C. section 1681i(a)(7) is the authority for that.",
+"15 U.S.C. section 1681i(a)(7) sets the response time at 15 days from the date of this request.",
+"Please calendar the 15-day deadline that 15 U.S.C. section 1681i(a)(7) creates.",
+"I am asking that the 15-day period in 15 U.S.C. section 1681i(a)(7) be observed.",
+],
+[
+"If an item cannot be verified, 15 U.S.C. section 1681i(a)(5)(A) requires that it be deleted or modified.",
+"Under 15 U.S.C. section 1681i(a)(5)(A), information that is inaccurate, incomplete, or unverifiable must be deleted or corrected.",
+"Anything that cannot be substantiated has to come off my file under 15 U.S.C. section 1681i(a)(5)(A).",
+"15 U.S.C. section 1681i(a)(5)(A) requires prompt deletion of any item that cannot be verified.",
+"Where verification fails, deletion is the outcome the statute requires at 15 U.S.C. section 1681i(a)(5)(A).",
+"Please delete any account you cannot verify, as 15 U.S.C. section 1681i(a)(5)(A) directs.",
+"An item that survives this reinvestigation unverified must be removed under 15 U.S.C. section 1681i(a)(5)(A).",
+"15 U.S.C. section 1681i(a)(5)(A) leaves no discretion: unverifiable information is deleted or modified.",
+"If the records do not support an account, 15 U.S.C. section 1681i(a)(5)(A) requires its removal.",
+"Incomplete information is covered too, since 15 U.S.C. section 1681i(a)(5)(A) reaches inaccurate and incomplete items alike.",
+"I am asking for deletion of any item that cannot be verified, per 15 U.S.C. section 1681i(a)(5)(A).",
+"Under 15 U.S.C. section 1681i(a)(5)(A), the result of a failed verification is deletion, not continued reporting.",
+"Please remove promptly any disputed item that documentation does not support, under 15 U.S.C. section 1681i(a)(5)(A).",
+"The statute at 15 U.S.C. section 1681i(a)(5)(A) requires deletion where accuracy cannot be established.",
+"Any account left unverified after this reinvestigation must be deleted under 15 U.S.C. section 1681i(a)(5)(A).",
+"15 U.S.C. section 1681i(a)(5)(A) applies to each of the accounts listed in this letter.",
+"Deletion or modification is mandatory for unverifiable items under 15 U.S.C. section 1681i(a)(5)(A).",
+"I expect any item you cannot support with records to be deleted, as 15 U.S.C. section 1681i(a)(5)(A) provides.",
+"Under 15 U.S.C. section 1681i(a)(5)(A), continued reporting of unverifiable information is not an option.",
+"If verification is not possible, please modify or delete the item as 15 U.S.C. section 1681i(a)(5)(A) requires.",
+"The remedy for an unverifiable entry is deletion, under 15 U.S.C. section 1681i(a)(5)(A).",
+"Please apply 15 U.S.C. section 1681i(a)(5)(A) to any item this reinvestigation cannot confirm.",
+"15 U.S.C. section 1681i(a)(5)(A) requires deletion or modification promptly after a failed verification.",
+"Where the furnisher cannot produce support, deletion follows under 15 U.S.C. section 1681i(a)(5)(A).",
+"I am asking that 15 U.S.C. section 1681i(a)(5)(A) be applied to every unverified account below.",
+],
+[
+"I am keeping copies of all correspondence related to this dispute.",
+"Every letter and response in this matter is being retained in my records.",
+"I am documenting this dispute from start to finish.",
+"Copies of this letter and of your reply will stay in my file.",
+"I am maintaining a written record of each step in this process.",
+"This correspondence is being kept, along with the dates of mailing and receipt.",
+"I keep a dated record of everything sent and received on this dispute.",
+"My records of this dispute are complete and I intend to keep them that way.",
+"I am noting that 15 U.S.C. section 1681n provides remedies for willful noncompliance with the FCRA.",
+"The FCRA provides civil remedies at 15 U.S.C. section 1681n and section 1681o, and I am aware of them.",
+"I am aware that 15 U.S.C. section 1681o addresses negligent failure to comply with these requirements.",
+"I would prefer to resolve this through your process rather than under 15 U.S.C. section 1681n.",
+"I am retaining all documentation and I am aware of the remedies in 15 U.S.C. section 1681n and section 1681o.",
+"Please treat this as a formal written dispute for the record.",
+"I am filing this in writing so the record is clear.",
+"This letter is part of a written record I am building on these accounts.",
+"I am keeping track of the dates so the statutory deadlines can be measured.",
+"I will note the date of your response against the deadlines the statute sets.",
+"My hope is that this is resolved at your level, and I am documenting it either way.",
+"I am aware of my rights under the Fair Credit Reporting Act and I am preserving the record.",
+"All correspondence on this matter is being preserved.",
+"I am tracking the timeline of this dispute carefully.",
+"Please direct your response in writing so it can be added to the record.",
+"A written reply is what I am asking for, and it will be kept with the rest of the file.",
+"I am keeping a full record of this dispute and of the responses I receive.",
+],
+]
+
+_APERTURA_BLOQUES_R3: list[list[str]] = [
+[
+"I have now sent you two written disputes about {count} and the reporting has not changed.",
+"This is my third letter about {count}, after two disputes that produced no correction.",
+"Two prior disputes about {count} have gone through your process without result.",
+"{these_items} {verb} unchanged after the two disputes I already sent you.",
+"I am writing for the third time regarding {count} on my consumer file.",
+"After two rounds of dispute, {these_items} {verb} still reported the same way.",
+"My file still carries {count} that I have already disputed on two separate occasions.",
+"I disputed {count} in writing twice, and the entries survived both times.",
+"You have received two disputes from me covering {count}, and nothing was corrected.",
+"This letter follows two earlier disputes about {count} that were closed without change.",
+"{these_items} {verb} still on my report after two reinvestigations.",
+"I have exhausted two rounds of your dispute process on {count}.",
+"Two disputes, two closures, and {these_items} {verb} still on my file.",
+"I am returning a third time to {count} that I have disputed twice already.",
+"You have had {count} in front of you twice and the reporting has not changed.",
+"I sent you a first dispute and a second dispute about {count}, and here is the third.",
+"Two written disputes about {count} have not moved this forward.",
+"My prior two disputes about {count} were both resolved in favor of the furnisher.",
+"This is the third time I am asking you to look at {count}.",
+"I have disputed {count} twice in writing and received no meaningful change.",
+"{count} on my credit report have already been disputed on two occasions.",
+"Two attempts to resolve {count} through your process have failed.",
+"I am writing again, for the third time, about {count} still unresolved.",
+"After two disputes about {count}, the information is still on my file unchanged.",
+"My third dispute concerns the same {count} raised in the first two.",
+],
+[
+"Neither response I received described a reinvestigation that actually took place.",
+"Both replies told me the information was verified and neither told me how.",
+"In two rounds I have not been given one detail about what was reviewed.",
+"Each response was the same form notice with a different date on it.",
+"Twice now I have received a conclusion and no account of how it was reached.",
+"Neither reply identified a document, a record, or a person consulted.",
+"What I received both times looked like output from an automated process.",
+"Two responses, and not one of them explained the basis for keeping these entries.",
+"Neither notice named the furnishers contacted or described what they supplied.",
+"I have been told the accounts were verified twice, with no explanation either time.",
+"Both results arrived without any description of the steps taken.",
+"Nothing in either response showed that the underlying records were examined.",
+"The second response was materially identical to the first.",
+"I have received two verification notices and zero verification.",
+"Neither response addressed the specific inaccuracies I identified.",
+"Both replies restated the disputed information instead of testing it.",
+"I have no indication from either response that anyone looked beyond the furnisher.",
+"Two closures, and neither came with the explanation I asked for.",
+"What came back each time was a result, never a reinvestigation.",
+"Neither letter explained why the information I challenged was left in place.",
+"Both responses skipped the part where you tell me what was actually done.",
+"I have received nothing that would let me evaluate whether a review occurred.",
+"Each reply confirmed the data and described no process behind the confirmation.",
+"Two rounds have produced two notices and no substantive answer.",
+"Neither response met the explanation I was entitled to expect.",
+],
+[
+"I have done what the statute asks of me: disputed in writing, identified each account, and explained the problem.",
+"My disputes were submitted in writing, they named the accounts, and they set out why the information is wrong.",
+"Each dispute I sent identified the specific items and the specific reason they are inaccurate.",
+"I have met my part of this process on both prior occasions.",
+"My submissions were timely, in writing, and specific about what is wrong.",
+"Nothing about my disputes was vague; each one named accounts and stated the inaccuracy.",
+"I have given you the detail needed to investigate, twice.",
+"My obligations under this process have been satisfied in full.",
+"I provided identification, account detail, and the basis for each dispute.",
+"The disputes were properly submitted and there is no question about their sufficiency.",
+"I have not withheld anything that would be needed to reinvestigate these items.",
+"Each letter I sent contained the information required to locate and examine the accounts.",
+"My part of this has been done carefully and in writing both times.",
+"I have supplied the specifics; what is missing is the reinvestigation.",
+"There is no defect in how I submitted these disputes.",
+"I identified myself, identified the accounts, and stated the inaccuracy in each case.",
+"Both disputes were complete and properly directed to your agency.",
+"I have given you everything a reasonable reinvestigation would need to begin.",
+"My written disputes satisfy the requirements for a properly submitted dispute.",
+"I have raised specific, identifiable problems with specific, identifiable accounts.",
+"Nothing in my submissions was generic or unsupported.",
+"I have complied with the process as it was designed to work.",
+"Each dispute stated plainly what was wrong and which account it concerned.",
+"I have held up my side of this twice over.",
+"The disputes I filed were specific enough to be investigated and were not.",
+],
+[
+"What I have received back does not meet the reasonable reinvestigation standard in 15 U.S.C. section 1681i(a).",
+"15 U.S.C. section 1681i(a) requires a reasonable reinvestigation, and that has not happened here.",
+"The responses I received fall short of what 15 U.S.C. section 1681i(a) requires.",
+"A reinvestigation that produces no examination of records does not satisfy 15 U.S.C. section 1681i(a).",
+"Under 15 U.S.C. section 1681i(a), what was done in my case does not qualify as reasonable.",
+"The standard in 15 U.S.C. section 1681i(a) is reasonableness, and twice it was not met.",
+"Confirming with the furnisher and closing the file is not the reinvestigation 15 U.S.C. section 1681i(a) describes.",
+"15 U.S.C. section 1681e(b) also requires reasonable procedures to assure maximum possible accuracy, and that duty is ongoing.",
+"Both 15 U.S.C. section 1681i(a) and 15 U.S.C. section 1681e(b) have been left unsatisfied in this matter.",
+"Continuing to report information I have twice disputed raises a problem under 15 U.S.C. section 1681e(b).",
+"Under 15 U.S.C. section 1681i(a), the burden of reinvestigating rests with your agency, and it has not been carried.",
+"Nothing I have received demonstrates compliance with 15 U.S.C. section 1681i(a).",
+"The reinvestigation duty in 15 U.S.C. section 1681i(a) is not discharged by a form response.",
+"15 U.S.C. section 1681i(a) was not satisfied by either of the two responses I received.",
+"A reasonable reinvestigation under 15 U.S.C. section 1681i(a) would have produced something more than a verification notice.",
+"By the measure of 15 U.S.C. section 1681i(a), this dispute has not yet been reinvestigated.",
+"The accuracy requirement in 15 U.S.C. section 1681e(b) applies every time you report this information.",
+"15 U.S.C. section 1681i(a) does not permit a reinvestigation that reviews nothing.",
+"Two closures without examination do not add up to compliance with 15 U.S.C. section 1681i(a).",
+"What the statute requires at 15 U.S.C. section 1681i(a) and what I received are not the same thing.",
+"The reasonable reinvestigation contemplated by 15 U.S.C. section 1681i(a) has still not occurred.",
+"Under 15 U.S.C. section 1681i(a), the responses I received do not close this dispute.",
+"Compliance with 15 U.S.C. section 1681i(a) is measured by what was done, not by what was reported back.",
+"Neither reinvestigation met the standard that 15 U.S.C. section 1681i(a) sets.",
+"15 U.S.C. section 1681i(a) requires more than what has been done here on two occasions.",
+],
+[
+"I am formally demanding, under 15 U.S.C. section 1681i(a)(6)(B)(iii), the method of verification used for every account below.",
+"15 U.S.C. section 1681i(a)(6)(B)(iii) requires you to describe, on request, the procedure used, and this is that request.",
+"Provide the method of verification for each item, including the business name and address of every furnisher contacted, under 15 U.S.C. section 1681i(a)(6)(B)(iii).",
+"This is a formal demand under 15 U.S.C. section 1681i(a)(6)(B)(iii) for a written description of the procedure applied to each account.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), identify every furnisher contacted, give me the address, and give me the telephone number if it is reasonably available.",
+"I am requiring the statutory procedure description, 15 U.S.C. section 1681i(a)(6)(B)(iii), item by item and not in summary.",
+"Per 15 U.S.C. section 1681i(a)(6)(B)(iii), state in writing how the accuracy and completeness of each disputed item was determined.",
+"Name the furnishers, give their addresses, and describe the procedure, as 15 U.S.C. section 1681i(a)(6)(B)(iii) provides.",
+"My demand under 15 U.S.C. section 1681i(a)(6)(B)(iii) covers each account separately, not the dispute as a whole.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), I want a written procedure description for every item listed in this letter.",
+"15 U.S.C. section 1681i(a)(6)(B)(iii) gives me the right to demand this, and I am demanding it now.",
+"Set out, under 15 U.S.C. section 1681i(a)(6)(B)(iii), exactly what was done to verify each of these accounts.",
+"I am invoking 15 U.S.C. section 1681i(a)(6)(B)(iii) and will expect a description of the procedure for each item.",
+"Describe the method of verification for each account under 15 U.S.C. section 1681i(a)(6)(B)(iii), and identify who was contacted.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), I am entitled to the business name and address of each furnisher you reached.",
+"This letter constitutes my request under 15 U.S.C. section 1681i(a)(6)(B)(iii) for the procedure used on each disputed entry.",
+"15 U.S.C. section 1681i(a)(6)(B)(iii) obliges you to describe the procedure on request, and the request is made here.",
+"Tell me, under 15 U.S.C. section 1681i(a)(6)(B)(iii), which furnisher was contacted for which account and what the procedure was.",
+"I am demanding the method of verification under 15 U.S.C. section 1681i(a)(6)(B)(iii) for each item, in writing.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), a per-account description of procedure is what I am requesting.",
+"Give me the procedure description that 15 U.S.C. section 1681i(a)(6)(B)(iii) makes available on request.",
+"I require, under 15 U.S.C. section 1681i(a)(6)(B)(iii), the identity of each furnisher contacted and the method used on each account.",
+"My demand for the method of verification rests on 15 U.S.C. section 1681i(a)(6)(B)(iii) and covers every account below.",
+"Under 15 U.S.C. section 1681i(a)(6)(B)(iii), furnish a written description of how each account was checked and by whom.",
+"I am exercising 15 U.S.C. section 1681i(a)(6)(B)(iii) and expect the description to address each account individually.",
+],
+[
+"You have 15 days from receipt of this demand to deliver that description, under 15 U.S.C. section 1681i(a)(7).",
+"15 U.S.C. section 1681i(a)(7) allows 15 days and no more for the procedure description.",
+"The description is due within 15 days of this letter, as 15 U.S.C. section 1681i(a)(7) requires.",
+"Under 15 U.S.C. section 1681i(a)(7), a statement that the accounts were verified will not satisfy the obligation.",
+"A form letter does not discharge the duty in 15 U.S.C. section 1681i(a)(7), which requires a description of the procedure.",
+"15 U.S.C. section 1681i(a)(7) sets the deadline at 15 days after this request reaches you.",
+"I will measure your response against the 15-day period in 15 U.S.C. section 1681i(a)(7).",
+"The 15-day clock in 15 U.S.C. section 1681i(a)(7) begins when you receive this letter.",
+"Under 15 U.S.C. section 1681i(a)(7), a generic verification notice is not the description the statute contemplates.",
+"Fifteen days is what 15 U.S.C. section 1681i(a)(7) allows, and I am noting the date of this letter.",
+"Please observe the 15-day requirement of 15 U.S.C. section 1681i(a)(7) for this demand.",
+"15 U.S.C. section 1681i(a)(7) requires delivery of the description within 15 days, without extension.",
+"That response falls due 15 days from receipt, under 15 U.S.C. section 1681i(a)(7).",
+"I am invoking the 15-day deadline in 15 U.S.C. section 1681i(a)(7) and will treat it as firm.",
+"Under 15 U.S.C. section 1681i(a)(7), the description must be in my hands within 15 days.",
+"Repeating that the information was verified does not answer a request made under 15 U.S.C. section 1681i(a)(7).",
+"The statutory window is 15 days, per 15 U.S.C. section 1681i(a)(7), and I am tracking it.",
+"15 U.S.C. section 1681i(a)(7) makes the 15-day response mandatory, not discretionary.",
+"I expect compliance with 15 U.S.C. section 1681i(a)(7) within the 15 days it allows.",
+"Under 15 U.S.C. section 1681i(a)(7), silence past 15 days is itself a failure to comply.",
+"The 15 days allowed by 15 U.S.C. section 1681i(a)(7) start from your receipt of this demand.",
+"Please respond within the 15-day period fixed by 15 U.S.C. section 1681i(a)(7).",
+"15 U.S.C. section 1681i(a)(7) governs the timing of this response, and it allows 15 days.",
+"I am noting the date of mailing so the 15-day period in 15 U.S.C. section 1681i(a)(7) can be calculated.",
+"Under 15 U.S.C. section 1681i(a)(7), I expect a substantive description, delivered inside 15 days.",
+],
+[
+"Any account that cannot be verified must be deleted promptly, as 15 U.S.C. section 1681i(a)(5)(A) requires.",
+"15 U.S.C. section 1681i(a)(5)(A) requires prompt deletion or modification of information that cannot be verified.",
+"If the verification does not hold up, deletion is mandatory under 15 U.S.C. section 1681i(a)(5)(A).",
+"Under 15 U.S.C. section 1681i(a)(5)(A), an item that cannot be verified does not stay on my report.",
+"Please delete, under 15 U.S.C. section 1681i(a)(5)(A), every account this reinvestigation cannot support.",
+"15 U.S.C. section 1681i(a)(5)(A) requires removal of inaccurate, incomplete, or unverifiable information.",
+"Anything you cannot verify with records must come off, per 15 U.S.C. section 1681i(a)(5)(A).",
+"The statute is not permissive here: 15 U.S.C. section 1681i(a)(5)(A) requires deletion or modification.",
+"I am asking that 15 U.S.C. section 1681i(a)(5)(A) be applied to each account that fails verification.",
+"Under 15 U.S.C. section 1681i(a)(5)(A), failure to verify has one outcome, and that outcome is deletion.",
+"Every unverified entry must be deleted promptly under 15 U.S.C. section 1681i(a)(5)(A).",
+"15 U.S.C. section 1681i(a)(5)(A) reaches incomplete information as well as inaccurate information.",
+"If no documentation supports an account, 15 U.S.C. section 1681i(a)(5)(A) requires it be removed.",
+"Deletion under 15 U.S.C. section 1681i(a)(5)(A) is what follows when verification fails a third time.",
+"Please apply 15 U.S.C. section 1681i(a)(5)(A) to each item below that cannot be substantiated.",
+"Under 15 U.S.C. section 1681i(a)(5)(A), continued reporting after a failed verification is not permitted.",
+"The required remedy for an unverifiable item is deletion, under 15 U.S.C. section 1681i(a)(5)(A).",
+"15 U.S.C. section 1681i(a)(5)(A) requires that unverifiable entries be deleted or modified promptly.",
+"I expect deletion under 15 U.S.C. section 1681i(a)(5)(A) of anything the records do not support.",
+"Where the furnisher produces nothing, 15 U.S.C. section 1681i(a)(5)(A) requires removal.",
+"Under 15 U.S.C. section 1681i(a)(5)(A), prompt deletion is the statutory consequence of a failed verification.",
+"Each account that cannot be documented must be deleted under 15 U.S.C. section 1681i(a)(5)(A).",
+"15 U.S.C. section 1681i(a)(5)(A) applies to every item identified in this letter.",
+"Please remove, under 15 U.S.C. section 1681i(a)(5)(A), any entry that this reinvestigation leaves unverified.",
+"Deletion or modification under 15 U.S.C. section 1681i(a)(5)(A) is what I am asking for on any unverified item.",
+],
+[
+"If this is not resolved, I intend to file a complaint with the Consumer Financial Protection Bureau.",
+"I am prepared to take this to the Consumer Financial Protection Bureau if the accounts are not corrected.",
+"My next step, if nothing changes, is a complaint to the Consumer Financial Protection Bureau.",
+"I would rather resolve this with you than through the Consumer Financial Protection Bureau, but I will file if I have to.",
+"A complaint to the Consumer Financial Protection Bureau is the next step I am prepared to take.",
+"The Fair Credit Reporting Act provides civil remedies at 15 U.S.C. section 1681n and section 1681o, and I am aware of both.",
+"Willful noncompliance is addressed by 15 U.S.C. section 1681n, and negligent noncompliance by 15 U.S.C. section 1681o.",
+"I am aware of the remedies available under 15 U.S.C. section 1681n and 15 U.S.C. section 1681o.",
+"Under 15 U.S.C. section 1681n, willful noncompliance can carry actual damages, statutory damages, punitive damages, and attorney fees.",
+"I have retained every letter and every response in this matter and I intend to rely on them.",
+"My file on this dispute is complete, dated, and preserved.",
+"I am keeping the full record of this dispute, including mailing dates and responses.",
+"All correspondence is documented and will support any complaint I file.",
+"I am putting you on written notice of the position I have taken here.",
+"This letter is formal written notice, and it is being kept with the rest of the record.",
+"I would prefer this end with a correction rather than with a complaint.",
+"If the accounts are corrected or deleted, no further action will be necessary.",
+"I am giving you a final opportunity to resolve this before I escalate.",
+"I intend to pursue the remedies the statute provides if this is not addressed.",
+"I am documenting this dispute in full and I am aware of my rights under the FCRA.",
+"Failure to correct this will leave me with the complaint and civil remedies the statute provides.",
+"Every step of this dispute has been recorded and the record is available.",
+"I am prepared to escalate this to the Consumer Financial Protection Bureau and to pursue civil remedies.",
+"My preference is resolution at your level; my alternative is the process Congress provided.",
+"I am keeping a complete record and I am aware of the remedies in 15 U.S.C. section 1681n and section 1681o.",
+],
+]
+
+
+def _apertura_modular_ronda(bloques: list[list[str]], semilla: int,
+                            orden_carta: int = 0) -> str:
+    """Igual que _apertura_modular pero sobre el banco que se le pase y dejando
+    el hueco {bureau_response_summary} entre los dos parrafos, que es donde las
+    plantillas viejas de R2/R3 ponian el resumen de la respuesta del buro.
+
+    El resultado lleva llaves sin resolver ({count}, {verb}, {these_items},
+    {bureau_response_summary}): quien llama tiene que pasarlo por .format().
+    """
+    partes = []
+    for i, bloque in enumerate(bloques):
+        idx = ((semilla >> (i * 5)) + orden_carta) % len(bloque)
+        partes.append(bloque[idx])
+    return ("Hi,\n\n" + " ".join(partes[:4]) + "\n\n"
+            + "{bureau_response_summary}" + " ".join(partes[4:]))
 
 
 _OPENING_TEMPLATES_R1 = [
@@ -9573,7 +10066,8 @@ def _build_dispute_letter_engine_once(
                     bureau_resp_block = ""
 
                 _rs = (round_summary or {}).get(bureau)
-                if _rs is not None:
+                _rs_dado = _rs is not None
+                if _rs_dado:
                     bureau_resp_block = (_rs + "\n\n") if _rs.strip() else ""
 
                 # PARCHE 23/09/2026 - Ronda 1 usa la apertura MODULAR (8 ranuras
@@ -9585,6 +10079,35 @@ def _build_dispute_letter_engine_once(
                         .encode("utf-8")).hexdigest()[:12], 16)
                     opening = _apertura_modular(
                         _sem, _orden_fijo_carta(bureau, group_key))
+                elif (is_r2 or is_r3) and not isinstance(_forced, int):
+                    # PARCHE 26/09/2026 - R2 y R3 salen del banco modular.
+                    # La semilla lleva round_key ademas del cliente, asi que la
+                    # R2 y la R3 del mismo cliente no caen en la misma ranura.
+                    # La semilla de R1 NO se toca: sus cartas no deben cambiar.
+                    # Si el operador fija la plantilla con opening_idx, se
+                    # respeta y se usa la plantilla vieja (rama else).
+                    _sem = int(_hl_tpl.md5(
+                        f"{consumer_name}|{report_date}|{variation_seed}"
+                        f"|{round_key}".encode("utf-8")).hexdigest()[:12], 16)
+                    _bloques_r = (_APERTURA_BLOQUES_R2 if is_r2
+                                  else _APERTURA_BLOQUES_R3)
+                    opening = _apertura_modular_ronda(
+                        _bloques_r, _sem,
+                        _orden_fijo_carta(bureau, group_key)
+                    ).format(
+                        count=count_str,
+                        verb=verb,
+                        they_verb=they_verb,
+                        these_items=these_items,
+                        consumer_name=consumer_name,
+                        # El parrafo fijo de R2/R3 vivia en bureau_resp_block y
+                        # era identico en todos los clientes: otra fuente de
+                        # solape. Ahora ese contenido esta repartido en las
+                        # ranuras 0-3. Solo se inyecta aqui si el operador paso
+                        # round_summary a proposito.
+                        bureau_response_summary=(
+                            bureau_resp_block if _rs_dado else ""),
+                    )
                 else:
                     opening = tpl.format(
                         count=count_str,
