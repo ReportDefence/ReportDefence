@@ -161,10 +161,16 @@ def _collections(pages):
     for p in pages:
         for ln in p["text"].splitlines():
             s = ln.strip()
-            if re.match(r'^11\.\s+Collections', s):
+            # PARCHE 24/09/2026 - la numeracion de secciones NO es fija entre
+            # reportes. Argenis y Genesis traen "10. Collections" / "11. Dispute
+            # File Information"; el codigo buscaba 11 y 12 y no entraba nunca,
+            # devolviendo cero colecciones en reportes que tenian 28 y 12.
+            # Se busca por NOMBRE. El "\s*$" descarta la linea del indice, que
+            # lleva el numero de pagina al final.
+            if re.match(r'^\d{1,2}\.\s+Collections\s*$', s):
                 in_sec = True
                 continue
-            if re.match(r'^12\.\s+Dispute', s):
+            if re.match(r'^\d{1,2}\.\s+Dispute\b', s):
                 flush()
                 in_sec = False
             if not in_sec:
