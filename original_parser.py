@@ -2192,11 +2192,16 @@ def is_collector_name(name: str) -> bool:
         "caine weiner", "credit coll", "blackwell", "aldous", "springoak",
     ]
     import re as _re
+    # PARCHE 24/09/2026 - la puntuacion se aplana ANTES de comparar. Experian
+    # escribe "CAINE & WEINER" y TransUnion "CAINE WEINER": el ampersand
+    # rompia el marcador "caine weiner" y las cuentas de ese buro quedaban
+    # sin carta al cobrador.
+    n_limpio = _re.sub(r"[^a-z0-9]+", " ", n).strip()
     # PARCHE 23/09/2026 (2da pasada) - limite de palabra solo al INICIO.
     # Los buros abrevian pegado ("LVNVFUNDG", "MIDLANDCRE"), asi que exigir
     # limite tambien al final los dejaba fuera. Con el limite al inicio,
     # "ars" ya no pega en SEARS ni "erc" en COMMERCE / MERCURY / CHRYSLERCAP.
-    return any(_re.search(r"\b" + _re.escape(m), n) for m in markers)
+    return any(_re.search(r"\b" + _re.escape(m), n_limpio) for m in markers)
 
 
 def has_original_creditor_label(name: str) -> bool:
@@ -4306,6 +4311,59 @@ def get_attack_rank_for_letter_input(attack_type: str) -> int:
     return rank.get(attack_type, 50)
 
 
+# PARCHE 26/09/2026 - La regla de dedupe que ya aplicaba
+# build_letter_input_engine (dentro de un mismo buro, una cuenta que figura
+# como coleccion NO se manda tambien como pago tardio) tiene que aplicarse
+# tambien al inventario que alimenta el conteo de violaciones y el CIR.
+#
+# Sin esto la web mostraba 27 hallazgos cuando las cartas cubrian 26
+# (Genesis Santana Diaz: CAPITAL ONE BANK USA xxxxxxxx 1314 $3,279 contada
+# como Late Payment y como Collection en Equifax), y 43 contra 37 en
+# Argenis Torres. El CIR lo lee el CLIENTE, asi que le listaba la misma
+# deuda dos veces e inflaba el total.
+_TIPOS_COLECCION = {"collection", "paid_collection"}
+
+
+def _clave_cuenta_dedupe(e):
+    """Furnisher normalizado + digitos de la cuenta.
+
+    Misma llave que usa el dedupe de build_letter_input_engine, a proposito:
+    si las dos se separan, el conteo y las cartas vuelven a divergir. Solo
+    con los digitos la llave es debil (los buros enmascaran dejando a veces
+    dos cifras), por eso exige tambien el furnisher.
+    """
+    import re as _r
+    num = _r.sub(r"[^0-9]", "", str(e.get("account_number") or ""))
+    if len(num) < 2:
+        return None
+    fur = _r.sub(r"[^A-Z0-9]", "",
+                 str(e.get("furnisher_name") or e.get("name") or "").upper())
+    return (fur, num)
+
+
+def dedupe_coleccion_sobre_tardio(negatives_by_bureau):
+    """Retira del inventario los pagos tardios cuya cuenta ya figura como
+    coleccion en el mismo buro. Modifica y devuelve el mismo dict."""
+    for bureau, accounts in (negatives_by_bureau or {}).items():
+        en_col = {
+            k for k in (_clave_cuenta_dedupe(a) for a in accounts
+                        if a.get("negative_type") in _TIPOS_COLECCION) if k
+        }
+        if not en_col:
+            continue
+        antes = len(accounts)
+        negatives_by_bureau[bureau] = [
+            a for a in accounts
+            if not (a.get("negative_type") == "late_payment"
+                    and _clave_cuenta_dedupe(a) in en_col)
+        ]
+        quitadas = antes - len(negatives_by_bureau[bureau])
+        if quitadas:
+            print(f"  [dedupe inventario] {bureau}: {quitadas} pago(s) tardio(s) "
+                  f"que ya figuran como coleccion se retiraron del conteo")
+    return negatives_by_bureau
+
+
 def build_letter_input_engine(
     strategy_engine: dict[str, list[dict[str, Any]]],
     negatives_by_bureau: dict[str, list[dict[str, Any]]] | None = None,
@@ -4489,6 +4547,41 @@ def build_letter_input_engine(
                 grouped["child_support"].append(entry)
             else:
                 grouped["other_derogatory"].append(entry)
+
+        # PARCHE 24/09/2026 - REGLA DEL OPERADOR: cuando la MISMA cuenta cae
+        # en colecciones y en pagos tardios dentro del mismo buro, se disputa
+        # como COLECCION y se retira de pagos tardios. Una cuenta en cobranza
+        # ya es una coleccion; mandarla tambien como pago tardio pone la misma
+        # cuenta en dos cartas al mismo buro y le regala el argumento de
+        # disputa duplicada. Visto en Argenis Torres (NET CREDIT, Experian).
+        import re as _re_dedupe
+
+        def _clave_cta(e):
+            # Digitos de la cuenta MAS el nombre del furnisher normalizado.
+            # Solo con los digitos la llave es debil: los buros enmascaran
+            # dejando a veces dos cifras ("xxxxx 54"), y dos cuentas distintas
+            # pueden terminar igual. Exigir tambien el furnisher evita retirar
+            # una cuenta que no es la misma.
+            num = _re_dedupe.sub(r"[^0-9]", "", str(e.get("account_number") or ""))
+            if len(num) < 2:
+                return None
+            fur = _re_dedupe.sub(r"[^A-Z0-9]", "",
+                                 str(e.get("furnisher_name") or "").upper())
+            return (fur, num)
+
+        _en_colecciones = {
+            k for k in (_clave_cta(e) for e in grouped["collections"]) if k
+        }
+        if _en_colecciones:
+            _antes = len(grouped["late_payments"])
+            grouped["late_payments"] = [
+                e for e in grouped["late_payments"]
+                if _clave_cta(e) not in _en_colecciones
+            ]
+            _quitadas = _antes - len(grouped["late_payments"])
+            if _quitadas:
+                print(f"  [dedupe] {bureau}: {_quitadas} cuenta(s) ya presentes en "
+                      f"colecciones se retiraron de pagos tardios")
 
         for group_name in grouped:
             grouped[group_name].sort(
@@ -5163,6 +5256,101 @@ _OPENING_TEMPLATES_R3 = [
         "including statutory damages, punitive damages, and attorney fees. "
         "I am retaining copies of all correspondence."
     ),
+]
+
+
+# PLANTILLAS R4 - 24/09/2026.
+# Regla vigente (PROYECTO_CONTEXT.md, "REGLA DE TOPE DE RONDAS"): el ciclo de
+# cartas termina en R3 y la escalacion siguiente es queja CFPB. R4 existe solo
+# para tres situaciones concretas, una plantilla por cada una:
+#   1. El buro nunca contesto dentro de los 30 dias (plazo vencido).
+#   2. La respuesta del buro se contradice a si misma (antes/despues distintos
+#      con conclusion de "se reporta con exactitud").
+#   3. Ronda correctiva: nuestra carta anterior salio con un error propio.
+# Ninguna repite los argumentos de R1-R3: eso es lo que las mantiene fuera del
+# riesgo de disputa frivola bajo 15 U.S.C. section 1681i(a)(3).
+_RONDAS_SOPORTADAS = ("round_1", "round_2", "round_3", "round_4")
+
+_OPENING_TEMPLATES_R4 = [
+    # R4 Template 1 - el buro dejo vencer el plazo de 30 dias sin contestar
+    (
+        "Hi,\n\n"
+        "I mailed you a dispute about {count} listed below and the delivery is "
+        "on record with a certified mail tracking number. The thirty day window "
+        "that 15 U.S.C. section 1681i(a)(1)(A) allows for a reinvestigation has "
+        "closed and no result ever reached me."
+        "\n\n"
+        "{bureau_response_summary}"
+        "Two separate obligations went unmet here. The first is the "
+        "reinvestigation itself: once that window closes with the disputed "
+        "information still unverified, the statute does not leave removal to "
+        "your discretion. The second is 15 U.S.C. section 1681i(a)(6)(A), which "
+        "gives you five business days after an investigation ends to send me the "
+        "result in writing, and nothing came. I am asking you to remove the "
+        "accounts listed below, send me a corrected copy of my file, and provide "
+        "the description of your procedure that 15 U.S.C. section 1681i(a)(7) "
+        "requires within fifteen days. My mailing receipts and tracking records "
+        "are filed and dated."
+    ),
+    # R4 Template 2 - la respuesta del buro se contradice a si misma
+    (
+        "Hi,\n\n"
+        "Your last response concluded that {count} on my file {verb} being "
+        "reported accurately. That same response printed how each account read "
+        "before your review beside how it reads now, and the two versions carry "
+        "different payment histories, different dates, or different amounts."
+        "\n\n"
+        "{bureau_response_summary}"
+        "Both versions cannot be right. Either the first one was wrong while it "
+        "sat in my file, or the second one is wrong now. 15 U.S.C. section "
+        "1681e(b) holds you to reasonable procedures to assure maximum possible "
+        "accuracy, and a record that shifts this much under review did not meet "
+        "that standard when it was first reported. I am asking which version the "
+        "furnisher actually documented, what record supports the change, and how "
+        "that record was reviewed. Under 15 U.S.C. section 1681i(a)(7) that "
+        "description is due within fifteen days. Where the change cannot be "
+        "documented, the account has to come out of my file under 15 U.S.C. "
+        "section 1681i(a)(5)(A)."
+    ),
+    # R4 Template 3 - ronda correctiva, la carta anterior salio con un error propio
+    (
+        "Hi,\n\n"
+        "I am writing once more about {count} on my credit file. My earlier "
+        "letter to you did not describe {these_items} the way my file reports "
+        "them, so I am correcting that here and asking you to look at the "
+        "accounts on the grounds set out below."
+        "\n\n"
+        "{bureau_response_summary}"
+        "This is not a rewording of what I already sent. It rests on account "
+        "details and dates that my earlier letter left out, which makes it a "
+        "dispute you have not yet reinvestigated. Under 15 U.S.C. section "
+        "1681i(a)(1)(A) a dispute that puts information in front of you that you "
+        "have not seen calls for a reinvestigation on its own terms, and whatever "
+        "cannot be verified against real records has to be deleted under "
+        "15 U.S.C. section 1681i(a)(5)(A). If you reach a different conclusion, "
+        "I am asking for the description of your procedure under 15 U.S.C. "
+        "section 1681i(a)(7), including who you contacted and what they gave you."
+    ),
+]
+
+# PARCHE 25/09/2026 - segunda apertura de plazo vencido. Cuando un mismo
+# buro recibe dos cartas de la misma ronda (colecciones y pagos tardios) y
+# las dos estan en la misma postura, el indice fijo les daba la misma
+# plantilla y las dos cartas compartian ~200 palabras seguidas. Con dos
+# variantes de la misma postura cada grupo puede llevar la suya.
+_OPENING_TEMPLATES_R4 = _OPENING_TEMPLATES_R4 + [
+    "Hi,\n\nThe dispute I sent you about {count} below was delivered, and I have the "
+    "certified mail tracking number for it. Thirty days is what 15 U.S.C. section "
+    "1681i(a)(1)(A) gives you to finish a reinvestigation. That period ran out and no "
+    "result was ever sent to me.\n\n{bureau_response_summary}That leaves two duties "
+    "unperformed. One is the reinvestigation: when the period ends and the disputed "
+    "information still has not been verified, the statute treats removal as required "
+    "rather than optional. The other is 15 U.S.C. section 1681i(a)(6)(A), under which "
+    "the written result is due to me within five business days of the investigation "
+    "closing, and none arrived. What I am asking for is the removal of the entries "
+    "below, an updated copy of my file, and the procedure description that 15 U.S.C. "
+    "section 1681i(a)(7) calls for inside fifteen days. The mailing receipts and "
+    "tracking records are dated and on file.",
 ]
 
 
@@ -9105,6 +9293,23 @@ def _build_dispute_letter_engine_once(
     variation_seed: int = 0,
     max_accounts_per_letter: int = 0,   # 0 = sin limite (comportamiento actual)
     target_round: str = "round_1",
+    # PARCHE 24/09/2026 - parrafo extra por buro, se inserta despues de la
+    # apertura y antes de la lista de cuentas. Sirve para hechos propios del
+    # caso que no salen del reporte (p. ej. que el buro dijo que la disputa
+    # no parecia enviada por el consumidor). Texto ASCII ya validado.
+    extra_openings: dict[str, str | dict[str, str]] | None = None,
+    # PARCHE 25/09/2026 - seleccion de apertura por postura del caso.
+    # En una misma ronda cada buro puede estar en una situacion distinta
+    # (uno no contesto, otro contesto contradiciendose). El indice fijo
+    # por buro+grupo no sabe eso. opening_idx permite fijar cual de las
+    # plantillas de la ronda usa cada buro (o cada grupo de un buro).
+    opening_idx: dict[str, int | dict[str, int]] | None = None,
+    # PARCHE 25/09/2026 - el parrafo generico de ronda que el motor mete
+    # dentro de la apertura ({bureau_response_summary}) no siempre aplica.
+    # Si un buro nunca contesto, decir 'recibi respuestas' es falso, y si el
+    # caso ya viene explicado por extra_openings el parrafo sobra. Con
+    # round_summary[buro] = "" se suprime; con texto, se reemplaza.
+    round_summary: dict[str, str] | None = None,
     bureau_response_parsed: dict | None = None,
     narr_salt: int = 0,
 ) -> dict[str, dict[str, dict[str, str]]]:
@@ -9245,19 +9450,39 @@ def _build_dispute_letter_engine_once(
             # R1=first dispute, R2=follow-up, R3=final escalation with section 1681n notice.
             group_letters: dict[str, str] = {}
 
+            # PARCHE 24/09/2026 - antes, cualquier round_key que no fuera
+            # round_2/round_3 caia en las plantillas de R1 en silencio: una R4
+            # o R5 salia con apertura de primera disputa. Ahora se corta.
+            if target_round not in _RONDAS_SOPORTADAS:
+                raise ValueError(
+                    f"target_round invalido: {target_round!r}. El motor arma "
+                    f"{', '.join(_RONDAS_SOPORTADAS)}. Despues de R3 la "
+                    "escalacion es queja CFPB (PROYECTO_CONTEXT.md, REGLA DE "
+                    "TOPE DE RONDAS); R4 es correctiva o por plazo vencido."
+                )
+
             for round_key, items in [(target_round, items_in_group)]:
                 if not items:
                     continue
 
                 is_r2     = round_key == "round_2"
                 is_r3     = round_key == "round_3"
-                if is_r3:
+                is_r4     = round_key == "round_4"
+                if is_r4:
+                    templates = _OPENING_TEMPLATES_R4
+                elif is_r3:
                     templates = _OPENING_TEMPLATES_R3
                 elif is_r2:
                     templates = _OPENING_TEMPLATES_R2
                 else:
                     templates = _OPENING_TEMPLATES_R1
-                tpl_idx   = _tpl_idx(bureau, group_key, round_key, len(templates))
+                _forced = (opening_idx or {}).get(bureau)
+                if isinstance(_forced, dict):
+                    _forced = _forced.get(group_key)
+                if isinstance(_forced, int):
+                    tpl_idx = _forced % len(templates)
+                else:
+                    tpl_idx = _tpl_idx(bureau, group_key, round_key, len(templates))
                 tpl       = templates[tpl_idx]
                 # Substitute placeholders
                 n            = len(items)
@@ -9271,11 +9496,17 @@ def _build_dispute_letter_engine_once(
                 count_str    = f"{n} account{'s' if n != 1 else ''}"
                 # bureau_response_summary: incluir respuesta previa del bureau si existe
                 prev_response = item_meta.get("bureau_response", "") if (item_meta := locals().get("item_meta", {})) else ""
-                if (is_r2 or is_r3) and prev_response:
+                if (is_r2 or is_r3 or is_r4) and prev_response:
                     bureau_resp_block = (
                         f"In my previous dispute, the response I received stated: "
                         f'"{prev_response}", I do not believe that constitutes a '
                         f"reasonable reinvestigation under federal law.\n\n"
+                    )
+                elif is_r4:
+                    bureau_resp_block = (
+                        "The accounts listed below have been disputed before and "
+                        "they are still on my file. What follows rests on "
+                        "information that was not part of those earlier letters.\n\n"
                     )
                 elif is_r3:
                     bureau_resp_block = (
@@ -9292,10 +9523,14 @@ def _build_dispute_letter_engine_once(
                 else:
                     bureau_resp_block = ""
 
+                _rs = (round_summary or {}).get(bureau)
+                if _rs is not None:
+                    bureau_resp_block = (_rs + "\n\n") if _rs.strip() else ""
+
                 # PARCHE 23/09/2026 - Ronda 1 usa la apertura MODULAR (8 ranuras
                 # x 10 frases cortas). R2 y R3 siguen con sus plantillas, que
                 # llevan el bloque de respuesta del buro.
-                if not is_r2 and not is_r3:
+                if not (is_r2 or is_r3 or is_r4):
                     _sem = int(_hl_tpl.md5(
                         f"{consumer_name}|{report_date}|{variation_seed}"
                         .encode("utf-8")).hexdigest()[:12], 16)
@@ -9328,9 +9563,14 @@ def _build_dispute_letter_engine_once(
                     f"{formatted_date}"
                 )
 
-                # Personal information section (Round 1 only, first group only)
+                # PARCHE 24/09/2026 - la seccion de informacion personal se
+                # inyectaba SOLO en Ronda 1. En rondas posteriores la
+                # correccion de nombre, fecha de nacimiento o direccion tenia
+                # que salir en una carta aparte, un sobre certificado mas por
+                # buro. Ahora entra en cualquier ronda, siempre en la primera
+                # carta del buro (grupo collections) para no repetirse.
                 pi_section = ""
-                if not is_r2 and not is_r3 and group_key == "collections" and personal_info and personal_info_issues:
+                if group_key == "collections" and personal_info and personal_info_issues:
                     pi_section = build_personal_info_section(
                         personal_info, personal_info_issues, bureau
                     )
@@ -9459,6 +9699,20 @@ def _build_dispute_letter_engine_once(
                 accounts_block = "\n\n".join(account_lines)
 
                 body_parts = []
+                # PARCHE 25/09/2026 - extra_openings por buro acepta dos formas:
+                #   {"equifax": "texto"}                      -> solo carta de colecciones
+                #   {"equifax": {"late_payments": "texto"}}   -> por grupo exacto
+                # La segunda hace falta cuando el hecho externo aplica a un
+                # grupo que no es colecciones (p. ej. el buro cerro la
+                # investigacion de una cuenta de pagos tardios por falta de
+                # informacion nueva).
+                _extra_raw = (extra_openings or {}).get(bureau, "")
+                if isinstance(_extra_raw, dict):
+                    _extra = _extra_raw.get(group_key, "")
+                else:
+                    _extra = _extra_raw if group_key == "collections" else ""
+                if _extra:
+                    body_parts.append(_extra)
                 if pi_section:
                     body_parts.append(pi_section)
                 # PARCHE 23/09/2026 - linea neutral en vez de la orden de borrado
@@ -10797,6 +11051,7 @@ def build_report_multi(pdf_paths: dict[str, str]) -> dict[str, Any]:
     # Normalize through same pipeline as single-report
     negatives_by_bureau = build_negative_inventory_by_bureau(all_inventory)
     negatives_by_bureau = build_dofd_engine(negatives_by_bureau, report_date_str)
+    negatives_by_bureau = dedupe_coleccion_sobre_tardio(negatives_by_bureau)
 
     # Build a fake base_tradeline_engine from the multi-bureau inventory
     # (needed for cross-bureau attack detection)
@@ -11797,6 +12052,7 @@ def build_report(pdf_path: str, client_state: str = "") -> dict[str, Any]:
     rd_match = _re.search(r"Report Date:\s*([\d/]+)", raw_text[:2000])
     report_date_str = rd_match.group(1) if rd_match else ""
     negatives_by_bureau = build_dofd_engine(negatives_by_bureau, report_date_str)
+    negatives_by_bureau = dedupe_coleccion_sobre_tardio(negatives_by_bureau)
 
     # Inquiries, analyzed after report_date is known
     inquiries       = parse_inquiries(lines)
@@ -11880,6 +12136,13 @@ def _normalize_collector_name(name: str) -> str:
     # Remove original creditor suffix for normalization key only
     if "(ORIGINAL CREDITOR:" in n:
         n = n[:n.index("(ORIGINAL CREDITOR:")].strip()
+    # PARCHE 24/09/2026 - puntuacion fuera antes de comparar. Los buros
+    # escriben el mismo cobrador como "CAINE & WEINER" (Experian) y
+    # "CAINE WEINER" (TransUnion); sin esto quedaban como dos cobradores
+    # distintos y el cliente recibia dos cartas para la misma deuda.
+    import re as _re_norm
+    n = _re_norm.sub(r"[^A-Z0-9 ]+", " ", n)
+    n = _re_norm.sub(r"\s+", " ", n).strip()
     # Known normalizations
     aliases = {
         "NCA":             "NATIONAL CREDIT ADJUST",
@@ -11892,9 +12155,15 @@ def _normalize_collector_name(name: str) -> str:
         "LVNV FUNDING LLC": "LVNV FUNDING",
         "CAVALRY PORT":    "CAVALRY PORTFOLIO",
         "CAVALRY SPV":     "CAVALRY PORTFOLIO",
+        # PARCHE 24/09/2026 - variantes vistas en el corpus.
+        "PLAZA SERV":      "PLAZA SERVICES",
+        "CAINE":           "CAINE WEINER",
+        "CAINE WEINER":    "CAINE WEINER",
     }
     for short, full in aliases.items():
-        if n == short or n.startswith(short + " "):
+        # El prefijo alcanza: "PLAZA SERVIC" y "PLAZA SERVICES LLC" son el
+        # mismo cobrador y deben compartir clave de deduplicacion.
+        if n == short or n.startswith(short):
             return full
     return n
 
@@ -11943,14 +12212,28 @@ def _collector_letter_address(furnisher_name: str) -> str:
         "JEFFERSON":       "Jefferson Capital Systems LLC\nP.O. Box 7999\nSaint Cloud, MN 56302",
         "JEFFCAPSYS":      "Jefferson Capital Systems LLC\nP.O. Box 7999\nSaint Cloud, MN 56302",
         "ALDOUS":          "Aldous & Associates\n6322 S 3000 E Suite 200\nSalt Lake City, UT 84121",
+        # PARCHE 24/09/2026 - verificadas contra el sitio oficial de cada
+        # cobrador. Sin estas, la carta salia con "[Collector Address]" literal
+        # en el destinatario y no se podia despachar.
+        "CAINE":           "Caine & Weiner Company, Inc.\n5805 Sepulveda Blvd., 4th Floor\nSherman Oaks, CA 91411",
+        "PLAZA SERV":      "Plaza Services, LLC\n110 Hammond Drive, Suite 110\nAtlanta, GA 30328",
         "CELTIC":          "Celtic Bank Corporation\n268 S State St Suite 300\nSalt Lake City, UT 84111",
+        # PARCHE 25/09/2026 - verificada en la politica de privacidad del
+        # sitio oficial (icsystem.com/privacy-policy), 25/09/2026.
+        "I C SYSTEM":      "I.C. System, Inc.\n444 Highway 96 East\nSt. Paul, MN 55127-2557",
+        "IC SYSTEM":       "I.C. System, Inc.\n444 Highway 96 East\nSt. Paul, MN 55127-2557",
     }
     fname_upper = furnisher_name.upper()
     for key, addr in known.items():
         if key in fname_upper:
             return addr
-    # Generic fallback
-    return f"{furnisher_name}\n[Collector Address]\n[City, State ZIP]"
+    # Generic fallback. PARCHE 25/09/2026 - el bloque destinatario no lleva la
+    # linea report-key del reporte (regla de WORKFLOW): se corta el sufijo
+    # "(Original Creditor: ...)" antes de imprimir el nombre en el sobre.
+    _limpio = furnisher_name
+    if "(ORIGINAL CREDITOR:" in _limpio.upper():
+        _limpio = _limpio[:_limpio.upper().index("(ORIGINAL CREDITOR:")].strip()
+    return f"{_limpio}\n[Collector Address]\n[City, State ZIP]"
 
 
 def _furnisher_account_demand(item: dict[str, Any]) -> str:
@@ -12196,7 +12479,12 @@ def build_furnisher_letter_engine(
                 f"[Address]\n"
                 f"[City, State ZIP]\n"
                 f"\n"
-                f"{display_name}\n"
+                # PARCHE 24/09/2026 - el bloque destinatario lleva SOLO el
+                # nombre legal + direccion postal (regla de WORKFLOW). Antes
+                # imprimia tambien la linea del reporte ("CAINE WEINER",
+                # "PORTFOLIO RC"), que quedaba duplicada arriba del nombre
+                # legal. La fidelidad al reporte aplica al CUERPO de la carta,
+                # no al sobre.
                 f"{collector_addr}\n"
                 f"\n"
                 f"{formatted_date}\n"
@@ -12822,7 +13110,32 @@ def detect_personal_info_issues(personal_info: dict[str, Any]) -> list[dict[str,
         unique_zips = {z for z in zips_by_bureau.values() if z}
         unique_cs   = {cs for cs in city_state_by_bureau.values() if cs}
 
-        if len(unique_zips) > 1 and len(unique_cs) <= 1:
+        # PARCHE 24/09/2026 - antes solo se comparaban ZIP y ciudad/estado, y
+        # nunca la CALLE. Un caso real (Nelson Rojas): TransUnion y Equifax
+        # reportaban "98 N 17TH ST" y Experian "1188 CHRISTIAN ST", las tres en
+        # HARRISBURG, PA. Como la ciudad coincidia y los ZIP diferian, el caso
+        # caia en "zip_only" y la carta pedia corregir el codigo postal cuando
+        # lo que estaba mal era la calle entera.
+        street_by_bureau: dict[str, str] = {}
+        for b, addr in curr_canonical.items():
+            _cs = city_state_by_bureau.get(b, "")
+            _calle = addr
+            if _cs:
+                _i = addr.find(_cs.split(",")[0])
+                if _i > 0:
+                    _calle = addr[:_i]
+            _calle = _re_addr.sub(r"[^A-Z0-9 ]", " ", _calle)
+            street_by_bureau[b] = _re_addr.sub(r"\s+", " ", _calle).strip()
+        unique_streets = {st for st in street_by_bureau.values() if st}
+
+        if len(unique_streets) > 1:
+            subtype = "street"
+            desc_detail = (
+                "The street address reported as current differs across bureaus: "
+                + "; ".join(f"{b}='{st}'" for b, st in street_by_bureau.items() if st)
+                + ". These are different addresses, not a formatting difference."
+            )
+        elif len(unique_zips) > 1 and len(unique_cs) <= 1:
             subtype = "zip_only"
             desc_detail = (
                 "The ZIP code reported for the current address differs across bureaus: "
@@ -12851,6 +13164,7 @@ def detect_personal_info_issues(personal_info: dict[str, Any]) -> list[dict[str,
             "bureaus": curr_canonical,
             "zips": zips_by_bureau,
             "city_states": city_state_by_bureau,
+            "streets": street_by_bureau,
             "description": (
                 desc_detail
                 + " Under 15 U.S.C. section 1681e(b), each bureau must maintain "
@@ -12993,7 +13307,24 @@ def build_personal_info_section(
             all_zips = issue.get("zips", {})
             all_cs   = issue.get("city_states", {})
 
-            if subtype == "zip_only":
+            if subtype == "street":
+                this_street = issue.get("streets", {}).get(bureau, "")
+                otras = {
+                    st for b, st in issue.get("streets", {}).items()
+                    if b != bureau and st and st != this_street
+                }
+                if this_street:
+                    _otras = " / ".join(f"'{o}'" for o in sorted(otras))
+                    parts.append(
+                        f"The street address you show as my current address is "
+                        f"'{this_street}'. The other bureaus show {_otras}. These are "
+                        f"different addresses, not different ways of writing the same "
+                        f"one, so at least one of them does not belong in my file. My "
+                        f"correct current address is the one on the proof of address "
+                        f"enclosed with this letter, and I am asking you to correct it "
+                        f"and delete any address that is not mine."
+                    )
+            elif subtype == "zip_only":
                 # Find what the OTHER bureaus have, so the letter explains
                 # "your ZIP is X but other bureaus have Y".
                 other_zips = {
@@ -13704,8 +14035,8 @@ def build_no_response_letter(
         f"bureau fails to complete the reinvestigation within this period, "
         f"the disputed items must be deleted from my credit file. "
         f"This obligation is not discretionary, it is a statutory requirement. "
-        f"The 30-day period has now elapsed. I am demanding immediate deletion "
-        f"of the disputed items listed below."
+        f"The 30-day period has now elapsed. I am asking you to delete the "
+        f"disputed items listed below."
     )
 
     sections = []
@@ -13719,7 +14050,7 @@ def build_no_response_letter(
         ))
 
     closing = (
-        f"I am demanding written confirmation of the deletion of all items "
+        f"I am asking for written confirmation of the deletion of all items "
         f"listed above within five business days. Continued reporting of "
         f"these items after the expiration of the 30-day investigation "
         f"period constitutes a violation of 15 U.S.C. section 1681n and "
@@ -13845,6 +14176,9 @@ def build_bureau_response_letter(
     bureau: str,
     accounts: list[dict],
     consumer_name: str,
+    # PARCHE 24/09/2026 - parrafo extra (p. ej. la correccion de informacion
+    # personal) para no tener que mandar un sobre certificado aparte.
+    extra_section: str = "",
     response_date: str = "",
     report_date: str = "",
     dispute_date: str = "",
@@ -13997,6 +14331,12 @@ def build_bureau_response_letter(
                 BUREAU_RESPONSE_REINSERTION,
             ],
         }
+
+    if extra_section:
+        # Se inserta antes de la firma (ultima linea con el nombre).
+        _lineas = letter.rstrip().split("\n")
+        _firma = _lineas[-1]
+        letter = "\n".join(_lineas[:-1]).rstrip() + "\n\n" + extra_section.strip() + "\n\n" + _firma + "\n"
 
     return {
         "letter":        letter,
@@ -14957,6 +15297,111 @@ def detect_potential_identity_theft_indicators(
             })
 
     return indicators
+
+
+def build_update_letter(
+    bureau: str,
+    consumer_name: str,
+    correct_address: str,
+    correct_city_state_zip: str,
+    wrong_addresses: list[str] | None = None,
+    dob_issue: str = "",
+    correct_dob: str = "",
+    # PARCHE 25/09/2026 - correccion de nombre. La Update Letter solo sabia
+    # corregir direccion y fecha de nacimiento; cuando el archivo del buro
+    # carga una variante mal escrita del nombre (p. ej. "GELEYDI" por
+    # "GLEYBI") no habia forma de pedirlo por esta via.
+    name_issue: str = "",
+    correct_name: str = "",
+    prior_request_date: str = "",
+    consumer_address: str = "[Address]",
+    consumer_city_state_zip: str = "[City, State ZIP]",
+) -> str:
+    """
+    Update Letter: correccion de informacion personal, una por buro.
+
+    Definida en PROYECTO_CONTEXT seccion 8. Se manda SOLO donde hay algo
+    inexacto, bajo 15 U.S.C. section 1681e(b) / 1681i(a) / 1681g(a), y se
+    adjuntan identificacion y comprobante de domicilio.
+
+    `prior_request_date` convierte la carta en segundo pedido: se dice que ya
+    se solicito la correccion en esa fecha y que el archivo sigue igual, que
+    es una falla del buro y no del consumidor.
+
+    NO pide remover SSN ni empleador "por privacidad": solo corrige lo que
+    esta mal. NO alega archivo mixto: eso se decide con el cliente.
+    """
+    _info          = BUREAU_ADDRESSES.get(bureau, {})
+    bureau_name    = _info.get("name", bureau.title())
+    bureau_address = _info.get("address", "")
+    fecha          = _letter_date()
+
+    partes = []
+    if prior_request_date:
+        partes.append(
+            f"I asked you to correct the identifying information in my file on "
+            f"{prior_request_date}. The file still shows the same errors, so I am "
+            f"putting the request in writing again. I have given you accurate "
+            f"information and supporting documents; the information below is still "
+            f"wrong because it was not corrected, not because anything changed on "
+            f"my end."
+        )
+    else:
+        partes.append(
+            "I am writing to correct identifying information in my credit file."
+        )
+    partes.append(
+        "Under 15 U.S.C. section 1681e(b) you must follow reasonable procedures to "
+        "assure maximum possible accuracy of the information in my file, and that "
+        "duty covers my name, date of birth and addresses, not only the accounts. "
+        "Under 15 U.S.C. section 1681i(a) inaccurate identifying information is "
+        "disputable like any other item, and under 15 U.S.C. section 1681g(a) I am "
+        "entitled to see what your file says about me."
+    )
+
+    # PARCHE 25/09/2026 - cada bloque va separado por linea en blanco. El
+    # renderizador de build_bundle_v2 une con espacios las lineas que estan
+    # dentro de un mismo parrafo, asi que con un solo "\n" la direccion salia
+    # pegada al texto ("...is: 29 E 16th St Apt 2F Bayonne, NJ 07002").
+    cuerpo = []
+    if wrong_addresses:
+        cuerpo.append("The following addresses are not mine and I am asking you to "
+                      "delete them from my file:")
+        for i, d in enumerate(wrong_addresses, 1):
+            cuerpo.append(f"{i}. {d}")
+    cuerpo.append("My current mailing address, which is the one on the proof of "
+                  "address enclosed with this letter, is:")
+    cuerpo.append(f"{correct_address}\n{correct_city_state_zip}")
+    if name_issue:
+        cuerpo.append(
+            f"My file at your office carries {name_issue}. "
+            + (f"My legal name, as it appears on my Social Security card, is "
+               f"{correct_name}. " if correct_name else "")
+            + "I am asking you to correct it."
+        )
+    if dob_issue:
+        cuerpo.append(
+            f"My date of birth is reported as {dob_issue} in your file. "
+            + (f"The correct date of birth is {correct_dob}. " if correct_dob else "")
+            + "I am asking you to correct it."
+        )
+
+    cierre = (
+        "I am enclosing a copy of my government-issued identification and proof of "
+        "my current address. Please correct my file and send me written confirmation "
+        "of what was changed, together with an updated copy of my file so I can see "
+        "that the correction was applied.\n\n"
+        f"{consumer_name}"
+    )
+
+    letra = (
+        f"{consumer_name}\n{consumer_address}\n{consumer_city_state_zip}\n\n"
+        f"{bureau_name}\n{bureau_address}\n\n{fecha}\n\n"
+        f"RE: REQUEST TO CORRECT IDENTIFYING INFORMATION, "
+        f"15 U.S.C. section 1681e(b) / 1681i(a) / 1681g(a)\n\n"
+        f"Hi,\n\n" + "\n\n".join(partes) + "\n\n" + "\n\n".join(cuerpo) + "\n\n" + cierre
+    )
+    return letra
 
 
 def build_identity_theft_block_letter(
