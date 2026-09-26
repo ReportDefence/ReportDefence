@@ -4728,7 +4728,7 @@ def _linea_lista(semilla: int, orden_carta: int = 0) -> str:
     return _LINEA_LISTA[((semilla >> 40) + orden_carta) % len(_LINEA_LISTA)]
 
 
-def _cierre_carta(semilla: int, orden_carta: int = 0) -> str:
+def _cierre_carta(semilla: int, orden_carta: int = 0, ronda: str = "") -> str:
     # PARCHE 23/09/2026 (noche): los tres pools tienen 10 frases y la
     # posicion de la carta ahora llega hasta 20, asi que dos cartas cuyas
     # posiciones difieren en 10 (o en 20) caian en la MISMA frase en las
@@ -4748,8 +4748,16 @@ def _cierre_carta(semilla: int, orden_carta: int = 0) -> str:
     # mod 10 sesgaba las seis primeras frases de _CIERRE_A.
     # Se rehashea la semilla en vez de desplazarla mas alla de su ancho, asi las
     # tres ranuras tienen 16 bits limpios cada una.
+    # PARCHE 26/09/2026 (2) - la semilla del cierre no llevaba la ronda, asi que
+    # el mismo cliente + mismo buro + mismo grupo recibia el MISMO parrafo de
+    # cierre en R1, R2 y R3. Verificado en produccion con Albaro Hidalgo: la R2
+    # y la R3 de Equifax/collections terminaban con las tres frases identicas, y
+    # esas dos cartas van al mismo buro con 30 a 45 dias de diferencia.
+    # round_1 usa salt vacio a proposito: su cierre ya esta desplegado y no debe
+    # volver a cambiar.
+    _salt = "" if ronda in ("", "round_1") else f"|{ronda}"
     _s2 = int(hashlib.md5(
-        f"cierre|{semilla}".encode("utf-8")).hexdigest()[:12], 16)
+        f"cierre|{semilla}{_salt}".encode("utf-8")).hexdigest()[:12], 16)
     a = _CIERRE_A[((_s2 & 0xFFFF) + _o) % len(_CIERRE_A)]
     b = _CIERRE_B[(((_s2 >> 16) & 0xFFFF) + _o * 3 + _d) % len(_CIERRE_B)]
     c = _CIERRE_C[(((_s2 >> 32) & 0xFFFF) + _o * 7 + _d * 3) % len(_CIERRE_C)]
@@ -10300,7 +10308,7 @@ def _build_dispute_letter_engine_once(
                     header + "\n\n"
                     + opening + "\n\n\n"
                     + "\n\n\n".join(body_parts) + "\n\n\n"
-                    + _cierre_carta(_sem_l, _ord_l) + "\n\n"
+                    + _cierre_carta(_sem_l, _ord_l, round_key) + "\n\n"
                     + "Thank you,\n\n"
                     + consumer_name
                 )
