@@ -124,25 +124,84 @@ def _report_date(pages):
 
 
 def _inquiries(pages):
+    """
+    Seccion "Inquiries" del Three Bureau Credit Report.
+
+    PARCHE 24/09/2026 - dos fallas, la misma familia que la de _collections:
+
+    1. El numero de seccion estaba FIJO ('^9. Inquiries' / '^10. Public
+       Records'). La numeracion cambia entre reportes: el de Argenis Torres
+       trae '8. Inquiries' y '9. Public Records', asi que nunca entraba y
+       devolvia cero. Ahora se busca por NOMBRE con el numero libre.
+    2. Devolvia la clave 'company' con el nombre del acreedor Y la direccion
+       pegados ('CAP ONE VIA DEALER PO Box 259407'), porque la fila trae las
+       tres columnas en una linea. Ahora se separan por posicion de columna
+       (anclas 'Company' y 'Address' de la fila de encabezado) y se emite
+       'creditor_name', que es la clave que espera
+       report_parser.detect_inquiry_attacks (antes reventaba con KeyError).
+    """
     out = []
     in_sec = False
     cur = None
-    date_re = re.compile(r'^([A-Z][a-z]{2} \d{2}, \d{4})\s+(.+)$')
+    comp_x = addr_x = None
+    date_re = re.compile(r'^([A-Z][a-z]{2} \d{2}, \d{4})$')
+
     for p in pages:
-        for ln in p["text"].splitlines():
-            s = ln.strip()
-            if re.match(r'^9\.\s+Inquiries', s):
+        texto = p["text"]
+        for ln in texto.splitlines():
+            s_ = ln.strip()
+            # \s*$ descarta la linea del indice, que lleva el numero de pagina
+            if re.match(r'^\d{1,2}\.\s+Inquiries\s*$', s_):
                 in_sec = True
-            if re.match(r'^10\.\s+Public Records', s):
+            if re.match(r'^\d{1,2}\.\s+Public Records', s_):
                 in_sec = False
-            if not in_sec:
+        if not in_sec and not out:
+            continue
+        if not in_sec:
+            break
+
+        for ws in _lines(p["words"]):
+            textos = [w["text"] for w in ws]
+            linea = " ".join(textos).strip()
+
+            if linea in BUR3:
+                cur = BURKEY[linea]
                 continue
-            if s in BUR3:
-                cur = BURKEY[s]
+
+            # Fila de encabezado: fija las anclas de columna de este bloque.
+            if "Company" in textos and "Address" in textos:
+                comp_x = next(w["x0"] for w in ws if w["text"] == "Company")
+                addr_x = next(w["x0"] for w in ws if w["text"] == "Address")
                 continue
-            m = date_re.match(s)
-            if cur and m:
-                out.append({"bureau": cur, "date": m.group(1), "company": m.group(2).strip()})
+
+            fecha_ws = [w for w in ws if date_re.match(w["text"] + " " + "")]
+            # La fecha son 3 tokens: "Dec", "18,", "2024".
+            m = re.match(r'^([A-Z][a-z]{2} \d{1,2}, \d{4})\s+(.*)$', linea)
+            if m and cur:
+                if comp_x is None or addr_x is None:
+                    # Sin anclas, guardamos la linea entera como nombre.
+                    nombre, direccion = m.group(2).strip(), ""
+                else:
+                    nombre = " ".join(w["text"] for w in ws
+                                      if comp_x - 5 <= w["x0"] < addr_x - 5).strip()
+                    direccion = " ".join(w["text"] for w in ws
+                                         if w["x0"] >= addr_x - 5).strip()
+                    if not nombre:
+                        nombre = m.group(2).strip()
+                out.append({
+                    "bureau": cur,
+                    "date": m.group(1),
+                    "creditor_name": nombre,
+                    "company": nombre,          # compatibilidad hacia atras
+                    "business_type": "",
+                    "address": direccion,
+                })
+            elif out and cur and not m and linea and comp_x is not None:
+                # Linea de continuacion: la segunda mitad de la direccion
+                # (ciudad, estado, ZIP) viene en su propia fila.
+                if all(w["x0"] >= addr_x - 5 for w in ws):
+                    prev = out[-1]
+                    prev["address"] = (prev["address"] + " " + linea).strip()
     return out
 
 
@@ -454,6 +513,17 @@ def build_report_threebureau(pdf_path: str) -> dict:
         personal_info, ssn_by_bureau = _personal_info(pages)
         inventory = _build_inventory(tradelines, collections)
         _rawn = len(tradelines)
+    # PARCHE 24/09/2026 - inquiries: antes el adaptador devolvia siempre
+    # listas vacias de ataques y cartas, asi que ningun reporte three_bureau
+    # podia disputar inquiries. Se arma igual que en la via IdentityIQ.
+    try:
+        _inq_attacks = RP.detect_inquiry_attacks(inquiries)
+        _inq_letters = RP.build_inquiry_letters(
+            inquiries, consumer_name="[CLIENT NAME]", report_date=report_date or "")
+    except Exception as _e_inq:
+        _inq_attacks, _inq_letters = [], {}
+        print(f"  [aviso] inquiries no analizadas: {_e_inq}")
+
     personal_info_issues = RP.detect_personal_info_issues(personal_info)
     _ssns = {v for v in ssn_by_bureau.values() if v}
     if len(_ssns) > 1:
@@ -468,6 +538,11 @@ def build_report_threebureau(pdf_path: str) -> dict:
 
     negatives = RP.build_negative_inventory_by_bureau(inventory)
     negatives = RP.build_dofd_engine(negatives, report_date)
+    # PARCHE 26/09/2026 - misma regla que el motor: dentro de un buro, una
+    # cuenta que ya figura como coleccion no se cuenta tambien como pago
+    # tardio. Sin esto el conteo de violaciones y el CIR salian inflados
+    # (Argenis 43 mostradas contra 37 disputadas; Genesis 27 contra 26).
+    negatives = RP.dedupe_coleccion_sobre_tardio(negatives)
     legal = RP.build_legal_detection_engine(negatives, {}, report_date=report_date, client_state="")
     legal_summary = RP.build_legal_detection_summary(negatives, legal)
     scoring = RP.build_attack_scoring_engine(legal)
@@ -486,8 +561,8 @@ def build_report_threebureau(pdf_path: str) -> dict:
         "personal_info": personal_info,
         "personal_info_issues": personal_info_issues,
         "inquiries": inquiries,
-        "inquiry_attacks": [],
-        "inquiry_letters": [],
+        "inquiry_attacks": _inq_attacks,
+        "inquiry_letters": _inq_letters,
         "inventory_by_bureau": inventory,
         "negatives_by_bureau": negatives,
         "legal_detection_engine": legal,
