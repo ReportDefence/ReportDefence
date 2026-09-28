@@ -4341,6 +4341,45 @@ def _clave_cuenta_dedupe(e):
     return (fur, num)
 
 
+def _saldo_normalizado(v):
+    """'$258' y '$258.00' tienen que dar la misma cadena."""
+    import re as _r
+    t = _r.sub(r"[^0-9.]", "", str(v or ""))
+    if not t or t == ".":
+        return None
+    try:
+        return f"{float(t):.2f}"
+    except ValueError:
+        return None
+
+
+def _clave_furnisher_saldo(e):
+    """Respaldo para cuentas cuyo numero viene enmascarado SIN un solo digito.
+
+    PARCHE 26/09/2026. _clave_cuenta_dedupe exige al menos dos digitos en el
+    numero de cuenta. Los buros a veces imprimen el numero completamente
+    enmascarado ('xxxxxxxxxxxxxxxx', sin cifras al final), y entonces esa llave
+    devuelve None y el dedupe no puede emparejar nada.
+
+    Caso real: Argenis Torres, Equifax. LEAD BANK figuraba en collections con
+    'xxxxxxxxxxxxxxxx 0537' y la MISMA tradeline en late_payments con
+    'xxxxxxxxxxxxxxxx'. Mismo saldo ($258), mismo past_due, y el status del
+    renglon tardio decia literalmente 'Collection Account'. Resultado: dos
+    cartas certificadas al mismo buro por la misma cuenta.
+
+    Esta llave solo se usa cuando la principal no se puede construir, y exige
+    furnisher Y saldo. Si se equivoca, el efecto es retirar un pago tardio de
+    mas: se disputa de menos, nunca se afirma algo falso.
+    """
+    import re as _r
+    fur = _r.sub(r"[^A-Z0-9]", "",
+                 str(e.get("furnisher_name") or e.get("name") or "").upper())
+    bal = _saldo_normalizado(e.get("balance"))
+    if not fur or not bal:
+        return None
+    return (fur, bal)
+
+
 def dedupe_coleccion_sobre_tardio(negatives_by_bureau):
     """Retira del inventario los pagos tardios cuya cuenta ya figura como
     coleccion en el mismo buro. Modifica y devuelve el mismo dict."""
@@ -4349,14 +4388,25 @@ def dedupe_coleccion_sobre_tardio(negatives_by_bureau):
             k for k in (_clave_cuenta_dedupe(a) for a in accounts
                         if a.get("negative_type") in _TIPOS_COLECCION) if k
         }
-        if not en_col:
+        col_fb = {
+            k for k in (_clave_furnisher_saldo(a) for a in accounts
+                        if a.get("negative_type") in _TIPOS_COLECCION) if k
+        }
+        if not en_col and not col_fb:
             continue
+
+        def _es_duplicado(a):
+            if a.get("negative_type") != "late_payment":
+                return False
+            k = _clave_cuenta_dedupe(a)
+            if k is not None:
+                return k in en_col
+            # Sin digitos utilizables en el numero: respaldo furnisher + saldo.
+            kf = _clave_furnisher_saldo(a)
+            return kf is not None and kf in col_fb
+
         antes = len(accounts)
-        negatives_by_bureau[bureau] = [
-            a for a in accounts
-            if not (a.get("negative_type") == "late_payment"
-                    and _clave_cuenta_dedupe(a) in en_col)
-        ]
+        negatives_by_bureau[bureau] = [a for a in accounts if not _es_duplicado(a)]
         quitadas = antes - len(negatives_by_bureau[bureau])
         if quitadas:
             print(f"  [dedupe inventario] {bureau}: {quitadas} pago(s) tardio(s) "
