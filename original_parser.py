@@ -12990,6 +12990,26 @@ def _norm_furnisher(s: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
 
 
+def _fronteras_norm(s: str) -> set:
+    """Longitudes de prefijo normalizado que caen en frontera de palabra.
+
+    PARCHE 28/09/2026 - el prefijo por caracteres pegaba entidades distintas.
+    El alias 'CITI' es prefijo literal de 'CITIZENSBANK', asi que una carta de
+    Citizens Bank se despachaba al buzon de Citibank en Sioux Falls. Citibank
+    la recibe y la descarta: no rebota, no te enteras, y el reloj de los 30
+    dias del 1681i(a)(1)(A) nunca empieza a correr. Peor que un sobre devuelto.
+    Con esto un prefijo solo cuenta si termina donde termina una palabra del
+    nombre original: 'CITI CARD' si, 'CITIZENS BANK' no. Los nombres que el
+    buro imprime pegados ('CAPITALONE') no se afectan: esos entran por
+    coincidencia exacta, que no pasa por aqui.
+    """
+    out, acum = {0}, 0
+    for t in re.findall(r"[A-Z0-9]+", str(s or "").upper()):
+        acum += len(t)
+        out.add(acum)
+    return out
+
+
 def _formatea_direccion(e: dict) -> str:
     lineas = [str(e.get("nombre") or "").strip()]
     for k in ("direccion1", "direccion2", "direccion3"):
@@ -13014,6 +13034,35 @@ def _candidatos_registro(furnisher_name: str) -> list:
     n = _norm_furnisher(furnisher_name)
     if not n:
         return []
+    _fr_nombre = _fronteras_norm(furnisher_name)
+
+    def _no_confundir(e):
+        """PARCHE 28/09/2026 (2/2) - la regla de frontera mata el choque a mitad
+        de palabra (CITI dentro de CITIZENS BANK). No puede matar el choque por
+        palabra de mas: 'CREDIT CONTROL' es prefijo legitimo, por palabra
+        completa, tanto de 'CREDIT CONTROL, LLC' (Earth City MO) como de
+        'CREDIT CONTROL CORP' (otra empresa). Ninguna regla decide eso: es dato,
+        no logica. Esta lista es el dato. Si el nombre entrante coincide con una
+        entrada de no_confundir, esta direccion NO se considera y el nombre cae
+        a la tabla de abajo o al marcador de no despachable, que es un fallo
+        visible en vez de un sobre que llega a la empresa equivocada."""
+        for x in (e.get("no_confundir") or []):
+            nx = _norm_furnisher(x)
+            if not nx:
+                continue
+            # Aqui SI se usa prefijo crudo, sin exigir frontera: en una lista
+            # de exclusion pasarse de estricto es el error caro. 'CREDIT
+            # CONTROL CORP' tiene que cortar tambien a 'CREDIT CONTROL
+            # CORPORATION'. Por eso cada entrada de no_confundir se escribe con
+            # el nombre COMPLETO de la otra empresa, nunca con una abreviatura
+            # suelta: poner 'CITI' aqui apagaria tambien a CITIBANK.
+            # Solo en esta direccion: el nombre entrante empieza con el nombre
+            # completo de la otra empresa. Al reves NO, porque 'CREDIT CONTROL
+            # CORP' en la lista apagaria tambien el alias legitimo y mas corto
+            # 'CREDIT CONTROL'.
+            if n.startswith(nx):
+                return True
+        return False
 
     def _usable(e):
         """Una entrada sin calle o sin ZIP NO se puede despachar: imprimir
@@ -13028,7 +13077,7 @@ def _candidatos_registro(furnisher_name: str) -> list:
     quiere_auto = any(t in n for t in ("AUTO", "MOTORCR", "MTR", "MOTORCREDIT"))
     salida = []
     for clave, e in _registro_direcciones().items():
-        if not isinstance(e, dict) or not _usable(e):
+        if not isinstance(e, dict) or not _usable(e) or _no_confundir(e):
             continue
         alias = list(e.get("alias_en_reportes") or []) + [e.get("nombre") or ""]
         mejor = 0
@@ -13036,9 +13085,12 @@ def _candidatos_registro(furnisher_name: str) -> list:
             na = _norm_furnisher(a)
             if not na:
                 continue
-            if na == n:                  mejor = max(mejor, 3)
-            elif n.startswith(na):       mejor = max(mejor, 2)
-            elif na.startswith(n):       mejor = max(mejor, 1)
+            if na == n:
+                mejor = max(mejor, 3)
+            elif n.startswith(na) and len(na) in _fr_nombre:
+                mejor = max(mejor, 2)
+            elif na.startswith(n) and len(n) in _fronteras_norm(a):
+                mejor = max(mejor, 1)
         if not mejor:
             continue
         # preferencias, de mas a menos: no bloqueada > producto correcto >
