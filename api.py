@@ -375,6 +375,31 @@ def _fecha_o_none(v):
     return v or None
 
 
+def _valida_reemplazo(clave_reemplazo: str, clave_origen: str = ""):
+    """El reemplazo tiene que existir, no estar bloqueado, y no ser la misma.
+
+    PARCHE 28/09/2026. `reemplazo` redirige TODO el correo de ese furnisher a
+    otra entrada del registro. Si apunta a una clave inexistente, las cartas
+    salen con el marcador de NO DESPACHAR aunque el operador crea que ya lo
+    arreglo. Si apunta a una bloqueada, se redirige a otro buzon que ya devolvio.
+    Y si apunta a si misma, el motor entra en un bucle de un paso y tampoco
+    despacha. Se valida en vez de confiar.
+    """
+    if not clave_reemplazo:
+        return
+    if clave_reemplazo == clave_origen:
+        raise HTTPException(400, "El reemplazo no puede ser la misma direccion")
+    r = (sb.table("api_furnisher_addresses").select("clave,bloqueada,nombre")
+         .eq("clave", clave_reemplazo).execute())
+    if not r.data:
+        raise HTTPException(400, f"El reemplazo {clave_reemplazo!r} no existe en el registro")
+    if r.data[0].get("bloqueada"):
+        raise HTTPException(
+            400,
+            f"El reemplazo {clave_reemplazo!r} ({r.data[0].get('nombre')}) tambien "
+            "esta bloqueado por devolucion. Hace falta una direccion buena.")
+
+
 def _bloqueo_direccion(furnisher_name: str):
     """None si se puede despachar. Si no, el motivo y el codigo USPS."""
     try:
@@ -5387,6 +5412,9 @@ async def create_furnisher_address(body: FurnisherAddressBody,
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     if "verificado" in data and _fecha_o_none(data["verificado"]) is None:
         data.pop("verificado")          # '' del formulario rompe la columna date
+    # PARCHE 28/09/2026 - el registro es COMPARTIDO entre operadores: una
+    # direccion mala afecta las cartas de todos. Queda rastro de quien la puso.
+    data["operator_id"] = _uuid_o_none(user.get("id"))
     res = sb.table("api_furnisher_addresses").insert(data).execute()
     _direcciones(force=True)
     return res.data[0] if res.data else {"ok": True}
@@ -5401,6 +5429,33 @@ async def update_furnisher_address(clave: str, body: FurnisherAddressUpdate,
         updates.pop("verificado")       # '' del formulario rompe la columna date
     if not updates:
         raise HTTPException(400, "Nada que actualizar")
+
+    # PARCHE 28/09/2026 - BLOQUEAR FACIL, DESBLOQUEAR DIFICIL.
+    #
+    # El registro no tiene dueño: es compartido entre todos los operadores, a
+    # proposito, para que la direccion verificada de una empresa sirva para los
+    # clientes de todos. Por eso `_requiere_plan_pago` solo no alcanza aqui: en
+    # el resto de la API hay una segunda capa ("el cliente tiene que ser tuyo")
+    # que en esta tabla no existe.
+    #
+    # Marcar una direccion como devuelta debe seguir siendo facil: es la
+    # proteccion. DESmarcarla es lo que la desarma, y eso queda para admin.
+    #
+    # No se gatea por rol: el propio codigo anota que `role == "operator"` se
+    # auto-otorga con OPERATOR_CODE, que tiene default publico. `_is_admin`
+    # exige estar en ADMIN_EMAILS, que solo se cambia en el servidor.
+    if updates.get("bloqueada") is False and not _is_admin(user):
+        raise HTTPException(
+            403,
+            "Desbloquear una direccion devuelta por USPS es solo para admin. "
+            "Si ya tienes la direccion buena, registrala como reemplazo.")
+    if "entregado" in updates and not _is_admin(user):
+        raise HTTPException(
+            403, "Marcar si una direccion fue entregada es solo para admin.")
+    if "reemplazo" in updates:
+        _valida_reemplazo(updates["reemplazo"], clave)
+
+    updates["updated_by"] = _uuid_o_none(user.get("id"))
     res = (sb.table("api_furnisher_addresses").update(updates)
            .eq("clave", clave).execute())
     if not res.data:
@@ -5448,7 +5503,9 @@ async def record_bounce(body: BounceBody, user=Depends(get_current_user)):
 
     upd = {"bloqueada": True, "entregado": False}
     if body.reemplazo:
+        _valida_reemplazo(body.reemplazo, body.clave)
         upd["reemplazo"] = body.reemplazo
+    upd["updated_by"] = _uuid_o_none(user.get("id"))
     sb.table("api_furnisher_addresses").update(upd).eq("clave", body.clave).execute()
     _direcciones(force=True)
     return {"ok": True, "clave": body.clave, "bloqueada": True,
