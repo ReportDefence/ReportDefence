@@ -10022,6 +10022,24 @@ def _build_dispute_letter_engine_once(
             return (group_order.index(_base) if _base in group_order else 99, _num)
         group_order = sorted(set(group_order) | set(_extra_groups), key=_orden_parte)
 
+    # PARCHE 24/09/2026 - antes, cualquier round_key que no fuera round_2 o
+    # round_3 caia en las plantillas de R1 en silencio: una R4 o R5 salia con
+    # apertura de primera disputa. Ahora se corta.
+    #
+    # PARCHE 28/09/2026 - esta comprobacion estaba DENTRO del bucle por grupo,
+    # despues de `if not items_in_group: continue`. Con un inventario vacio el
+    # bucle no llegaba nunca a ejecutarla y target_round="round_5" devolvia {}
+    # en silencio en vez de lanzar el error. Detectado en la auditoria del
+    # 28/09 con Luis Pena y Nicolas Eduar, los dos sin negativos. Ahora se
+    # valida al entrar, antes de recorrer nada.
+    if target_round not in _RONDAS_SOPORTADAS:
+        raise ValueError(
+            f"target_round invalido: {target_round!r}. El motor arma "
+            f"{', '.join(_RONDAS_SOPORTADAS)}. Despues de R3 la "
+            "escalacion es queja CFPB (PROYECTO_CONTEXT.md, REGLA DE "
+            "TOPE DE RONDAS); R4 es correctiva o por plazo vencido."
+        )
+
     for bureau, groups in letter_input_engine.items():
         bureau_info    = BUREAU_ADDRESSES.get(bureau, {})
         bureau_name    = bureau_info.get("name", bureau.title())
@@ -10041,17 +10059,6 @@ def _build_dispute_letter_engine_once(
             # Generate letter for the requested target_round only.
             # R1=first dispute, R2=follow-up, R3=final escalation with section 1681n notice.
             group_letters: dict[str, str] = {}
-
-            # PARCHE 24/09/2026 - antes, cualquier round_key que no fuera
-            # round_2/round_3 caia en las plantillas de R1 en silencio: una R4
-            # o R5 salia con apertura de primera disputa. Ahora se corta.
-            if target_round not in _RONDAS_SOPORTADAS:
-                raise ValueError(
-                    f"target_round invalido: {target_round!r}. El motor arma "
-                    f"{', '.join(_RONDAS_SOPORTADAS)}. Despues de R3 la "
-                    "escalacion es queja CFPB (PROYECTO_CONTEXT.md, REGLA DE "
-                    "TOPE DE RONDAS); R4 es correctiva o por plazo vencido."
-                )
 
             for round_key, items in [(target_round, items_in_group)]:
                 if not items:
@@ -12853,10 +12860,67 @@ def _collector_letter_address(furnisher_name: str) -> str:
         "I C SYSTEM":      "I.C. System, Inc.\n444 Highway 96 East\nSt. Paul, MN 55127-2557",
         "IC SYSTEM":       "I.C. System, Inc.\n444 Highway 96 East\nSt. Paul, MN 55127-2557",
     }
+    # PASO 0 - registro canonico (direcciones.json). Manda sobre la tabla de
+    # abajo porque es el unico sitio que sabe si una direccion ya fue devuelta.
+    for _p, _clave, _e in _candidatos_registro(furnisher_name):
+        if not _e.get("bloqueada"):
+            return _formatea_direccion(_e)
+        _rep = _e.get("reemplazo")
+        _re_e = _registro_direcciones().get(_rep) if _rep else None
+        if _re_e and not _re_e.get("bloqueada"):
+            return _formatea_direccion(_re_e)
+        # Devuelta y sin reemplazo verificado: NO se imprime la direccion mala.
+        # Sale un marcador que no es despachable, para que no se gaste otro
+        # certificado en un sobre que va a volver.
+        _dev = (_e.get("devoluciones") or [{}])[-1]
+        _cod = str(_dev.get("codigo") or "DEVUELTA POR USPS")
+        _nom = str(_e.get("nombre") or furnisher_name).strip()
+        return (f"{_nom}\n[NO DESPACHAR - USPS DEVOLVIO: {_cod}]\n"
+                f"[Falta direccion de reemplazo verificada]")
+
     fname_upper = furnisher_name.upper()
     for key, addr in known.items():
         if key in fname_upper:
             return addr
+
+    # PARCHE 28/09/2026 - ALIAS POR PREFIJO NORMALIZADO.
+    # Los buros imprimen la MISMA entidad con nombres distintos:
+    #   LVNV FUNDING LLC / LVNV FUNDING / LVNVFUNDG
+    #   JEFFERSON CAPITAL SYST / JEFFERSNCP
+    #   CREDIT COLLECTION SE / CREDIT COLL
+    # La tabla de arriba busca por substring, asi que una clave MAS LARGA que el
+    # nombre impreso no coincide nunca: "LVNV FUNDING LLC" no esta dentro de
+    # "LVNV FUNDING", y "JEFFERSON" no esta dentro de "JEFFERSNCP" (falta la O).
+    # Medido sobre los 27 clientes: 26 cartas a furnisher salian con
+    # "[Collector Address]" literal en el sobre por esta causa.
+    #
+    # Este segundo paso compara por PREFIJO sobre el nombre normalizado
+    # (mayusculas, sin espacios ni puntuacion). NO se usa substring a proposito:
+    # con substring normalizado la clave corta "NCA" (National Credit Adjusters)
+    # pegaria dentro de "JEFFERSONCAPITALSYST" y de "AUSTINCAPBK", y esas dos
+    # entidades recibirian la direccion de otra empresa. Verificado en seco
+    # sobre los 96 nombres de furnisher que aparecen en los reportes reales:
+    # con prefijo, ningun nombre ajeno cae en estos tres alias.
+    #
+    # Solo corre si la tabla de arriba no encontro nada, asi que no puede
+    # cambiar ninguna direccion que hoy ya se resuelve bien.
+    #
+    # No se inventa ninguna direccion: LVNV y Jefferson reutilizan la que esta
+    # arriba, y Credit Collection Service viene de direcciones.json
+    # (verificado 2026-08-25, reporte de Jose De La Oz + Postalocity job
+    # 1234281). Ese registro anota que Equifax imprime la misma calle con
+    # ciudad "Newton MA 02062", lo cual es INCORRECTO: el ZIP 02062 es Norwood.
+    _alias_prefijo = {
+        "LVNVFUND":   known["LVNV FUNDING LLC"],
+        "JEFFERS":    known["JEFFERSON"],
+        "CREDITCOLL": ("Credit Collection Service\n725 Canton St\n"
+                       "Norwood, MA 02062"),
+    }
+    import re as _re_alias
+    _norm = _re_alias.sub(r"[^A-Z0-9]", "", fname_upper)
+    for _pref, _addr in _alias_prefijo.items():
+        if _norm.startswith(_pref):
+            return _addr
     # Generic fallback. PARCHE 25/09/2026 - el bloque destinatario no lleva la
     # linea report-key del reporte (regla de WORKFLOW): se corta el sufijo
     # "(Original Creditor: ...)" antes de imprimir el nombre en el sobre.
@@ -12864,6 +12928,146 @@ def _collector_letter_address(furnisher_name: str) -> str:
     if "(ORIGINAL CREDITOR:" in _limpio.upper():
         _limpio = _limpio[:_limpio.upper().index("(ORIGINAL CREDITOR:")].strip()
     return f"{_limpio}\n[Collector Address]\n[City, State ZIP]"
+
+
+
+# ── REGISTRO DE DIRECCIONES CON MEMORIA DE DEVOLUCIONES ───────────────────────
+# PARCHE 28/09/2026.
+#
+# Tres cartas certificadas volvieron devueltas (sobres fotografiados 28/09):
+#   Capital One Bank USA  PO Box 85015 Richmond VA   -> BOX CLOSED
+#   Synchrony Bank        PO Box 965060 Orlando FL   -> NOT DELIVERABLE AS ADDRESSED
+#   Ford Motor Credit     PO Box 542000 Omaha NE     -> ATTEMPTED - NOT KNOWN
+#
+# Las tres salian del bloque Contact del reporte de credito y estaban marcadas
+# como verificadas. No lo eran: los buros guardan ahi direcciones de enrutamiento
+# interno, a veces cerradas o sin buzon atendido. Y las tres pasaron el filtro
+# "Good Addresses" de Postalocity, porque CASS valida que la direccion EXISTA y
+# este bien escrita, no que el destinatario reciba correo ahi.
+#
+# Por que importa mas que el franqueo: bajo 12 CFR 1022.43(c) el furnisher solo
+# esta obligado a investigar una disputa directa si le llega a una direccion
+# valida. Una carta devuelta significa que el plazo nunca empezo a correr.
+#
+# Faltaba el lazo de retorno: el sobre volvia y nada lo registraba, asi que la
+# ronda siguiente reimprimia el mismo apartado. Ahora direcciones.json guarda
+# origen, si llego, y las devoluciones; y este modulo lo lee.
+_REGISTRO_DIR_CACHE = None
+
+
+def _registro_direcciones() -> dict:
+    """Lee direcciones.json una sola vez. Si no esta, devuelve {} y todo el
+    resto del motor sigue funcionando igual que antes."""
+    global _REGISTRO_DIR_CACHE
+    if _REGISTRO_DIR_CACHE is None:
+        try:
+            _p = Path(__file__).parent / "direcciones.json"
+            _REGISTRO_DIR_CACHE = (json.loads(_p.read_text(encoding="utf-8"))
+                                   .get("furnishers") or {})
+        except Exception:
+            _REGISTRO_DIR_CACHE = {}
+    return _REGISTRO_DIR_CACHE
+
+
+def set_registro_direcciones(registro: dict) -> None:
+    """Inyecta el registro de direcciones desde fuera (api.py lo trae de
+    Supabase) en vez de leer direcciones.json.
+
+    Se usa un setter de modulo y no un parametro nuevo a proposito: el registro
+    lo necesita `_collector_letter_address`, que esta enterrada varios niveles
+    por debajo de las funciones publicas, y anadirle un parametro obligaria a
+    tocar todas las firmas intermedias. El coste es estado global por proceso,
+    aceptable porque cada worker de FastAPI atiende una peticion a la vez y
+    api.py lo refresca antes de generar cartas.
+
+    Pasar {} o None vuelve a leer direcciones.json en la siguiente llamada.
+    """
+    global _REGISTRO_DIR_CACHE
+    _REGISTRO_DIR_CACHE = registro if registro else None
+
+
+def _norm_furnisher(s: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
+
+
+def _formatea_direccion(e: dict) -> str:
+    lineas = [str(e.get("nombre") or "").strip()]
+    for k in ("direccion1", "direccion2", "direccion3"):
+        v = str(e.get(k) or "").strip()
+        if v:
+            lineas.append(v)
+    ciudad = str(e.get("ciudad") or "").strip()
+    estado = str(e.get("estado") or "").strip()
+    zipc   = str(e.get("zip") or "").strip()
+    if ciudad or estado or zipc:
+        lineas.append(f"{ciudad}, {estado} {zipc}".strip().strip(","))
+    return "\n".join(x for x in lineas if x)
+
+
+def _candidatos_registro(furnisher_name: str) -> list:
+    """Devuelve [(puntaje, clave, entrada)] ordenado de mejor a peor.
+
+    Se compara por PREFIJO normalizado, nunca por substring: con substring una
+    clave corta cae dentro de un nombre ajeno y dos entidades distintas acaban
+    compartiendo direccion, que es justo el error a evitar.
+    """
+    n = _norm_furnisher(furnisher_name)
+    if not n:
+        return []
+
+    def _usable(e):
+        """Una entrada sin calle o sin ZIP NO se puede despachar: imprimir
+        'Ciudad, Estado' a secas es otro sobre devuelto. Se ignora y se deja que
+        resuelva la tabla de abajo. Las BLOQUEADAS si se consideran aunque esten
+        incompletas, porque su trabajo es impedir el despacho, no darlo."""
+        if e.get("bloqueada"):
+            return True
+        tiene_calle = any(str(e.get(k) or "").strip()
+                          for k in ("direccion1", "direccion2", "direccion3"))
+        return bool(tiene_calle and str(e.get("zip") or "").strip())
+    quiere_auto = any(t in n for t in ("AUTO", "MOTORCR", "MTR", "MOTORCREDIT"))
+    salida = []
+    for clave, e in _registro_direcciones().items():
+        if not isinstance(e, dict) or not _usable(e):
+            continue
+        alias = list(e.get("alias_en_reportes") or []) + [e.get("nombre") or ""]
+        mejor = 0
+        for a in alias:
+            na = _norm_furnisher(a)
+            if not na:
+                continue
+            if na == n:                  mejor = max(mejor, 3)
+            elif n.startswith(na):       mejor = max(mejor, 2)
+            elif na.startswith(n):       mejor = max(mejor, 1)
+        if not mejor:
+            continue
+        # preferencias, de mas a menos: no bloqueada > producto correcto >
+        # publicada por la empresa
+        p = (mejor * 100
+             + (0 if e.get("bloqueada") else 50)
+             + (20 if (quiere_auto and e.get("producto") == "auto") else 0)
+             + (20 if (not quiere_auto and e.get("producto") == "tarjeta") else 0)
+             + (10 if e.get("origen") == "sitio_oficial" else 0))
+        salida.append((p, clave, e))
+    salida.sort(key=lambda x: -x[0])
+    return salida
+
+
+def direccion_bloqueada(furnisher_name: str) -> dict | None:
+    """Para el despacho: si la direccion de este furnisher esta bloqueada por
+    devolucion y no hay reemplazo, devuelve el motivo. Si no, None."""
+    for _p, _c, e in _candidatos_registro(furnisher_name):
+        if not e.get("bloqueada"):
+            return None
+        rep = e.get("reemplazo")
+        if rep and not (_registro_direcciones().get(rep, {}) or {}).get("bloqueada"):
+            return None
+        dev = (e.get("devoluciones") or [{}])[-1]
+        return {"furnisher": furnisher_name, "clave": _c,
+                "codigo": dev.get("codigo"), "texto_usps": dev.get("texto_usps"),
+                "direccion_devuelta": dev.get("direccion_usada"),
+                "pendiente": e.get("PENDIENTE")}
+    return None
 
 
 def _furnisher_account_demand(item: dict[str, Any]) -> str:
