@@ -13089,7 +13089,15 @@ def _candidatos_registro(furnisher_name: str) -> list:
                 mejor = max(mejor, 3)
             elif n.startswith(na) and len(na) in _fr_nombre:
                 mejor = max(mejor, 2)
-            elif na.startswith(n) and len(n) in _fronteras_norm(a):
+            elif na.startswith(n):
+                # SIN exigir frontera. Esta es la direccion contraria: el buro
+                # imprimio un nombre MAS CORTO que el alias, o sea lo trunco.
+                # Los buros truncan a lo bruto, a mitad de palabra: 'DNF ASSOC'
+                # por 'DNF Associates LLC', 'PLAZA SERVIC', 'MIDLAND CRED',
+                # 'PORTFOLIO RC', 'LVNVFUNDG'. Exigir frontera aqui rompia
+                # cartas que hoy funcionan. El riesgo de juntar dos entidades
+                # esta en la direccion de arriba (nombre entrante mas LARGO que
+                # el alias), no en esta.
                 mejor = max(mejor, 1)
         if not mejor:
             continue
