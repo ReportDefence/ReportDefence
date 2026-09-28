@@ -144,25 +144,33 @@
       "bloqueada": false,
       "reemplazo": null,
       "producto": null,
-      "alias_en_reportes": []
+      "alias_en_reportes": [],
+      "nota": "Entrada incompleta en el registro, PERO las cartas NO se ven afectadas: el motor la ignora por incompleta y cae a su tabla interna, que tiene 'LVNV Funding LLC, P.O. Box 10587, Greenville SC 29603'. Esa direccion no tiene origen anotado. Pendiente: verificar cual es la buena. LVNV remite todo a Resurgent Capital Services y las cartas viejas usaban 'c/o Resurgent Capital Services, PO Box 1269, Greenville SC 29602'. NO completar esta entrada a ojo: si se rellena con una sin verificar, deja de caer al respaldo y empieza a usarse."
     },
     "credit_control_llc": {
-      "nombre": "Credit Control LLC",
-      "direccion1": "",
-      "ciudad": "Hazelwood",
+      "nombre": "Credit Control, LLC",
+      "direccion1": "3300 Rider Trail S",
+      "ciudad": "Earth City",
       "estado": "MO",
-      "zip": "",
-      "verificado": null,
-      "fuente": "FLUJO_Dispatch_Postalocity.md, Genesis R1 job 1227695",
-      "INCOMPLETA": "Sin calle ni ZIP. El motor la IGNORA por incompleta: imprimir 'Ciudad, Estado' sin calle es un sobre que rebota. Completar desde el reporte o el sitio oficial y quitar este campo.",
-      "origen": "flujo_interno",
+      "zip": "63045",
+      "verificado": "2026-09-28",
+      "fuente": "credit-control.com/contact-us/ y /corporate-contact/, consultados 2026-09-28.",
+      "origen": "sitio_oficial",
       "uso": "disputa_buro",
       "entregado": null,
       "devoluciones": [],
       "bloqueada": false,
       "reemplazo": null,
       "producto": null,
-      "alias_en_reportes": []
+      "alias_en_reportes": [
+        "CREDIT CNTRL",
+        "CREDIT CONTROL",
+        "CREDIT CONTROL, LLC",
+        "CREDIT CONTROL LLC"
+      ],
+      "direccion2": "Suite 500",
+      "base_legal": "12 CFR 1022.43(c)(3) - direccion comercial del furnisher",
+      "nota": "SE MUDARON. Las cartas anteriores usaban 5757 Phantom Dr Suite 330, Hazelwood MO 63042, que es la direccion vieja. La actual que publican es Earth City. Antes de este cambio CREDIT CNTRL y CREDIT CONTROL, LLC salian con [Collector Address] literal en el sobre."
     },
     "central_research_inc": {
       "nombre": "Central Research Inc",
@@ -489,6 +497,7 @@
       "alias_en_reportes": [
         "COMENITY",
         "COMENITY CAPITAL BANK",
+        "COMENITYCAPITAL",
         "CCB/ULTA",
         "CCB/BURLIN",
         "CCB/FE21CC",
