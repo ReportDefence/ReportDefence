@@ -351,6 +351,30 @@ def _aplicar_direcciones_al_motor():
         pass   # parser sin el setter: no pasa nada, usa su JSON
 
 
+def _uuid_o_none(v):
+    """Devuelve el valor solo si es un UUID valido; si no, None.
+
+    PARCHE 28/09/2026. La tabla tiene client_id como uuid, pero el formulario
+    del frontend lo pide como texto libre. Si llega algo que no es un UUID,
+    Postgres rechaza el INSERT entero y la devolucion no se registra, asi que
+    la direccion NO se bloquea: se pierde justo la proteccion. Aqui el dato
+    opcional se descarta y el bloqueo sigue adelante.
+    """
+    import uuid as _uuid
+    if not v:
+        return None
+    try:
+        return str(_uuid.UUID(str(v).strip()))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _fecha_o_none(v):
+    """Igual, para columnas date: un '' del formulario rompe el INSERT."""
+    v = (str(v).strip() if v is not None else "")
+    return v or None
+
+
 def _bloqueo_direccion(furnisher_name: str):
     """None si se puede despachar. Si no, el motivo y el codigo USPS."""
     try:
@@ -5361,6 +5385,8 @@ async def create_furnisher_address(body: FurnisherAddressBody,
                                    user=Depends(get_current_user)):
     _requiere_plan_pago(user, "Registro de direcciones")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "verificado" in data and _fecha_o_none(data["verificado"]) is None:
+        data.pop("verificado")          # '' del formulario rompe la columna date
     res = sb.table("api_furnisher_addresses").insert(data).execute()
     _direcciones(force=True)
     return res.data[0] if res.data else {"ok": True}
@@ -5371,6 +5397,8 @@ async def update_furnisher_address(clave: str, body: FurnisherAddressUpdate,
                                    user=Depends(get_current_user)):
     _requiere_plan_pago(user, "Registro de direcciones")
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "verificado" in updates and _fecha_o_none(updates["verificado"]) is None:
+        updates.pop("verificado")       # '' del formulario rompe la columna date
     if not updates:
         raise HTTPException(400, "Nada que actualizar")
     res = (sb.table("api_furnisher_addresses").update(updates)
@@ -5396,7 +5424,26 @@ async def record_bounce(body: BounceBody, user=Depends(get_current_user)):
 
     d = {k: v for k, v in body.model_dump().items()
          if v is not None and k != "reemplazo"}
-    d["operator_id"] = user["id"]
+
+    # Registrar la devolucion y BLOQUEAR es lo unico critico. Los campos
+    # opcionales mal formados se descartan antes de que tumben el INSERT.
+    _cli_crudo = d.pop("client_id", None)
+    _cli = _uuid_o_none(_cli_crudo)
+    if _cli:
+        d["client_id"] = _cli
+    elif _cli_crudo:
+        # no se pierde: queda anotado en texto
+        d["nota"] = ((d.get("nota") or "") +
+                     f" | client_id recibido sin formato UUID: {_cli_crudo}").strip(" |")
+    d["fecha_etiqueta"] = _fecha_o_none(d.get("fecha_etiqueta"))
+    if d["fecha_etiqueta"] is None:
+        d.pop("fecha_etiqueta")
+    if d.get("job_id") is not None:
+        d["job_id"] = str(d["job_id"]).strip() or None
+        if d["job_id"] is None:
+            d.pop("job_id")
+
+    d["operator_id"] = _uuid_o_none(user.get("id"))
     sb.table("api_address_bounces").insert(d).execute()
 
     upd = {"bloqueada": True, "entregado": False}
