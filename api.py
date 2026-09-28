@@ -268,6 +268,98 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # ─── Supabase client (service role — bypasses RLS) ────────────
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ═══════════════════════════════════════════════════════════════
+#  REGISTRO DE DIRECCIONES DE FURNISHER          (PARCHE 28/09/2026)
+#
+#  Tres cartas certificadas volvieron devueltas porque el motor usaba
+#  direcciones sacadas del bloque Contact del reporte de credito, y nada
+#  registraba el rebote, asi que la ronda siguiente reimprimia el mismo
+#  apartado:
+#     Capital One Bank USA  PO Box 85015 Richmond VA   BOX CLOSED
+#     Synchrony Bank        PO Box 965060 Orlando FL   NOT DELIVERABLE AS ADDRESSED
+#     Ford Motor Credit     PO Box 542000 Omaha NE     ATTEMPTED - NOT KNOWN
+#
+#  Las tres pasaron el filtro "Good Addresses" de Postalocity: CASS valida que
+#  la direccion EXISTA y este bien escrita, no que ahi reciban correo.
+#
+#  Bajo 12 CFR 1022.43(c) el furnisher solo esta obligado a investigar una
+#  disputa directa si le llega a una direccion valida. Carta devuelta = el plazo
+#  nunca empezo a correr.
+#
+#  El registro vive en Supabase. direcciones.json (junto a original_parser.py)
+#  queda de respaldo: si la base no responde, el motor sigue con el JSON.
+# ═══════════════════════════════════════════════════════════════
+import time as _t_dir
+
+_DIR_CACHE = {"data": None, "ts": 0.0}
+_DIR_TTL = 300  # segundos
+
+
+def _direcciones_desde_db() -> dict:
+    res = sb.table("api_furnisher_addresses").select("*").execute()
+    out = {}
+    for r in (res.data or []):
+        out[r["clave"]] = {
+            "nombre": r.get("nombre"),
+            "direccion1": r.get("direccion1"), "direccion2": r.get("direccion2"),
+            "direccion3": r.get("direccion3"),
+            "ciudad": r.get("ciudad"), "estado": r.get("estado"), "zip": r.get("zip"),
+            "alias_en_reportes": r.get("alias") or [],
+            "producto": r.get("producto"), "origen": r.get("origen"),
+            "fuente": r.get("fuente"), "verificado": r.get("verificado"),
+            "entregado": r.get("entregado"), "bloqueada": bool(r.get("bloqueada")),
+            "reemplazo": r.get("reemplazo"), "nota": r.get("nota"),
+            "devoluciones": [],
+        }
+    if out:
+        dev = (sb.table("api_address_bounces").select("*")
+               .in_("clave", list(out)).order("created_at").execute())
+        for d in (dev.data or []):
+            if d.get("clave") in out:
+                out[d["clave"]]["devoluciones"].append({
+                    "fecha_etiqueta": d.get("fecha_etiqueta"), "codigo": d.get("codigo"),
+                    "texto_usps": d.get("texto_usps"),
+                    "direccion_usada": d.get("direccion_usada"),
+                })
+    return out
+
+
+def _direcciones(force: bool = False) -> dict:
+    ahora = _t_dir.time()
+    if (not force and _DIR_CACHE["data"] is not None
+            and ahora - _DIR_CACHE["ts"] < _DIR_TTL):
+        return _DIR_CACHE["data"]
+    try:
+        data = _direcciones_desde_db()
+    except Exception as e:
+        print(f"[direcciones] la base fallo ({type(e).__name__}); se usa direcciones.json")
+        data = {}
+    _DIR_CACHE.update({"data": data, "ts": ahora})
+    return data
+
+
+def _aplicar_direcciones_al_motor():
+    """Empuja el registro al parser. Si la base no dio nada, el parser sigue
+    leyendo su direcciones.json y todo funciona igual que antes."""
+    reg = _direcciones()
+    if not reg:
+        return
+    try:
+        from original_parser import set_registro_direcciones
+        set_registro_direcciones(reg)
+    except ImportError:
+        pass   # parser sin el setter: no pasa nada, usa su JSON
+
+
+def _bloqueo_direccion(furnisher_name: str):
+    """None si se puede despachar. Si no, el motivo y el codigo USPS."""
+    try:
+        from original_parser import direccion_bloqueada
+        return direccion_bloqueada(furnisher_name)
+    except Exception:
+        return None
+
+
 # ─── Helpers ──────────────────────────────────────────────────
 
 def hash_password(pw: str) -> str:
@@ -1732,6 +1824,7 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
     job = _get_job_or_404(user, body.job_id)
 
     from original_parser import build_furnisher_letter_engine, validate_eoscar_compliance
+    _aplicar_direcciones_al_motor()   # PARCHE 28/09/2026
 
     # Reusar el letter_input_engine guardado; si viniera vacío, reconstruir desde negativos
     letter_input = job.get("letter_input_engine", {}) or {}
@@ -1804,6 +1897,9 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
             "eoscar": chk,
             # nota: [Collector Address] lo completa el operador (no está en el reporte)
             "needs_collector_address": "[Collector Address]" in text,
+            # PARCHE 28/09/2026 - direccion devuelta por USPS y sin reemplazo
+            # verificado. El frontend debe BLOQUEAR el envio, no solo avisar.
+            "address_blocked": _bloqueo_direccion(furnisher),
         })
 
     # Guardar, igual que las cartas a burós: sin esto se pierden al cerrar
@@ -5198,3 +5294,123 @@ async def billing_webhook(request: Request):
         print(f"[billing webhook] error procesando {typ}: {e}")
         raise HTTPException(500, "processing error")
     return {"received": True}
+
+# ═══════════════════════════════════════════════════════════════
+#  ENDPOINTS DEL REGISTRO DE DIRECCIONES     (PARCHE 28/09/2026)
+#  Mismo patron que /letter-receipts: modelo Pydantic + sb.table() + permisos.
+# ═══════════════════════════════════════════════════════════════
+
+class FurnisherAddressBody(BaseModel):
+    clave: str                                # p.ej. 'capital_one_disputa_tarjeta'
+    nombre: str                               # primera linea del sobre
+    direccion1: Optional[str] = None
+    direccion2: Optional[str] = None
+    direccion3: Optional[str] = None
+    ciudad: Optional[str] = None
+    estado: Optional[str] = None
+    zip: Optional[str] = None
+    alias: Optional[list] = None              # nombres con los que el buro la imprime
+    producto: Optional[str] = None            # 'tarjeta' | 'auto' | None
+    origen: Optional[str] = "reporte_credito"
+    fuente: Optional[str] = None
+    base_legal: Optional[str] = None
+    verificado: Optional[str] = None          # 'YYYY-MM-DD'
+    nota: Optional[str] = None
+
+
+class FurnisherAddressUpdate(BaseModel):
+    nombre: Optional[str] = None
+    direccion1: Optional[str] = None
+    direccion2: Optional[str] = None
+    direccion3: Optional[str] = None
+    ciudad: Optional[str] = None
+    estado: Optional[str] = None
+    zip: Optional[str] = None
+    alias: Optional[list] = None
+    producto: Optional[str] = None
+    origen: Optional[str] = None
+    fuente: Optional[str] = None
+    verificado: Optional[str] = None
+    entregado: Optional[bool] = None
+    bloqueada: Optional[bool] = None
+    reemplazo: Optional[str] = None
+    nota: Optional[str] = None
+
+
+class BounceBody(BaseModel):
+    clave: str
+    codigo: str                               # BOX CLOSED / NOT DELIVERABLE AS ADDRESSED / ...
+    fecha_etiqueta: Optional[str] = None      # la fecha impresa en la etiqueta amarilla
+    texto_usps: Optional[str] = None
+    direccion_usada: Optional[str] = None
+    client_id: Optional[str] = None
+    job_id: Optional[str] = None
+    nota: Optional[str] = None
+    reemplazo: Optional[str] = None           # si ya se conoce la buena
+
+
+@app.get("/furnisher-addresses")
+async def list_furnisher_addresses(user=Depends(get_current_user)):
+    res = (sb.table("api_furnisher_addresses").select("*")
+           .order("nombre").execute())
+    return res.data or []
+
+
+@app.post("/furnisher-addresses", status_code=201)
+async def create_furnisher_address(body: FurnisherAddressBody,
+                                   user=Depends(get_current_user)):
+    _requiere_plan_pago(user, "Registro de direcciones")
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    res = sb.table("api_furnisher_addresses").insert(data).execute()
+    _direcciones(force=True)
+    return res.data[0] if res.data else {"ok": True}
+
+
+@app.patch("/furnisher-addresses/{clave}")
+async def update_furnisher_address(clave: str, body: FurnisherAddressUpdate,
+                                   user=Depends(get_current_user)):
+    _requiere_plan_pago(user, "Registro de direcciones")
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "Nada que actualizar")
+    res = (sb.table("api_furnisher_addresses").update(updates)
+           .eq("clave", clave).execute())
+    if not res.data:
+        raise HTTPException(404, f"No existe la direccion {clave!r}")
+    _direcciones(force=True)
+    return res.data[0]
+
+
+@app.post("/address-bounces", status_code=201)
+async def record_bounce(body: BounceBody, user=Depends(get_current_user)):
+    """Registra un sobre devuelto Y bloquea esa direccion.
+
+    Este es el lazo que faltaba: antes el sobre volvia, nada lo anotaba, y la
+    ronda siguiente reimprimia el mismo apartado.
+    """
+    _requiere_plan_pago(user, "Certified mail")
+    existe = (sb.table("api_furnisher_addresses").select("clave")
+              .eq("clave", body.clave).execute())
+    if not existe.data:
+        raise HTTPException(404, f"No existe la direccion {body.clave!r}")
+
+    d = {k: v for k, v in body.model_dump().items()
+         if v is not None and k != "reemplazo"}
+    d["operator_id"] = user["id"]
+    sb.table("api_address_bounces").insert(d).execute()
+
+    upd = {"bloqueada": True, "entregado": False}
+    if body.reemplazo:
+        upd["reemplazo"] = body.reemplazo
+    sb.table("api_furnisher_addresses").update(upd).eq("clave", body.clave).execute()
+    _direcciones(force=True)
+    return {"ok": True, "clave": body.clave, "bloqueada": True,
+            "reemplazo": body.reemplazo}
+
+
+@app.get("/address-bounces")
+async def list_bounces(user=Depends(get_current_user)):
+    _requiere_lectura_historico(user, "Certified mail")
+    res = (sb.table("api_address_bounces").select("*")
+           .order("created_at", desc=True).limit(200).execute())
+    return res.data or []
