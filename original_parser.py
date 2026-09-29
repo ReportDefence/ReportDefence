@@ -3318,6 +3318,20 @@ def _same_furnisher_identity(a: str, b: str) -> bool:
     MANAGEMENT" contra "MIDLAND FUNDING", que si son entidades distintas y
     son justo el caso que hay que detectar.
     """
+    # PASO 0 (PARCHE 29/09/2026) - el registro decide cuando puede.
+    # Esta funcion alimenta detect_cross_bureau_furnisher_identity_shift, que
+    # ACUSA al buro de romper la cadena de titulo. Una acusacion falsa le
+    # regala al buro el argumento de disputa frivola (1681i(a)(3)) y se lleva
+    # por delante las violaciones legitimas de la misma carta. Por eso aqui,
+    # cuando el registro no resuelve, se calla en vez de afirmar.
+    ca = clave_canonica_furnisher(_strip_original_creditor(a))
+    cb = clave_canonica_furnisher(_strip_original_creditor(b))
+    if ca and cb:
+        return ca == cb          # ambos resueltos: la clave es la verdad
+    if ca or cb:
+        return True              # solo uno resuelto: no se puede afirmar que
+                                 # son distintos, asi que no se acusa
+
     ta = _furnisher_identity_tokens(_strip_original_creditor(a))
     tb = _furnisher_identity_tokens(_strip_original_creditor(b))
     if not ta or not tb:
@@ -12769,6 +12783,15 @@ def _normalize_collector_name(name: str) -> str:
     of the same collector are treated as one entity for deduplication.
     e.g. NCA == NATIONAL CREDIT ADJUST, CREDENCE RM == CREDENCE RESOURCE MANA
     """
+    # PASO 0 (PARCHE 29/09/2026) - si el registro resuelve el nombre a una
+    # clave canonica, esa clave ES la identidad. Manda sobre el dict de abajo,
+    # que se mantiene a mano y siempre va a ir por detras de lo que inventan
+    # los buros. El valor devuelto solo se usa como llave de agrupacion; el
+    # nombre que se imprime sale de `display`, intacto.
+    _ck = clave_canonica_furnisher(name)
+    if _ck:
+        return "REG:" + _ck
+
     n = name.upper().strip()
     # Remove original creditor suffix for normalization key only
     if "(ORIGINAL CREDITOR:" in n:
@@ -13111,6 +13134,40 @@ def _candidatos_registro(furnisher_name: str) -> list:
         salida.append((p, clave, e))
     salida.sort(key=lambda x: -x[0])
     return salida
+
+
+def clave_canonica_furnisher(furnisher_name: str) -> str | None:
+    """Clave canonica de la ENTIDAD segun el registro, o None si no resuelve.
+
+    PARCHE 29/09/2026 - IDENTIDAD POR CLAVE, NO POR NOMBRE IMPRESO.
+
+    El sistema tiene dos capas que estaban mezcladas:
+
+      FIDELIDAD AL REPORTE  - el nombre se IMPRIME textual, sin normalizar,
+                              porque e-OSCAR hace match exacto de string.
+      IDENTIDAD DE CUENTA   - lo que se AGRUPA y se deduplica.
+
+    El motor venia comparando los nombres impresos para decidir identidad, y
+    por eso heredaba la inconsistencia de los buros: Equifax escribe
+    'MIDLANDCRE', TransUnion escribe 'MIDLAND CRED', y salian dos cartas
+    certificadas al mismo cobrador por la misma cuenta.
+
+    Antes de esto habia TRES listas de alias separadas, mantenidas a mano y
+    desincronizadas entre si: el dict de _normalize_collector_name (llave de
+    deduplicacion), el dict `known` de _collector_letter_address (direccion), y
+    alias_en_reportes del registro. Midland estaba en dos de las tres.
+
+    Ahora el registro es la fuente unica. Cuando un buro invente otra
+    abreviatura se agrega el alias desde la pantalla de Furnisher Addresses,
+    sin tocar codigo y sin desplegar.
+
+    Devuelve None cuando el nombre no resuelve (entidad que no esta en el
+    registro, o entrada incompleta que _candidatos_registro descarta). En ese
+    caso quien llama se queda con su logica de siempre.
+    """
+    for _p, _clave, _e in _candidatos_registro(furnisher_name):
+        return _clave
+    return None
 
 
 def direccion_bloqueada(furnisher_name: str) -> dict | None:
