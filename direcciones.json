@@ -1,7 +1,7 @@
 {
   "_meta": {
     "descripcion": "Registro canonico de direcciones de destinatarios para dispatch.",
-    "actualizado": "2026-09-29",
+    "actualizado": "2026-10-01",
     "regla_origen": "El campo 'origen' dice DE DONDE salio la direccion, y no todas valen igual. 'sitio_oficial' = publicada por la propia empresa para disputas de buro; es la mas fuerte, cumple 12 CFR 1022.43(c)(2) y es la que la empresa atiende. 'correspondencia_recibida' = llego carta desde esa direccion. 'reporte_credito' = bloque Contact del reporte; es valida bajo 1022.43(c)(1) PERO NO garantiza entrega: los buros guardan ahi direcciones de enrutamiento interno, a veces cerradas o sin buzon atendido. Una direccion de reporte es CANDIDATA, no verificada.",
     "regla_entrega": "'entregado' es distinto de 'origen'. true solo si consta que llego. false si USPS la devolvio. null si nunca se ha despachado. CASS / 'Good Addresses' de Postalocity NO prueba entrega: valida que la direccion exista y este bien escrita. BOX CLOSED, NOT DELIVERABLE AS ADDRESSED y ATTEMPTED-NOT KNOWN pasan el filtro CASS y aun asi rebotan.",
     "regla_bloqueo": "Si 'bloqueada' es true, el motor NO debe imprimir esa direccion. Si hay 'reemplazo', usa esa entrada. Si no hay reemplazo, la carta sale con un marcador visible de NO DESPACHAR para que no se gaste un certificado.",
@@ -130,14 +130,14 @@
     },
     "lvnv_funding_llc": {
       "nombre": "LVNV Funding LLC",
-      "direccion1": "P.O. Box 10587",
+      "direccion1": "c/o Resurgent Capital Services LP, Compliance Dept MS 250",
       "ciudad": "Greenville",
       "estado": "SC",
       "zip": "29603",
-      "verificado": null,
-      "fuente": "Migrada de la tabla interna del motor. Sin fuente registrada.",
+      "verificado": "2026-09-29",
+      "fuente": "[DIRECTA] lvnvfunding.com/lvnv/ccpa. Comprobado 2026-09-29.",
       "INCOMPLETA": "Sin calle ni ZIP. El motor la IGNORA por incompleta: imprimir 'Ciudad, Estado' sin calle es un sobre que rebota. Completar desde el reporte o el sitio oficial y quitar este campo.",
-      "origen": "flujo_interno",
+      "origen": "sitio_oficial",
       "uso": "disputa_buro",
       "entregado": null,
       "devoluciones": [],
@@ -149,8 +149,9 @@
         "LVNV FUNDING LLC",
         "LVNVFUNDG"
       ],
-      "nota": "Entrada incompleta en el registro, PERO las cartas NO se ven afectadas: el motor la ignora por incompleta y cae a su tabla interna, que tiene 'LVNV Funding LLC, P.O. Box 10587, Greenville SC 29603'. Esa direccion no tiene origen anotado. Pendiente: verificar cual es la buena. LVNV remite todo a Resurgent Capital Services y las cartas viejas usaban 'c/o Resurgent Capital Services, PO Box 1269, Greenville SC 29602'. NO completar esta entrada a ojo: si se rellena con una sin verificar, deja de caer al respaldo y empieza a usarse.",
-      "PENDIENTE": "Verificar contra fuente oficial. Alterna sin verificar: Resurgent Capital Services, PO Box 1269, Greenville SC 29602."
+      "nota": "Usabamos PO Box 10587: digito transpuesto.",
+      "direccion2": "PO Box 10497",
+      "direccion3": null
     },
     "credit_control_llc": {
       "nombre": "Credit Control, LLC",
@@ -675,47 +676,47 @@
       "nota": "RECHAZA la candidata PO Box 64378 Saint Paul MN 55164 de las cartas viejas: no es la direccion de correspondencia que publican."
     },
     "aldous_associates": {
-      "nombre": "Aldous & Associates",
-      "direccion1": "6322 S 3000 E Suite 200",
+      "nombre": "Aldous & Associates, PLLC",
+      "direccion1": "P.O. Box 171374",
       "direccion2": null,
       "direccion3": null,
-      "ciudad": "Salt Lake City",
+      "ciudad": "Holladay",
       "estado": "UT",
-      "zip": "84121",
+      "zip": "84117-1374",
       "alias_en_reportes": [
         "ALDOUS",
         "ALDOUS & ASSOCIATES"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[INVESTIGACION] aldouslegal.com/contact-us.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
       "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "nota": "Solo apartado: no acepta FedEx ni UPS, solo USPS Certified."
     },
     "cavalry_portfolio_services_llc": {
       "nombre": "Cavalry Portfolio Services LLC",
-      "direccion1": "P.O. Box 27288",
-      "direccion2": null,
+      "direccion1": "Attn: Customer Care",
+      "direccion2": "1 American Lane, Suite 220",
       "direccion3": null,
-      "ciudad": "Tempe",
-      "estado": "AZ",
-      "zip": "85285",
+      "ciudad": "Greenwich",
+      "estado": "CT",
+      "zip": "06831-2200",
       "alias_en_reportes": [
         "CAVALRY PORT",
         "CAVALRY PORTFOLIO SERVICES LLC",
         "CAVALRY SPV"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[INVESTIGACION] cavalryportfolioservices.com + testimonios ante las legislaturas de MD y OR.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
       "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "nota": "Quien reporta al buro suele ser Cavalry SPV I, LLC."
     },
     "celtic_bank_corporation": {
       "nombre": "Celtic Bank Corporation",
@@ -741,25 +742,24 @@
     },
     "credence_resource_management": {
       "nombre": "Credence Resource Management",
-      "direccion1": "4222 Trinity Mills Suite 260",
+      "direccion1": "PO Box 2300",
       "direccion2": null,
       "direccion3": null,
-      "ciudad": "Dallas",
-      "estado": "TX",
-      "zip": "75287",
+      "ciudad": "Southgate",
+      "estado": "MI",
+      "zip": "48195-4300",
       "alias_en_reportes": [
         "CREDENCE RESOURCE MANA",
         "CREDENCE RESOURCE MANAGEMENT",
         "CREDENCE RM"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[INVESTIGACION] credencerm.com/contact-us.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
-      "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "devoluciones": []
     },
     "credit_corp_solutions_inc": {
       "nombre": "Credit Corp Solutions Inc",
@@ -786,8 +786,8 @@
     },
     "first_credit_finance": {
       "nombre": "First Credit Finance",
-      "direccion1": "16005 Sherman Way Suite 20",
-      "direccion2": null,
+      "direccion1": "Operations",
+      "direccion2": "16005 Sherman Way, Ste. 205",
       "direccion3": null,
       "ciudad": "Van Nuys",
       "estado": "CA",
@@ -796,45 +796,43 @@
         "FIRST CREDIT FINANCE"
       ],
       "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "fuente": "[INVESTIGACION] gofcf.com/Privacy. CONFIANZA MEDIA - una sola pagina, sin fecha.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
-      "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "devoluciones": []
     },
     "jefferson_capital_systems_llc": {
       "nombre": "Jefferson Capital Systems LLC",
-      "direccion1": "P.O. Box 7999",
+      "direccion1": "200 14th Ave E",
       "direccion2": null,
       "direccion3": null,
-      "ciudad": "Saint Cloud",
+      "ciudad": "Sartell",
       "estado": "MN",
-      "zip": "56302",
+      "zip": "56377",
       "alias_en_reportes": [
         "JEFFCAPSYS",
         "JEFFERSNCP",
         "JEFFERSON",
         "JEFFERSON CAPITAL SYSTEMS LLC"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[INVESTIGACION] jcap.com/contact-us.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
-      "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "devoluciones": []
     },
     "midland_credit_management": {
       "nombre": "Midland Credit Management",
-      "direccion1": "P.O. Box 2011",
-      "direccion2": null,
+      "direccion1": "Attention: Chief Compliance Officer",
+      "direccion2": "P.O. Box 939069",
       "direccion3": null,
-      "ciudad": "Warren",
-      "estado": "MI",
-      "zip": "48090",
+      "ciudad": "San Diego",
+      "estado": "CA",
+      "zip": "92193",
       "alias_en_reportes": [
         "MIDLAND",
         "MIDLAND CRED",
@@ -842,18 +840,18 @@
         "MIDLAND CREDIT MANAGEMENT",
         "MIDLANDCRE"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[DIRECTA] midlandcredit.com/contact. Comprobado 2026-09-29.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
       "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "nota": "PO Box 2011 Warren MI no existe en ninguna pagina suya."
     },
     "national_credit_adjusters_llc": {
       "nombre": "National Credit Adjusters LLC",
-      "direccion1": "P.O. Box 550",
+      "direccion1": "PO Box 3023",
       "direccion2": null,
       "direccion3": null,
       "ciudad": "Hutchinson",
@@ -864,23 +862,22 @@
         "NATIONAL CREDIT ADJUSTERS LLC",
         "NCA"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[INVESTIGACION] ncaks.com/contact-us, su FAQ y su portal de pagos.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
-      "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "devoluciones": []
     },
     "portfolio_recovery_associates_llc": {
       "nombre": "Portfolio Recovery Associates LLC",
-      "direccion1": "P.O. Box 41067",
+      "direccion1": "120 Corporate Boulevard, Suite 100",
       "direccion2": null,
       "direccion3": null,
       "ciudad": "Norfolk",
       "estado": "VA",
-      "zip": "23541",
+      "zip": "23502",
       "alias_en_reportes": [
         "PORTFOLIO",
         "PORTFOLIO RC",
@@ -888,14 +885,13 @@
         "PORTFOLIO RECOVERY A",
         "PORTFOLIO RECOVERY ASSOCIATES LLC"
       ],
-      "origen": "flujo_interno",
-      "fuente": "Migrada de la tabla interna del motor (report_parser._collector_letter_address). Sin fuente registrada.",
+      "origen": "sitio_oficial",
+      "fuente": "[CORROBORADA] sitio de PRA + 10-K ante la SEC + impresa en el reporte de un cliente.",
       "base_legal": "12 CFR 1022.43(c)(3)",
-      "verificado": null,
+      "verificado": "2026-09-29",
       "entregado": null,
       "bloqueada": false,
-      "devoluciones": [],
-      "PENDIENTE": "Verificar contra el sitio oficial de la empresa. Ya se despacharon cartas con esta direccion."
+      "devoluciones": []
     },
     "discover_disputa_buro": {
       "nombre": "Discover",
