@@ -1086,6 +1086,12 @@ async def upload_report(
         "attacks": attacks,
         "inquiries": result.get("inquiries", []),
         "inquiry_attacks": result.get("inquiry_attacks", []),
+        # PARCHE 02/10/2026 - seccion "Creditor Contacts" del reporte de ESTE
+        # cliente: la direccion que cada furnisher le dio al buro, que es la
+        # primera que nombra 12 CFR 1022.43(c)(1). Se guarda con el job para
+        # poder reinyectarla al regenerar cartas en otra peticion. No se
+        # comparte entre clientes: cada reporte trae su propia lista.
+        "creditor_contacts": result.get("creditor_contacts", []),
         "response_history": [],
     }
     # NOTA: base_tradelines NO se guarda. La tabla api_jobs no tiene esa
@@ -1874,6 +1880,16 @@ async def generate_furnisher_letters(body: GenerateFurnisherLettersBody, user=De
 
     from original_parser import build_furnisher_letter_engine, validate_eoscar_compliance
     _aplicar_direcciones_al_motor()   # PARCHE 28/09/2026
+
+    # PARCHE 02/10/2026 - las direcciones del reporte de ESTE cliente.
+    # Sin esto, al regenerar cartas en una peticion distinta de la del upload
+    # el motor pierde los contactos y cae al registro: no rompe nada, pero se
+    # pierde la direccion (c)(1), que es la mas defendible.
+    try:
+        from original_parser import set_contactos_reporte
+        set_contactos_reporte(job.get("creditor_contacts") or [])
+    except ImportError:
+        pass   # motor sin el setter: sigue funcionando como antes
 
     # Reusar el letter_input_engine guardado; si viniera vacío, reconstruir desde negativos
     letter_input = job.get("letter_input_engine", {}) or {}
