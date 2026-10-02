@@ -12651,6 +12651,14 @@ def build_report(pdf_path: str, client_state: str = "") -> dict[str, Any]:
     medica. Sin el, esa rama entera queda muda: no es que falle, es que
     nunca se evalua.
     """
+    # PARCHE 01/10/2026 - los contactos del reporte, lo PRIMERO.
+    # Se leen aqui y se inyectan antes de que se generen las cartas mas abajo,
+    # para que ya salgan con la direccion que el furnisher le dio al buro
+    # (12 CFR 1022.43(c)(1)). Tambien viajan en el return para que la API los
+    # guarde y los pueda reinyectar al regenerar cartas en otra peticion.
+    _contactos_cc = parse_creditor_contacts(pdf_path)
+    set_contactos_reporte(_contactos_cc)
+
     raw_text = extract_text_from_pdf(pdf_path)
     _src = detect_source(raw_text[:3000])
     # Formato epic-pro de MyFreeScore (tri-buró con secciones, ES/EN). Se detecta
@@ -12756,6 +12764,7 @@ def build_report(pdf_path: str, client_state: str = "") -> dict[str, Any]:
         "letter_input_engine": letter_input_engine,
         "dispute_letters": dispute_letters,
         "furnisher_letters": furnisher_letters,
+        "creditor_contacts": _contactos_cc,
     }
 
 _COLLECTOR_ATTACK_TYPES = {
@@ -12883,7 +12892,23 @@ def _collector_letter_address(furnisher_name: str) -> str:
         "I C SYSTEM":      "I.C. System, Inc.\n444 Highway 96 East\nSt. Paul, MN 55127-2557",
         "IC SYSTEM":       "I.C. System, Inc.\n444 Highway 96 East\nSt. Paul, MN 55127-2557",
     }
-    # PASO 0 - registro canonico (direcciones.json). Manda sobre la tabla de
+    # PASO 0 (PARCHE 01/10/2026) - LA DIRECCION DEL REPORTE MANDA.
+    #
+    # Es la que el propio furnisher le dio al buro, 12 CFR 1022.43(c)(1), la
+    # primera de la lista del reglamento. No se puede alegar que se escribio
+    # al lugar equivocado. Y es por cliente y del dia del reporte, no de una
+    # tabla que alguien escribio hace meses.
+    #
+    # El unico filtro que la puede tumbar es el registro de devoluciones: el
+    # reporte sigue imprimiendo buzones cerrados.
+    _cc = contacto_del_reporte(furnisher_name)
+    if _cc:
+        _cc_dir = f"{_cc['direccion1']} {_cc['zip']}"
+        if _norm_furnisher(_cc_dir) not in _cc_devueltas():
+            return (f"{_cc['nombre']}\n{_cc['direccion1']}\n"
+                    f"{_cc['ciudad']}, {_cc['estado']} {_cc['zip']}")
+
+    # PASO 1 - registro canonico (direcciones.json). Manda sobre la tabla de
     # abajo porque es el unico sitio que sabe si una direccion ya fue devuelta.
     for _p, _clave, _e in _candidatos_registro(furnisher_name):
         if not _e.get("bloqueada"):
@@ -13185,6 +13210,274 @@ def direccion_bloqueada(furnisher_name: str) -> dict | None:
                 "direccion_devuelta": dev.get("direccion_usada"),
                 "pendiente": e.get("PENDIENTE")}
     return None
+
+
+
+
+# ============================================================================
+#  CREDITOR CONTACTS DEL REPORTE  -  12 CFR 1022.43(c)(1)
+#
+#  La seccion "Creditor Contacts" del reporte trae la direccion que el PROPIO
+#  FURNISHER le dio al buro. El reglamento la nombra primera en la lista de
+#  direcciones validas para una disputa directa, asi que el furnisher no puede
+#  alegar que se le escribio al lugar equivocado: la puso el.
+#
+#  Hasta 2026-10-01 el motor ignoraba esta seccion por completo: la cadena
+#  "creditor contacts" aparecia una sola vez en todo el archivo, y solo como
+#  marca para saber donde dejar de leer las inquiries.
+#
+#  FORMATO DE SALIDA, regla del operador: TRES LINEAS y nada mas --
+#      LVNV FUNDING LLC
+#      PO BOX 1269
+#      GREENVILLE, SC 29602
+#  Fuera "ATTN ...", fuera "C/O ...", fuera telefono. Ese texto es ruteo
+#  interno del furnisher; en el sobre solo estorba, porque la linea de entrega
+#  es la que lee USPS.
+# ============================================================================
+
+_CC_POBOX = re.compile(r"(P\.?\s?O\.?\s*BOX|POST\s+OFFICE\s+BOX|PO\s?BOX)\s*\#?\s*\d", re.I)
+# [A-Za-z0-9] y no solo letras: hay calles con nombre numerico ("200 14th Ave E").
+_CC_CALLE = re.compile(r"\d+\s+[A-Za-z0-9]")
+_CC_CIUDAD = re.compile(r"^(.+?),\s*([A-Z]{2})\.?\s+(\d{5}(?:-\d{4})?)$")
+_CC_TEL = re.compile(r"^(\(\d{3}\)\s*\d{3}-\d{4}|-|BYMAILONLY)$", re.I)
+_CC_DESIG = {"STE", "SUITE", "APT", "UNIT", "FL", "FLOOR", "BLDG", "BUILDING",
+             "RM", "ROOM", "DEPT", "#"}
+
+
+def linea_de_entrega(texto: str) -> str:
+    """Solo la parte despachable de una direccion, o '' si no hay.
+
+    Se busca DONDE EMPIEZA la direccion y se devuelve de ahi al final. Cortar
+    antes perdia el numero de suite -- "1 American Lane, Suite 220" quedaba en
+    "1 American Lane" -- y una suite que falta es un sobre que llega al
+    edificio pero no al piso.
+    """
+    t = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not t:
+        return ""
+    m = _CC_POBOX.search(t) or _CC_CALLE.search(t)
+    return t[m.start():].strip(" ,-") if m else ""
+
+
+def _cc_cortada(linea: str) -> bool:
+    """True si el PDF corto la direccion por el ancho de columna.
+
+    Se detecta por un designador de unidad al final SIN su numero:
+        "320 E BIG BEAVER RD STE"         -> cortada
+        "30 ISABELLA STREET - 4TH FLOOR"  -> completa, el 4TH es la unidad
+    """
+    t = str(linea or "").strip().upper().split()
+    if not t or t[-1] not in _CC_DESIG:
+        return False
+    if len(t) < 2:
+        return True
+    prev = t[-2]
+    return not (prev.isdigit() or re.match(r"^\d+(ST|ND|RD|TH)$", prev))
+
+
+def _cc_paginas(pdf):
+    """[(pagina, x_dir, x_tel, y_desde)] de la seccion de contactos.
+
+    Tres trampas, las tres costaron sangre:
+
+    1. "Creditor Name" tambien encabeza la tabla de Inquiries, que tiene otras
+       columnas (Type of Business / Date / Bureau). Por eso el ancla NO es ese
+       texto: es un renglon que traiga Address Y Phone a la vez, que solo
+       existe en esta seccion.
+
+    2. El TITULO "Creditor Contacts" puede quedar en una pagina y la cabecera
+       de columnas en la SIGUIENTE (pasa en reportes largos, con la seccion
+       empezando justo en el corte de pagina). Anclar en el titulo perdia la
+       tabla entera.
+
+    3. La seccion se desborda a las paginas siguientes SIN repetir la
+       cabecera. Esas hay que procesarlas con los x de la primera.
+    """
+    inicio = None
+    for i, pg in enumerate(pdf.pages):
+        filas = {}
+        for w in pg.extract_words():
+            filas.setdefault(round(w["top"]), {})[w["text"]] = w
+        for _y, celdas in filas.items():
+            if "Address" in celdas and "Phone" in celdas:
+                inicio = (i, celdas["Address"], celdas["Phone"])
+                break
+    if inicio is None:
+        return []
+
+    i0, w_dir, w_tel = inicio
+    x_dir, x_tel = w_dir["x0"], w_tel["x0"]
+    salida = [(pdf.pages[i0], x_dir, x_tel, w_dir["top"] + 2)]
+    for pg in pdf.pages[i0 + 1:]:
+        t = pg.extract_text() or ""
+        if "Account History" in t or "Creditor Contacts" in t:
+            break
+        salida.append((pg, x_dir, x_tel, 0))
+    return salida
+
+
+def parse_creditor_contacts(pdf_path: str) -> list[dict[str, Any]]:
+    """Lee la seccion por COORDENADAS de columna.
+
+    Leerla como texto plano falla: cuando la direccion ocupa dos lineas, la
+    segunda se pega dentro de la linea del nombre --
+
+        ATTN CREDIT BUREAU DISPUTES 30 ISABELLA
+        AFFIRM INC STREET - 4TH FLOOR (855) 423-3729
+        PITTSBURGH, PA 15212
+
+    -- y se perdia la entrada completa. Justo las que traen "ATTN CREDIT
+    BUREAU DISPUTES", que son las direcciones de disputa designadas por el
+    furnisher. Con coordenadas cada palabra sabe en que columna cae.
+    """
+    filas: list[dict[str, Any]] = []
+    try:
+        import pdfplumber
+    except Exception:
+        return filas
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for pg, x_dir, x_tel, y_cab in _cc_paginas(pdf):
+                palabras = pg.extract_words(use_text_flow=False,
+                                            keep_blank_chars=False)
+                renglones: dict[int, list] = {}
+                for w in palabras:
+                    if w["top"] <= y_cab:
+                        continue
+                    renglones.setdefault(round(w["top"]), []).append(w)
+
+                # OJO AL ORDEN: la primera linea de la direccion se imprime
+                # ARRIBA del nombre y la de ciudad DEBAJO, asi que no se puede
+                # abrir entrada al ver el nombre: hay que acumular y CERRAR
+                # cuando aparece la linea de ciudad/estado/zip.
+                acc = {"nombre": "", "dirs": [], "telefono": ""}
+                for y in sorted(renglones):
+                    ws = sorted(renglones[y], key=lambda w: w["x0"])
+                    nom = " ".join(w["text"] for w in ws if w["x0"] < x_dir - 5)
+                    dirc = " ".join(w["text"] for w in ws
+                                    if x_dir - 5 <= w["x0"] < x_tel - 5)
+                    tel = " ".join(w["text"] for w in ws if w["x0"] >= x_tel - 5)
+                    # En las paginas de continuacion no hay cabecera, asi que
+                    # entra tambien el encabezado de pagina (fecha, URL).
+                    if re.match(r"^\d{1,2}/\d{1,2}/\d{2}", nom) or "http" in nom.lower():
+                        nom = ""
+                    if nom and not acc["nombre"]:
+                        acc["nombre"] = nom
+                    if tel and not acc["telefono"]:
+                        acc["telefono"] = tel
+                    if not dirc:
+                        continue
+                    m = _CC_CIUDAD.match(dirc)
+                    if not m:
+                        acc["dirs"].append(dirc)
+                        continue
+                    if acc["nombre"] and acc["dirs"]:
+                        ent = linea_de_entrega(" ".join(acc["dirs"]))
+                        if ent:
+                            t = acc["telefono"].strip()
+                            filas.append({
+                                "nombre": acc["nombre"].strip(),
+                                "direccion1": ent,
+                                "ciudad": m.group(1).strip(),
+                                "estado": m.group(2),
+                                "zip": m.group(3),
+                                "telefono": "" if (t == "-" or not _CC_TEL.match(t)) else t,
+                                "incompleta": _cc_cortada(ent),
+                            })
+                    acc = {"nombre": "", "dirs": [], "telefono": ""}
+    except Exception:
+        return filas
+    return filas
+
+
+# Contactos del reporte EN CURSO. api.py los guarda en el job al subir el
+# reporte y los reinyecta antes de generar cartas, igual que el registro de
+# direcciones. Pasar None o [] vuelve al comportamiento anterior.
+_CONTACTOS_REPORTE: list[dict[str, Any]] | None = None
+
+
+def set_contactos_reporte(contactos) -> None:
+    global _CONTACTOS_REPORTE
+    _CONTACTOS_REPORTE = list(contactos) if contactos else None
+
+
+def _cc_prefijo_comun(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _cc_devueltas() -> set:
+    """Direcciones que USPS ya devolvio, normalizadas.
+
+    El reporte sigue listando direcciones muertas: el PO Box 85015 de Capital
+    One que volvio con BOX CLOSED salio exactamente de esta seccion. Por eso
+    la direccion del reporte, aunque sea la mas fuerte legalmente, pasa igual
+    por el registro de devoluciones antes de imprimirse.
+    """
+    fuera = set()
+    for e in (_registro_direcciones() or {}).values():
+        if not isinstance(e, dict):
+            continue
+        for d in (e.get("devoluciones") or []):
+            u = _norm_furnisher(d.get("direccion_usada"))
+            if u:
+                fuera.add(u)
+        if e.get("bloqueada"):
+            u = _norm_furnisher(" ".join(str(e.get(k) or "") for k in
+                                         ("direccion1", "direccion2", "direccion3", "zip")))
+            if u:
+                fuera.add(u)
+    return fuera
+
+
+def contacto_del_reporte(furnisher_name: str) -> dict[str, Any] | None:
+    """Direccion de este furnisher segun el reporte del cliente, o None.
+
+    El nombre del contacto NO es el mismo que el del tradeline: el buro corta
+    a lo bruto y a mitad de palabra ("CREDITONEBNK" en el tradeline contra
+    "CREDIT ONE BANK" en los contactos). Por eso el emparejado va en tres
+    pasos, de mas estricto a menos, y NUNCA adivina:
+
+        1. igual, normalizado
+        2. uno es prefijo del otro en frontera de palabra
+        3. prefijo comun largo: >= 8 caracteres y >= 60% del nombre mas corto
+
+    El minimo de 8 es lo que impide que "CITI" se tragues a "CITIZENS BANK";
+    y el 60% es lo que impide que "MIDLAND CREDIT MANAGEMENT" empareje con
+    "MIDLAND FUNDING", que son empresas distintas.
+    """
+    if not _CONTACTOS_REPORTE:
+        return None
+    n = _norm_furnisher(_strip_original_creditor(furnisher_name))
+    if not n:
+        return None
+    fr_n = _fronteras_norm(_strip_original_creditor(furnisher_name))
+
+    mejor, mejor_p = None, 0
+    for e in _CONTACTOS_REPORTE:
+        if e.get("incompleta") or not e.get("direccion1"):
+            continue
+        na = _norm_furnisher(e.get("nombre"))
+        if not na:
+            continue
+        p = 0
+        if na == n:
+            p = 3
+        elif n.startswith(na) and len(na) in fr_n:
+            p = 2
+        elif na.startswith(n) and len(n) in _fronteras_norm(e.get("nombre")):
+            p = 2
+        else:
+            c = _cc_prefijo_comun(n, na)
+            if c >= 8 and c >= 0.6 * min(len(n), len(na)):
+                p = 1
+        if p > mejor_p:
+            mejor, mejor_p = e, p
+    return mejor
 
 
 def _furnisher_account_demand(item: dict[str, Any]) -> str:
